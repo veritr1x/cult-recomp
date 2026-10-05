@@ -173,6 +173,10 @@ tested display/audio settings, preserving explicit overrides. Desktop evidence
 is kept under games/<id>/build/desktop-probe/<platform>/. For the WSL probe, set
 SDL_VIDEODRIVER=x11 and PULSE_LATENCY_MSEC=100 and add --audio-ahead 8192.
 These are experimental builds.
+The assembled Play.cmd and Play.sh launchers also pass five-second startup
+checks for both games, with device PCM, rendered frames and clean exits. Repeat
+with tools/probe_desktop.py --game all --seconds 5 --player. Launcher evidence
+is kept in the platform's desktop-probe/player/ subdirectory.
 
 Remaining work: investigate Cult II's inventory redraw immediately after loading,
 exercise further interactions/transitions, verify original-save

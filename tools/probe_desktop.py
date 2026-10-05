@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--audio-ahead", type=int)
+    parser.add_argument("--player", action="store_true", help="Test the assembled private launcher")
     args = parser.parse_args()
     if not 0 < args.seconds <= 120:
         parser.error("--seconds must be between 0 and 120")
@@ -29,8 +30,12 @@ def main():
     for game in GAMES if args.game == "all" else [args.game]:
         name = "CultRecomp" if game == "cult" else "Cult2Recomp"
         folder = ROOT / "games" / game / "build/package" / name
+        if args.player:
+            folder = ROOT / "build/player" / platform.system().lower() / name
         binary = folder / (name + ".exe" if os.name == "nt" else name)
         evidence_dir = ROOT / "games" / game / "build/desktop-probe" / platform.system().lower()
+        if args.player:
+            evidence_dir /= "player"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         audio_file = evidence_dir / "audio.wav"
         audio_file.unlink(missing_ok=True)
@@ -45,8 +50,11 @@ def main():
         executable = "Cult.exe" if game == "cult" else "Cult2FC.exe"
         env["RECOMP_EXE"] = str(ROOT / "games" / game / "original/install" / executable)
         timed_out = False
+        launcher = folder / ("Play.cmd" if os.name == "nt" else "Play.sh")
+        command = ([str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe"), "/d", "/c", str(launcher)]
+                   if os.name == "nt" else [str(launcher)]) if args.player else [str(binary)]
         try:
-            result = subprocess.run([str(binary)], cwd=folder, env=env,
+            result = subprocess.run(command, cwd=folder, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     timeout=args.seconds + 50)
             output, code = result.stdout, result.returncode
@@ -57,6 +65,7 @@ def main():
         evidence = read_evidence(log)
         record = {"platform": f"{platform.system()} {platform.machine()}",
                   "returncode": code, "timed_out": timed_out, "executable": str(binary),
+                  "launcher": str(launcher) if args.player else None,
                   "seconds_requested": args.seconds, **evidence,
                   "physical_input_verified": False, "audible_output_verified": False,
                   "audio_device_running": "[host] audio device running:" in log,
