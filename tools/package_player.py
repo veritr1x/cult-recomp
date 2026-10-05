@@ -65,6 +65,8 @@ def main():
             f"{config['name']} - experimental native {args.platform} build\n\n"
             "Private local folder assembled from your supplied archive.\n"
             "Launch Play.cmd on Windows or ./Play.sh on Linux.\n"
+            "Select a language and Play; use arrows and Enter in the menu.\n"
+            "In the game, arrows move and Space advances conversations.\n"
             "Keep the entire folder together; saves and settings go under profile/.\n"
             "Original code and artwork retain their original ownership.\n\n"
             "Bounded opening-scene movement and save/load paths are tested.\n"

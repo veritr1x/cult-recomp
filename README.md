@@ -180,6 +180,26 @@ web requires Emscripten and the kit's WebGPU/browser requirements.
 Other CPU architectures need their own native builds and gameplay verification.
 No macOS, iOS, Android or web binaries have been produced here.
 
+The browser builds are compiling with Emscripten 6.0.11 on Linux x86_64.
+The local emsdk checkout is pinned to
+`96c657fc60920d2a6a82318aa50e0abf82749604`, whose SDK release revision is
+`f6264d4a4dd9ba24a9f0a5702835a44d1463de13`. It stays under ignored
+`build/toolchains/emsdk/`. To repeat a browser build after installing and
+activating that SDK version, use Bash:
+
+```sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+source build/toolchains/emsdk/emsdk_env.sh
+export PATH="$PWD/build/linux-venv/bin:$PATH"
+build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult" --target web --jobs 3
+build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult2" --target web --jobs 3
+```
+
+The WebGPU/pthreads configuration has succeeded for both; browser execution
+remains unverified. The guest arena extends to 0x74200000, so its browser memory
+requirements need actual device testing. The kit's player requires a secure,
+cross-origin isolated page and a WebGPU-capable browser.
+
 ## Metadata references
 
 The VB project/object/event layout was checked against the primary
