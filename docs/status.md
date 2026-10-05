@@ -1,4 +1,4 @@
-# Status: 5 October 2026
+# Status: 6 October 2026
 
 The requested playable ports are **not complete**. The game binaries were
 statically translated with RecompKit, and both Windows x64 diagnostic
@@ -33,8 +33,8 @@ binding imports and initializes static dependencies before the executable.
 The real Cult image passes 433 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
 256 focused translator/profile/build/private-input checks in the latest run.
-The latest Cult VB5 pass emits 23,150 discovered routines and 25,172 dispatch
-entries; Cult II regeneration is ongoing. PictureClip emits 580 routines.
+Both latest VB5 passes emit 23,154 discovered routines and 25,175 dispatch
+entries. PictureClip emits 580 routines.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
 has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
@@ -64,9 +64,16 @@ Both latest native probes carry the complete interface table and finish 150
 presented frames with no called missing imports or unknown transfers. Captures
 show language-selection forms, titles, flags, character artwork and the Play
 label. Anisotropic GDI mapping now renders the supplied OLE pictures.
-Dynamic sound exports now bind and report unavailable playback rather than
-throwing a missing-entry-point exception.
-MIDI and WAV assets use `.dat` filenames; actual media playback remains unfinished.
+File-backed and in-memory PCM WAV effects now use the shared host audio service,
+including synchronous waits, asynchronous playback, loops and stop/NOSTOP.
+Both diagnostic probes submit three effects with nonzero samples. The smoke
+host does not open an audio device: audible output remains unverified.
+MIDI assets use `.dat` filenames; MCI music playback remains unfinished.
+The audio/graphics shim suite passes 141,181 checks with zero failures and one
+explicit skip: the cursor-learning fixture requires two configured game globals
+that these profiles do not supply. PCM sound tests exercise stack arity, copied
+samples, file overlays, stop/NOSTOP, loops, synchronous completion and rejection
+of malformed or unsupported audio.
 Offscreen frames have been inspected. Scripted desktop coordinates now route
 through the same native input bridge as host mouse events. English-selection
 and Play clicks advance both games into intro processing. Legacy file/path
@@ -80,10 +87,11 @@ window/shutdown callbacks and Cult II exception cleanup are now translated.
 System ListBox and Edit controls initialize with owned text/items, selection,
 typing limits, read-only state, undo and parent notifications. They are partial
 Win32 implementations: clipboard, scrolling and complex selection remain open.
-The last probes fail with VB error 321 (Invalid file format) after an uncovered
-form-loader property callback (`0x74056080`) and unsupported Edit margin message.
-The margin message is implemented and tested; the property callback is audited
-and translated. Updated executable checks are ongoing. The last script does
+The form-loader property callback (`0x74056080`) is now translated and Edit
+margin messages are implemented. The latest probes expose a VB timer callback
+(`0x74033f00`) during startup, with errors 128 in Cult and 104 in Cult II.
+That callback is audited and seeded; regeneration and executable checks are
+ongoing. The last script does
 not complete; gameplay remains unverified. Input evidence is recorded
 under each profile's private `build/input-probe/` directory.
 The remaining work includes callback coverage, physical input, audio,

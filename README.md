@@ -107,9 +107,9 @@ The smoke host also checks input through the native window-message path:
 Both games render their language screens, including artwork and the Play label,
 and the scripted clicks advance into the intro. Temporary OLE storage is now
 implemented. System ListBox and Edit controls now initialize. The last completed
-input probes report VB error 321 and an uncovered form-loader property callback;
-the callback has been audited and translated, and the updated executables are
-being checked. These are diagnostic builds;
+input probes expose a VB timer callback; it is audited and the updated
+executables are being built. Both probes now submit three WAV effects with
+nonzero audio samples. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
 ## Other targets

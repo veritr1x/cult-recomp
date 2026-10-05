@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..71d97a2 100644
+index 20fdc15..21ce344 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,58 @@
+@@ -2,6 +2,61 @@
  
  ## Unreleased
  
++- Play file-backed and in-memory PCM WAV effects through the shared host audio
++  service, including synchronous waits, asynchronous loops and stop/NOSTOP.
++
 +- Provide system ListBox item storage, selection and parent notifications,
 +  and Edit text, selection, replacement, typing limits, read-only state and undo.
 +
@@ -80,6 +83,363 @@ index bb8776b..60714de 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
+diff --git a/dx/dx.cpp b/dx/dx.cpp
+index 72e0d0a..db76bf7 100644
+--- a/dx/dx.cpp
++++ b/dx/dx.cpp
+@@ -626,6 +626,7 @@ void dx_reset() {
+     qmixer_reset();
+     fmod_reset();
+     soundlib_reset();
++    waveout_shutdown();
+     ddraw_reset();
+     d3d_reset();
+     d3d11_reset();
+diff --git a/dx/tests/dx_tests.cpp b/dx/tests/dx_tests.cpp
+index 7771a52..7d75dfa 100644
+--- a/dx/tests/dx_tests.cpp
++++ b/dx/tests/dx_tests.cpp
+@@ -405,6 +405,7 @@ static uint32_t g_voice_remaining = 0;
+ // Existing tests assume a playing host; sample tests explicitly finish a voice.
+ static std::map<int32_t, bool> g_sample_playing;
+ static bool g_sample_tracking = false;
++static int g_finish_sound_queries = -1;
+ 
+ void host_audio_play(const HostAudioPlay *p) {
+     if (g_sample_tracking)
+@@ -517,6 +518,11 @@ uint32_t host_audio_position(int32_t) {
+     return g_test_audio_pos;
+ }
+ int32_t host_audio_is_playing(int32_t ch) {
++    if (g_finish_sound_queries >= 0) {
++        if (!g_finish_sound_queries)
++            return 0;
++        --g_finish_sound_queries;
++    }
+     if (auto it = g_sample_playing.find(ch); g_sample_tracking && it != g_sample_playing.end())
+         return it->second ? 1 : 0;
+     return 1;
+@@ -535,6 +541,7 @@ void host_input_state(HostInputState *out) {
+ // Test harness
+ // ---------------------------------------------------------------------------
+ 
++static int g_skips = 0;
+ static void check(bool ok, const char *what, const char *file, int line) {
+     ++g_checks;
+     if (!ok) {
+@@ -2733,7 +2740,12 @@ static void test_v4_unlock_takes_a_rect() {
+ // and the cursor draw at 004fd370 is the only code that uses them.
+ static void test_cursor_surface_learned() {
+     rec_reset();
+-    const uint32_t ptrs[] = RECOMP_HOOK_CURSOR_SURFACE_PTRS; // the game's cursor globals
++    const std::vector<uint32_t> ptrs = RECOMP_HOOK_CURSOR_SURFACE_PTRS;
++    if (ptrs.size() < 2 || !ptrs[0] || !ptrs[1]) {
++        printf("[SKIP] cursor learning requires two configured game cursor globals\n");
++        ++g_skips;
++        return;
++    }
+     const uint32_t kPtrA = ptrs[0], kPtrB = ptrs[1];
+     wr32(kPtrA, 0);
+     wr32(kPtrB, 0);
+@@ -12270,6 +12282,78 @@ static void test_media_foundation_session() {
+ 
+ // Driver output pointers, master gain, named MP3, and WAVEHDR completion are
+ // observable API contracts: success without these leaves real games silent.
++static void test_process_wave_sound() {
++    cpu_reset();
++    waveout_shutdown();
++    g_sample_tracking = true;
++    g_plays.clear();
++    auto sound = [](const char *name, std::initializer_list<uint32_t> args) {
++        return call_shim(tramp("WINMM.dll", name), args);
++    };
++    CHECK_EQ(imports_argc(tramp("WINMM.dll", "sndPlaySoundA")), 2u);
++    CHECK_EQ(imports_argc(tramp("WINMM.dll", "PlaySoundW")), 3u);
++    uint32_t wav = build_test_wave();
++    CHECK_EQ(sound("sndPlaySoundA", {wav, 1 | 4}), 1u);
++    CHECK_EQ(g_plays.size(), 1u);
++    if (!g_plays.empty()) {
++        CHECK_EQ(g_plays.back().rate, 22050);
++        CHECK_EQ(g_plays.back().bits, 8);
++        CHECK_EQ(g_plays.back().channels, 1);
++        CHECK_EQ(g_plays.back().pcm.size(), 8u);
++        CHECK_EQ(g_plays.back().pcm.front(), 0x80u);
++    }
++    CHECK_EQ(sound("PlaySoundA", {wav, 0, 1 | 4 | 16}), 0u);
++    CHECK_EQ(g_plays.size(), 1u); // NOSTOP preserves the current process voice.
++    CHECK_EQ(sound("PlaySoundW", {wav, 0, 1 | 4 | 8}), 1u);
++    CHECK_EQ(g_plays.size(), 2u);
++    CHECK_EQ(g_plays.back().loop, 1);
++    CHECK_EQ(sound("PlaySoundA", {wav, 0, 4 | 8}), 0u); // Loop requires ASYNC.
++    CHECK_EQ(g_plays.size(), 2u);
++    size_t stops = g_stops.size();
++    CHECK_EQ(sound("sndPlaySoundW", {0, 0}), 1u);
++    CHECK_EQ(g_stops.size(), stops + 1);
++    CHECK_EQ(sound("PlaySoundA", {0, 0, 0}), 1u);
++    CHECK_EQ(g_stops.size(), stops + 1);
++    // The host drains on the third query; SYNC must wait and retire its voice.
++    g_finish_sound_queries = 2;
++    CHECK_EQ(sound("PlaySoundA", {wav, 0, 4}), 1u);
++    CHECK_EQ(g_finish_sound_queries, 0);
++    CHECK_EQ(g_plays.size(), 3u);
++    CHECK_EQ(g_stops.size(), stops + 2);
++    g_finish_sound_queries = -1;
++    wr32(wav + 40, 0xfffffff0); // Data length must fit the complete RIFF image.
++    CHECK_EQ(sound("sndPlaySoundA", {wav, 1 | 4}), 0u);
++    CHECK_EQ(g_plays.size(), 3u);
++    build_test_wave();
++    wr16(wav + 20, 3); // Floating-point/compressed input needs a decoder.
++    CHECK_EQ(sound("sndPlaySoundA", {wav, 1 | 4}), 0u);
++    CHECK_EQ(g_plays.size(), 3u);
++    build_test_wave();
++    char dir[512];
++    snprintf(dir, sizeof dir, "%s/recomp-process-wave-XXXXXX", os_temp_dir());
++    CHECK_EQ(os_mkdtemp(dir), 0);
++    std::string file = std::string(dir) + "/effect.dat";
++    FILE *out = fopen(file.c_str(), "wb");
++    CHECK(out != nullptr);
++    if (out) {
++        CHECK_EQ(fwrite(g_mem + wav, 1, 52, out), 52u);
++        CHECK_EQ(fclose(out), 0);
++        win32_init(dir);
++        dx_register_shims();
++        gm_put_str(sc(0x300), "EFFECT.DAT", 0x100);
++        CHECK_EQ(sound("sndPlaySoundA", {sc(0x300), 1 | 2}), 1u);
++        CHECK_EQ(g_plays.size(), 4u);
++        CHECK_EQ(g_plays.back().bytes, 8u);
++        CHECK_EQ(sound("sndPlaySoundA", {0, 0}), 1u);
++        gm_put_str(sc(0x300), "missing.dat", 0x100);
++        CHECK_EQ(sound("sndPlaySoundA", {sc(0x300), 1 | 2}), 0u);
++        CHECK_EQ(g_plays.size(), 4u);
++        CHECK_EQ(os_unlink(file.c_str()), 0);
++    }
++    CHECK_EQ(os_rmdir(dir), 0);
++    waveout_shutdown();
++    g_sample_tracking = false;
++}
+ static void test_legacy_audio() {
+     cpu_reset();
+     g_plays.clear();
+@@ -12741,6 +12825,7 @@ int main() {
+         {"Miles arities", test_mss32_arities},
+         {"RIFF WAVE", test_riff_parse},
+         {"Miles samples", test_mss32_sample},
++        {"Process waveform sounds", test_process_wave_sound},
+         {"Legacy audio", test_legacy_audio},
+         {"AVI reader", test_avi_reader},
+         {"Miles streams", test_mss32_stream},
+@@ -12798,11 +12883,15 @@ int main() {
+     };
+     for (auto &t : tests) {
+         int before = g_failures;
++        int skips_before = g_skips;
+         t.fn();
+-        printf("%-26s %s\n", t.name, g_failures == before ? "ok" : "FAILED");
++        printf("%-26s %s\n", t.name,
++               g_failures != before      ? "FAILED"
++               : g_skips != skips_before ? "skipped"
++                                         : "ok");
+     }
+ 
+-    printf("\n%d checks, %d failures\n", g_checks, g_failures);
++    printf("\n%d checks, %d failures, %d skipped\n", g_checks, g_failures, g_skips);
+     if (g_failures == 0)
+         printf("all dx tests passed\n");
+     return g_failures ? 1 : 0;
+diff --git a/dx/waveout.cpp b/dx/waveout.cpp
+index 9246458..e0dd58f 100644
+--- a/dx/waveout.cpp
++++ b/dx/waveout.cpp
+@@ -3,7 +3,11 @@
+ #include "com.h"
+ #include "dx.h"
+ #include "host_api.h"
++#include "riff.h"
+ #include "../runtime/imports.h"
++#include "../runtime/memory.h"
++#include "../runtime/win32.h"
++#include "../platform/os.h"
+ #include <algorithm>
+ #include <cmath>
+ #include <deque>
+@@ -47,6 +51,148 @@ struct Wave {
+ };
+ std::map<uint32_t, std::unique_ptr<Wave>> waves;
+ uint32_t next_wave = 0x57415601;
++// sndPlaySound/PlaySound share one process voice. The host copies PCM during
++// play; no guest pointer or heap staging buffer survives a scheduler yield.
++int sound_channel = -1;
++uint64_t sound_generation = 0;
++void stop_sound() {
++    ++sound_generation;
++    if (sound_channel >= 0) {
++        host_audio_stop(sound_channel);
++        dx_free_audio_channel(sound_channel);
++        sound_channel = -1;
++    }
++}
++constexpr uint32_t max_sound_bytes = 64 * 1024 * 1024;
++// These APIs receive the whole RIFF image, unlike waveOutWrite's buffers.
++// Require every declared chunk to fit the RIFF extent before the shared PCM
++// parser sees it. Unknown chunks (including odd-sized metadata) are skipped.
++bool sound_image(uint32_t p, RiffWave *out) {
++    if (!gm_valid(p, 12) || rd32(p) != 0x46464952 || rd32(p + 8) != 0x45564157)
++        return false;
++    uint64_t extent = uint64_t(rd32(p + 4)) + 8;
++    if (extent < 12 || extent > max_sound_bytes || !gm_valid(p, uint32_t(extent)))
++        return false;
++    uint32_t size = uint32_t(extent), at = 12;
++    while (at < size) {
++        if (size - at < 8)
++            return false;
++        uint32_t n = rd32(p + at + 4);
++        uint64_t next = uint64_t(at) + 8 + n + (n & 1u);
++        if (next > size)
++            return false;
++        at = uint32_t(next);
++    }
++    if (!riff_parse_wave(p, size, out))
++        return false;
++    uint32_t block = out->channels * (out->bits / 8);
++    return block && out->pcm_bytes % block == 0;
++}
++void play_sound(X86 *c, bool wide, bool modern) {
++    uint32_t sound = arg(c, 0), flags = arg(c, modern ? 2 : 1);
++    set_eax(c, 0);
++    if (!sound) {
++        stop_sound();
++        set_eax(c, 1);
++        return;
++    }
++    // File names and PCM memory images are supported. Registry aliases,
++    // resources and application/system sound sessions need separate services.
++    constexpr uint32_t supported = 1 | 2 | 4 | 8 | 16 | 0x20000;
++    if ((flags & ~supported) || (modern && arg(c, 1)) || ((flags & 8) && !(flags & 1)) ||
++        ((flags & 4) && (flags & 0x20000))) {
++        LOGV("PlaySound: unsupported flags %08x", flags);
++        return;
++    }
++    if ((flags & 16) && sound_channel >= 0 && host_audio_is_playing(sound_channel))
++        return;
++    // Windows replaces a process voice unless SND_NOSTOP protects it.
++    stop_sound();
++    uint32_t image = sound, allocated = 0;
++    if (!(flags & 4)) {
++        std::string name = wide ? gm_wstr(sound) : gm_str(sound);
++        std::string path = win32_host_path_op(name, WIN32_FILE_READ);
++        int fd = path.empty() ? -1 : os_fd_open(path.c_str(), OS_O_RDONLY);
++        if (fd < 0)
++            return;
++        OsStat stat{};
++        if (os_fd_stat(fd, &stat) != 0 || !stat.is_regular || stat.size < 12 ||
++            stat.size > max_sound_bytes) {
++            os_fd_close(fd);
++            return;
++        }
++        allocated = heap_alloc(uint32_t(stat.size));
++        if (!allocated) {
++            os_fd_close(fd);
++            return;
++        }
++        image = allocated;
++        uint32_t read = 0;
++        while (read < stat.size) {
++            int64_t n = os_fd_read(fd, g_mem + image + read, size_t(stat.size - read));
++            if (n <= 0)
++                break;
++            read += uint32_t(n);
++        }
++        os_fd_close(fd);
++        if (read != stat.size || uint64_t(rd32(image + 4)) + 8 > read) {
++            heap_free(allocated);
++            return;
++        }
++    }
++    RiffWave wave{};
++    if (!sound_image(image, &wave)) {
++        if (allocated)
++            heap_free(allocated);
++        return;
++    }
++    sound_channel = dx_alloc_audio_channel();
++    if (sound_channel < 0) {
++        if (allocated)
++            heap_free(allocated);
++        return;
++    }
++    HostAudioPlay play{};
++    play.channel = sound_channel;
++    play.pcm = g_mem + wave.pcm;
++    play.bytes = wave.pcm_bytes;
++    play.sample_rate = int32_t(wave.rate);
++    play.channels = wave.channels;
++    play.bits = wave.bits;
++    play.loop = (flags & 8) != 0;
++    host_audio_play(&play);
++    if (allocated)
++        heap_free(allocated);
++    if (!host_audio_is_playing(sound_channel)) {
++        stop_sound();
++        return;
++    }
++    LOGV("PlaySound: %u PCM bytes, %u Hz, %u channels, %u bits%s", wave.pcm_bytes, wave.rate,
++         wave.channels, wave.bits, play.loop ? ", loop" : "");
++    if (!(flags & 1)) {
++        uint64_t generation = sound_generation;
++        // Yield the guest baton while the host device drains the copied PCM.
++        // Another guest thread may replace/stop this voice during the wait.
++        while (generation == sound_generation && host_audio_is_playing(sound_channel))
++            guest_sleep_ms(1);
++        if (generation != sound_generation)
++            return;
++        stop_sound();
++    }
++    set_eax(c, 1);
++}
++void snd_sound_a(X86 *c) {
++    play_sound(c, false, false);
++}
++void snd_sound_w(X86 *c) {
++    play_sound(c, true, false);
++}
++void play_sound_a(X86 *c) {
++    play_sound(c, false, true);
++}
++void play_sound_w(X86 *c) {
++    play_sound(c, true, true);
++}
+ Wave *get(uint32_t id) {
+     auto it = waves.find(id);
+     return it == waves.end() ? nullptr : it->second.get();
+@@ -374,12 +520,14 @@ void num_devices(X86 *c) {
+         "_INMM.dll", #name, n, fn                                                                  \
+     }
+ const ImportShim shims[] = {
+-    W(waveOutOpen, 6, open_wave),        W(waveOutClose, 1, close_wave),
+-    W(waveOutPrepareHeader, 3, prepare), W(waveOutUnprepareHeader, 3, unprepare),
+-    W(waveOutWrite, 3, write_wave),      W(waveOutPause, 1, pause_wave),
+-    W(waveOutRestart, 1, restart),       W(waveOutReset, 1, reset_wave),
+-    W(waveOutGetPosition, 3, position),  W(waveOutSetVolume, 2, set_volume),
+-    W(waveOutGetNumDevs, 0, num_devices)};
++    W(waveOutOpen, 6, open_wave),         W(waveOutClose, 1, close_wave),
++    W(waveOutPrepareHeader, 3, prepare),  W(waveOutUnprepareHeader, 3, unprepare),
++    W(waveOutWrite, 3, write_wave),       W(waveOutPause, 1, pause_wave),
++    W(waveOutRestart, 1, restart),        W(waveOutReset, 1, reset_wave),
++    W(waveOutGetPosition, 3, position),   W(waveOutSetVolume, 2, set_volume),
++    W(waveOutGetNumDevs, 0, num_devices), W(sndPlaySoundA, 2, snd_sound_a),
++    W(sndPlaySoundW, 2, snd_sound_w),     W(PlaySoundA, 3, play_sound_a),
++    W(PlaySoundW, 3, play_sound_w)};
+ } // namespace
+ void waveout_register() {
+     imports_register(shims, std::size(shims));
+@@ -387,6 +535,7 @@ void waveout_register() {
+ // Guest ExitProcess may abandon open wave handles. Release their host channels
+ // before the host destroys its audio device and synchronization primitives.
+ void waveout_shutdown() {
++    stop_sound();
+     waves.clear();
+ }
+ void waveout_frame_pump(X86 *c) {
 diff --git a/host/input.cpp b/host/input.cpp
 index 091660f..eace5b3 100644
 --- a/host/input.cpp
