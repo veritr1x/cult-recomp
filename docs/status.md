@@ -19,21 +19,30 @@ executables have compiled and been probed. No other platform has been tested.
   failures, unmodelled instructions or unresolved jump tables in this pass.
 - Twelve focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
-- Both LLVM-MinGW headless native builds finish successfully on the unchanged
-  pinned kit. Both startup probes fail at the same VB5 runtime import,
-  return exit code 1 and present zero frames.
+- Both LLVM-MinGW headless native builds link with statically translated VB5
+  and PictureClip libraries on the locally patched kit. Probes enter the actual
+  VB startup routine, but neither game has presented a frame yet.
 
 ## Runtime blockers
 
-Cult imports 121 functions from `MSVBVM50.dll`; Cult II imports 122. Every one
-is currently a logging-only fallback in the pinned kit. The first executed
-import is ordinal 100, which resolves to `ThunRTMain` in the supplied runtime
-export table. A fallback returning zero cannot construct the VB project or
-start its form/event loop. Cult's native startup probe returns exit code 1,
-sets no display mode and presents zero frames. The subsequent unknown target
-in startup padding is a consequence of returning from this nonreturning
-runtime startup call, not evidence that inventing a padding function would fix it.
-Cult II reproduces the same failure at its own native entry point.
+The ongoing second pass adds both supplied dependencies as statically translated
+auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
+x86 interpretation is explicitly disabled. The local kit maps all DLLs before
+binding imports and initializes static dependencies before the executable.
+The real Cult II image passes 226 loader/startup contract checks (zero failures,
+one resource-related skip). Decoder, switch, return-path and profile checks pass:
+230 focused translator/profile/build checks and 12 private-input checks.
+The VB5 pass emits over 21,000 discovered routines and PictureClip 580.
+Branch-pruning fixes include regressions for split epilogues and listing gaps.
+Neither game has reached verified gameplay.
+
+Both probes now complete the statically translated VB5 DLL's process attach,
+then execute `ThunRTMain`. Implemented startup services include a guest COM task
+allocator, mapped-module string resources, wide string comparison, and OLE
+Automation's named/ordinal bindings, binary BSTRs, and caller-created SAFEARRAY
+storage. Probes create VB's main, component-manager and focus windows and reach
+native object dispatch. The remaining work includes covering verified callback
+addresses, further Windows/COM behavior, rendering and input.
 
 Both games have the same object structure: `GameForm`, `Module1`, `LanSet`,
 and `Intro`. Cult's forms describe 62 controls; Cult II's describe 63.
@@ -41,17 +50,12 @@ Both depend on `PICCLP32.OCX` as well as COM/OLE services. Those controls and
 VB's strings, variants, arrays, file I/O, exceptions, runtime calls and event
 dispatch need compatible behavior before gameplay can run.
 
-There are two substantial implementation routes to investigate:
-
-1. Implement the required VB5 services, form/event engine and PictureClip
-   control against the kit's guest-memory and host/GDI interfaces.
-2. Statically lift the supplied VB runtime and control as auxiliary modules,
-   then close their own Windows/COM dependency gaps and validate DLL startup.
-
-The second route must address guest arena sizing and module mapping explicitly:
+The selected route lifts the supplied VB runtime and control as auxiliary
+modules, then closes their Windows/COM dependency gaps. This requires guest
+arena sizing and module mapping explicitly:
 `MSVBVM50.dll` has preferred base `0x74010000`, image size `0x14d000`, and 671
 PE imports; PictureClip has base `0x211a0000`, size `0x15000`, and 147 imports.
-Neither is included in the current translation. Copying these x86 DLLs into
+Both are now configured for static translation. Copying these x86 DLLs into
 a package would not make them execute natively on ARM or non-Windows targets.
 
 ## Verification records
@@ -76,7 +80,8 @@ The diagnostic executables are not standalone player packages.
 
 The local GCC experiment compiled Cult's generated C archive but failed to
 link the kit's complete host. Its temporary runtime edits were reverted;
-both the pinned kit submodule and the original kit checkout are unchanged.
+the original kit checkout is unchanged. The game's local kit submodule now has
+the loader and translator changes described above.
 
 ## Release requirements still outstanding
 

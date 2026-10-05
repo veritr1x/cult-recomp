@@ -28,6 +28,7 @@ developer_exe = "original/install/{executable}"
 windows_version = "4.10"
 
 [translate]
+allow_runtime_interpreter = false
 function_alignment = 4
 listings = "analysis/{executable}"
 globals = "globals.toml"
@@ -65,6 +66,11 @@ builtin = "none"
 exclude = ["*.DEP", "ReadMe.txt", "Cheats.txt", "*.url", "file_id.diz"]
 '''
         target = game / "game.toml"
+        if target.exists() and "\n[modules.aux." in target.read_text():
+            # Preserve hash-pinned DLL configuration from prepare_modules.py.
+            current = target.read_text()
+            text = text.replace('[game]\n', '[game]\nguest_size = 0x74200000\n')
+            text += current[current.index("\n[modules.aux."):]
         if target.exists() and target.read_text() != text:
             raise ValueError(f"Preserving modified profile: {target}")
         target.write_text(text, newline="\n")

@@ -4,14 +4,20 @@
 Both supplied games contain native x86 code compiled with Visual Basic 5.
 Their game code has been translated to C with RecompKit. Native gameplay,
 save compatibility, audio, input and other platforms are not yet verified.
-Both Windows x64 headless executables compile, but startup probes fail at
-unimplemented VB5 `ThunRTMain`, with zero frames presented.
+Both Windows x64 headless executables link with the statically translated VB5
+runtime and PictureClip control. Probes now execute VB5's real DLL initialization
+and enter the game startup routine. Work continues on callback coverage and
+Windows/COM services before forms can run. Runtime x86 interpretation is disabled
+for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
 by that date cannot be promised from the current state.
 
 RecompKit is pinned as the `kit/` submodule to
 `eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.
-The existing `C:/GitRepos/recomp-kit` checkout was not modified.
+The local submodule carries the port patch in `patches/recomp-kit-vb5.patch`
+on top of that revision. The separate `C:/GitRepos/recomp-kit` checkout was not
+modified. The patch is included here so a clean checkout can reproduce the kit
+changes without fetching an unpublished submodule commit.
 
 | Profile | Original executable | Emitted native functions | Dispatch entries |
 | --- | --- | ---: | ---: |
@@ -34,10 +40,12 @@ never treated as authorization or executed.
 git submodule update --init
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe tools\apply_kit_patches.py
 .venv\Scripts\python.exe tools\import_archives.py --downloads C:\Users\satta\Downloads
 .venv\Scripts\python.exe tools\analyze_games.py
 .venv\Scripts\python.exe tools\prepare_profiles.py
 .venv\Scripts\python.exe tools\export_native.py --kit .\kit
+.venv\Scripts\python.exe tools\prepare_modules.py
 .venv\Scripts\python.exe tools\build.py --translate-only
 .venv\Scripts\python.exe tools\test_inputs.py
 ```
@@ -58,6 +66,10 @@ The native exporter uses the kit's recursive x86 decoder, seeded from the PE
 entry and VB method/event tables. It is a bootstrap alternative to Ghidra
 listings, with provenance in `functions.tsv`; it does not export decompiler
 pseudocode. Additional dynamically discovered callbacks still need auditing.
+`prepare_modules.py` exports DLL entries, direct edges and switch arms and pins
+their hashes in each profile. It copies only the two mapped module images beside
+each executable so portable bundles can find their guest data. These remain
+private inputs and are never registered with Windows.
 
 ## Diagnostic Windows builds
 

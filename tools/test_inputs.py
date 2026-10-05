@@ -64,6 +64,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(cfg["developer_exe_path"].read_bytes()).hexdigest(),
                                  cfg["game"]["sha256"])
                 self.assertIn("#define RECOMP_MODS_BUILTIN_POPULOUS 0", render_header(cfg))
+                self.assertIn("#define RECOMP_ALLOW_RUNTIME_INTERPRETER 0", render_header(cfg))
                 self.assertTrue(all(value == 0 or value == [] for value in cfg["hooks"].values()))
 
     def test_translation_reports(self):

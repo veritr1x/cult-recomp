@@ -8,6 +8,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from import_archives import GAMES, ROOT
@@ -34,8 +35,17 @@ def main():
             command = [sys.executable, str(kit / "tools/recomp/translate.py"),
                        "--game", str(game), "--out", str(output),
                        "--report", str(game / "analysis/translation-report.json")]
+            subprocess.run(command, cwd=ROOT, env=env, check=True)
+            config = tomllib.loads((game / "game.toml").read_text())
+            for module in config.get("modules", {}).get("aux", {}):
+                subprocess.run([sys.executable, str(kit / "tools/recomp/translate.py"),
+                                "--game", str(game), "--module", module,
+                                "--out", str(output / ("aux-" + module)),
+                                "--report", str(game / "analysis" / (module + "-translation-report.json"))],
+                               cwd=ROOT, env=env, check=True)
+            continue
         else:
-            print(f"{game_id}: experimental build; VB5 startup and ActiveX are unresolved.", flush=True)
+            print(f"{game_id}: experimental build; forms, input, and gameplay are unverified.", flush=True)
             command = [sys.executable, str(kit / "tools/build.py"), "--game-dir", str(game),
                        "--target", args.target, "--jobs", str(args.jobs)]
             if args.preset:

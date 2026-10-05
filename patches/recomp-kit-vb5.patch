@@ -1,0 +1,2144 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 20fdc15..7452433 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,24 @@
+ 
+ ## Unreleased
+ 
++- Share ANSI and UTF-16 window-class queries, clipboard formats, global atoms,
++  and mapped-module string resources. Load resource icons and bitmaps through
++  the existing guest GDI image model, including requested image dimensions.
++- Expose the COM task allocator with a guest IMalloc vtable, shared task-memory
++  ownership, per-thread message filter registration, and OLE Automation's
++  documented ordinal aliases and BSTR string entry points.
++- Support binary BSTR byte counts, separately allocated SAFEARRAY descriptors
++  and data, and transfer the ownership of thread-local Automation error objects.
++
++- Bind mapped DLL imports after all configured export tables are visible, and
++  initialize static DLL dependencies before entering their caller.
++- Decode the structured memory operands of x87 environment and register saves.
++- Recover distant switch arms and preserve taken branches across listing gaps;
++  recognize split returning epilogues before inferring calls that never return.
++- Discover callback addresses stored directly into memory fields.
++- Allow static ports to disable runtime instruction interpretation with
++  `[translate] allow_runtime_interpreter = false`.
++
+ - Allow native game adapters to place their own cursors at absolute touch
+   positions in logical game pixels. Placement can discard pending DirectInput
+   X/Y movement without losing button, wheel or keyboard input.
+diff --git a/docs/testing.md b/docs/testing.md
+index bb8776b..60714de 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -3,6 +3,14 @@
+ Run checks appropriate to your change. Every suite's output belongs under ignored
+ `build/`; requested tests must report failure rather than silently skip prerequisites.
+ 
++Use `--native-target runtime_tests` (repeatable) with `--compile-only` or
++`--native` to build selected suites for a new port whose profile does not have
++another game's test symbols. With `--native`, only those CTest names run.
++`runtime_tests --startup-contracts` exercises PE mapping, DLL lifetime,
++static-import initialization and startup APIs without executing game logic.
++Set `[translate] allow_runtime_interpreter = false` for a port that must
++expose every missing static dispatch rather than interpret the missing code.
++
+ | Command | What it checks | Needs game files? |
+ | --- | --- | --- |
+ | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
+diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
+index 06d5e2b..0c84a00 100644
+--- a/runtime/cpu.cpp
++++ b/runtime/cpu.cpp
+@@ -209,7 +209,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
+     // call through a null pointer faults at the call, and there are no
+     // instructions at it to interpret. Reading them would be the very
+     // dereference this page exists to refuse.
+-    if (target >= GUEST_NULL_LIMIT && interp_call(c, target))
++    if (RECOMP_ALLOW_RUNTIME_INTERPRETER && target >= GUEST_NULL_LIMIT && interp_call(c, target))
+         return;
+     if (target == GUEST_RETURN_SENTINEL) {
+         recomp_callback_return(c);
+diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
+index 13ba56f..ab9ac33 100644
+--- a/runtime/gdi32.cpp
++++ b/runtime/gdi32.cpp
+@@ -504,6 +504,32 @@ void g_CreateCompatibleDC(X86 *c) {
+ void g_DeleteDC(X86 *c) {
+     set_eax(c, dcs().erase(arg(c, 0)) ? 1 : 0);
+ }
++void g_GetCurrentObject(X86 *c) {
++    const DeviceContext *dc = dc_of(arg(c, 0));
++    if (!dc) {
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t object = 0;
++    switch (arg(c, 1)) {
++    case 1:
++        object = dc->pen;
++        break; // OBJ_PEN
++    case 2:
++        object = dc->brush;
++        break; // OBJ_BRUSH
++    case 6:
++        object = dc->font;
++        break; // OBJ_FONT
++    case 7:
++        object = dc->bitmap ? dc->bitmap : DEFAULT_BITMAP;
++        break; // OBJ_BITMAP
++    case 5:
++        object = dc->palette ? dc->palette : 0x4f10f;
++        break; // OBJ_PAL
++    }
++    set_eax(c, object);
++}
+ 
+ // SelectObject(hdc, object): a bitmap goes into the DC and the previous one
+ // comes back; a pen, brush or font is accepted as selected.
+@@ -772,6 +798,7 @@ const ImportShim g_gdi32_shims[] = {
+     {"GDI32.dll", "CreateCompatibleDC", 1, g_CreateCompatibleDC},
+     {"GDI32.dll", "DeleteDC", 1, g_DeleteDC},
+     {"GDI32.dll", "SelectObject", 2, g_SelectObject},
++    {"GDI32.dll", "GetCurrentObject", 2, g_GetCurrentObject},
+     {"GDI32.dll", "SetDIBColorTable", 4, g_SetDIBColorTable},
+     {"GDI32.dll", "CreatePalette", 1, g_CreatePalette},
+     {"GDI32.dll", "SelectPalette", 3, g_SelectPalette},
+diff --git a/runtime/imports.h b/runtime/imports.h
+index d01eb0a..262790b 100644
+--- a/runtime/imports.h
++++ b/runtime/imports.h
+@@ -70,6 +70,7 @@ ImportCallObserver imports_set_call_observer_get(void);
+ // WINMM tables owned by this runtime. Idempotent; called by loader_load().
+ void imports_init();
+ void oleaut32_register();
++void oleaut32_reset();
+ void misc_dlls_register();
+ void comctl32_register();
+ void media_foundation_register();
+diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
+index 529d27d..2fdbb9e 100644
+--- a/runtime/kernel32.cpp
++++ b/runtime/kernel32.cpp
+@@ -533,6 +533,8 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
+ 
+ void win32_init(const std::string &game_dir) {
+     kernel32_wide_reset();
++    win32_reset_task_allocator();
++    oleaut32_reset();
+     g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
+     g_cur_dir = RECOMP_GUEST_ROOT;
+     g_last_error = 0;
+@@ -1059,6 +1061,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
+ std::string module_file_name(uint32_t hmod) {
+     std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
+     if (hmod && hmod != IMAGE_BASE) {
++        const LoaderModule *mapped = loader_module_containing(hmod);
++        if (mapped && mapped->base == hmod)
++            return std::string(RECOMP_GUEST_ROOT "\\") + mapped->name;
+         for (const auto &kv : modules())
+             if (kv.second == hmod) {
+                 path = RECOMP_GUEST_ROOT "\\" + kv.first;
+@@ -1163,7 +1168,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
+             memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
+             m->attached = true;
+             m->load_refs = 1;
+-            if (!call_dll_entry(c, *m, 1)) { // DLL_PROCESS_ATTACH
++            if (!win32_attach_static_imports(c, *m) ||
++                !call_dll_entry(c, *m, 1)) { // DLL_PROCESS_ATTACH
+                 call_dll_entry(c, *m, 0);    // failed attach still receives detach
+                 m->attached = false;
+                 m->load_refs = 0;
+@@ -1306,6 +1312,43 @@ void win32_reset_command_line_for_test() {
+     kernel32_wide_reset_command_line();
+     g_cmdline_addr = 0;
+ }
++
++bool win32_attach_static_imports(X86 *c, const LoaderModule &m) {
++    // The loader has already validated and bound this PE's import directory.
++    // Marking a DLL attached before descending breaks cyclic dependencies;
++    // its DllMain still runs only after its dependencies have initialized.
++    const uint32_t saved_eax = c->r[R_EAX], saved_eip = c->eip;
++    auto in_image = [&m](uint32_t offset, uint32_t bytes) {
++        return offset < m.size && bytes <= m.size - offset;
++    };
++    if (!in_image(0x3c, 4))
++        return false;
++    uint32_t pe = rd32(m.base + 0x3c);
++    if (!in_image(pe, 24 + 112))
++        return false;
++    uint32_t imports = rd32(m.base + pe + 24 + 104);
++    for (uint32_t d = imports; imports && in_image(d, 20); d += 20) {
++        uint32_t name_rva = rd32(m.base + d + 12);
++        if (!name_rva)
++            break;
++        if (!in_image(name_rva, 1))
++            return false;
++        std::string name = gm_str(m.base + name_rva, 260);
++        if (LoaderModule *dependency = loader_module_named(name.c_str())) {
++            if (dependency->base == loader_image_base())
++                continue;
++            load_library_named(c, name);
++            bool ok = c->r[R_EAX] != 0;
++            c->r[R_EAX] = saved_eax;
++            c->eip = saved_eip;
++            if (!ok)
++                return false;
++        }
++    }
++    c->r[R_EAX] = saved_eax;
++    c->eip = saved_eip;
++    return true;
++}
+ namespace {
+ 
+ // The environment block is a run of NUL-terminated strings ended by an extra
+@@ -1753,6 +1796,7 @@ void k_CreateSemaphoreA(X86 *c) {
+     uint32_t h = handle_new(H_SEM);
+     handles()[h].count = (int32_t)arg(c, 1);
+     handles()[h].max_count = (int32_t)arg(c, 2);
++    set_last_error(0); // A newly created semaphore did not already exist.
+     LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
+          h);
+     set_eax(c, h);
+@@ -4935,6 +4979,8 @@ const ImportShim g_kernel32_shims[] = {
+     {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
+     {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
+     {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
++    {"KERNEL32.dll", "GetUserDefaultLangID", 0, k_GetUserDefaultLCID},
++    {"KERNEL32.dll", "GetSystemDefaultLangID", 0, k_GetUserDefaultLCID},
+     {"KERNEL32.dll", "IsValidCodePage", 1, k_IsValidCodePage},
+     {"KERNEL32.dll", "IsValidLocale", 2, k_IsValidLocale},
+     {"KERNEL32.dll", "EnumSystemLocalesA", 2, k_EnumSystemLocalesA},
+diff --git a/runtime/kernel32_wide.cpp b/runtime/kernel32_wide.cpp
+index 85af1d5..f0dd230 100644
+--- a/runtime/kernel32_wide.cpp
++++ b/runtime/kernel32_wide.cpp
+@@ -344,6 +344,40 @@ uint32_t wstrlen(uint32_t p) {
+ void k_lstrlenW(X86 *c) {
+     set_eax(c, wstrlen(arg(c, 0)));
+ }
++// The runtime exposes the en-US locale. Preserve UTF-16 units rather than
++// narrowing them to bytes; fold ASCII and Latin-1 letters for that locale.
++uint16_t lower_wide(uint16_t w) {
++    if ((w >= 'A' && w <= 'Z') || (w >= 0x00c0 && w <= 0x00d6) || (w >= 0x00d8 && w <= 0x00de))
++        return w + 0x20;
++    if (w == 0x0178)
++        return 0x00ff;
++    return w;
++}
++void compare_wide_strings(X86 *c, bool ignore_case) {
++    uint32_t a = arg(c, 0), b = arg(c, 1);
++    uint32_t na = wstrlen(a), nb = wstrlen(b);
++    int result = 0;
++    for (uint32_t i = 0; i < std::min(na, nb); ++i) {
++        uint16_t wa = rd16(a + 2 * i), wb = rd16(b + 2 * i);
++        if (ignore_case) {
++            wa = lower_wide(wa);
++            wb = lower_wide(wb);
++        }
++        if (wa != wb) {
++            result = wa < wb ? -1 : 1;
++            break;
++        }
++    }
++    if (!result)
++        result = na < nb ? -1 : na > nb ? 1 : 0;
++    set_eax(c, (uint32_t)result);
++}
++void k_lstrcmpW(X86 *c) {
++    compare_wide_strings(c, false);
++}
++void k_lstrcmpiW(X86 *c) {
++    compare_wide_strings(c, true);
++}
+ void k_lstrcatW(X86 *c) {
+     uint32_t dest = arg(c, 0), src = arg(c, 1), n = wstrlen(dest), extra = wstrlen(src);
+     if (dest && gm_valid(dest, n * 2) && extra < (GUEST_SIZE - dest) / 2 - n) {
+@@ -769,19 +803,19 @@ void k_VirtualQuery(X86 *c) {
+ void k_VirtualQueryEx(X86 *c) {
+     set_eax(c, virtual_query(arg(c, 1), arg(c, 2), arg(c, 3)));
+ }
+-std::string atom_name(uint32_t p) {
+-    std::string name = gm_wstr(p);
++std::string atom_name(uint32_t p, bool wide = true) {
++    std::string name = wide ? gm_wstr(p) : gm_str(p);
+     for (char &ch : name)
+         ch = (char)tolower((unsigned char)ch);
+     return name;
+ }
+-void k_GlobalAddAtomW(X86 *c) {
++void global_add_atom(X86 *c, bool wide) {
+     uint32_t p = arg(c, 0);
+     if (p < 0x10000) {
+         set_eax(c, p < 0xc000 ? p : 0);
+         return;
+     }
+-    std::string name = atom_name(p);
++    std::string name = atom_name(p, wide);
+     if (name.empty() || wide_units(name) > 255) {
+         set_last_error(87);
+         set_eax(c, 0);
+@@ -806,6 +840,12 @@ void k_GlobalAddAtomW(X86 *c) {
+     set_last_error(8);
+     set_eax(c, 0);
+ }
++void k_GlobalAddAtomW(X86 *c) {
++    global_add_atom(c, true);
++}
++void k_GlobalAddAtomA(X86 *c) {
++    global_add_atom(c, false);
++}
+ void k_GlobalFindAtomW(X86 *c) {
+     uint32_t p = arg(c, 0);
+     if (p < 0x10000) {
+@@ -833,7 +873,8 @@ void k_WaitForMultipleObjectsEx(X86 *c) {
+ }
+ 
+ bool resource_module(uint32_t module) {
+-    if (!module || module == loader_image_base())
++    const LoaderModule *mapped = loader_module_containing(module ? module : loader_image_base());
++    if (mapped && (!module || mapped->base == module))
+         return true;
+     set_last_error(1812);
+     return false;
+@@ -844,7 +885,7 @@ void k_FindResourceW(X86 *c) {
+         return;
+     }
+     std::string why;
+-    uint32_t entry = resource_find(arg(c, 2), arg(c, 1), &why);
++    uint32_t entry = resource_find(arg(c, 2), arg(c, 1), &why, arg(c, 0));
+     if (!entry) {
+         set_last_error(1814);
+         LOGV("FindResourceW: %s", why.c_str());
+@@ -872,7 +913,7 @@ void k_FreeResource(X86 *c) {
+ void k_EnumResourceNamesW(X86 *c) {
+     uint32_t module = arg(c, 0), type = arg(c, 1), callback = arg(c, 2), param = arg(c, 3);
+     std::vector<ResourceName> names;
+-    if (!callback || !resource_module(module) || !resource_names(type, &names)) {
++    if (!callback || !resource_module(module) || !resource_names(type, &names, nullptr, module)) {
+         set_last_error(1814);
+         set_eax(c, 0);
+         return;
+@@ -919,6 +960,7 @@ static const ImportShim g_kernel32_wide[] = {
+     {"KERNEL32.dll", "VirtualQuery", 3, k_VirtualQuery},
+     {"KERNEL32.dll", "VirtualQueryEx", 4, k_VirtualQueryEx},
+     {"KERNEL32.dll", "GlobalAddAtomW", 1, k_GlobalAddAtomW},
++    {"KERNEL32.dll", "GlobalAddAtomA", 1, k_GlobalAddAtomA},
+     {"KERNEL32.dll", "GlobalFindAtomW", 1, k_GlobalFindAtomW},
+     {"KERNEL32.dll", "GlobalDeleteAtom", 1, k_GlobalDeleteAtom},
+     {"KERNEL32.dll", "WaitForMultipleObjectsEx", 5, k_WaitForMultipleObjectsEx},
+@@ -940,6 +982,8 @@ static const ImportShim g_kernel32_wide[] = {
+     {"KERNEL32.dll", "GetConsoleOutputCP", 0, k_GetConsoleOutputCP},
+ 
+     {"KERNEL32.dll", "lstrlenW", 1, k_lstrlenW},
++    {"KERNEL32.dll", "lstrcmpW", 2, k_lstrcmpW},
++    {"KERNEL32.dll", "lstrcmpiW", 2, k_lstrcmpiW},
+     {"KERNEL32.dll", "lstrcatW", 2, k_lstrcatW},
+     {"KERNEL32.dll", "FormatMessageW", 7, k_FormatMessageW},
+     {"KERNEL32.dll", "OutputDebugStringW", 1, k_OutputDebugStringW},
+diff --git a/runtime/loader.cpp b/runtime/loader.cpp
+index 75269f0..c747dc0 100644
+--- a/runtime/loader.cpp
++++ b/runtime/loader.cpp
+@@ -424,10 +424,8 @@ bool load_aux_module(const AuxSpec &spec) {
+             memcpy(g_mem + va, file.data() + raw_ptr, copy);
+         }
+     }
+-    if (!patch_iat(file, opt_off, opt_magic, image_base, size_image)) {
+-        g_error = std::string(spec.name) + ": " + g_error;
+-        return false;
+-    }
++    // Keep pristine mapped bytes until every DLL's export table is visible.
++    // Imports between auxiliary modules must not depend on profile ordering.
+     m.initial_image.assign(g_mem + image_base, g_mem + image_base + m.size);
+     g_aux.push_back(m);
+     LOGV("mapped auxiliary module %s: base %08x size %08x entry %08x", spec.name, m.base,
+@@ -749,11 +747,19 @@ bool loader_load(const char *exe_path) {
+         }
+     }
+ 
+-    if (!patch_iat(file, opt_off, opt_magic, g_base, g_size))
+-        return false;
+     for (uint32_t i = 0; i < RECOMP_AUX_MODULE_COUNT; ++i)
+         if (!load_aux_module(g_aux_specs[i]))
+             return false;
++    for (LoaderModule &m : g_aux) {
++        size_t aux_opt = rd<uint32_t>(m.initial_image, 0x3c) + 24;
++        if (!patch_iat(m.initial_image, aux_opt, 0x10b, m.base, m.size)) {
++            g_error = m.name + ": " + g_error;
++            return false;
++        }
++        m.initial_image.assign(g_mem + m.base, g_mem + m.base + m.size);
++    }
++    if (!patch_iat(file, opt_off, opt_magic, g_base, g_size))
++        return false;
+ 
+     if (g_entry != LOADER_EXPECTED_ENTRY)
+         LOGW("entry point is %08x, expected %08x", g_entry, LOADER_EXPECTED_ENTRY);
+@@ -829,6 +835,11 @@ void run_entry(X86 *c) {
+     sched_set_guest_thread(true);
+     // ExitProcess/TerminateProcess/ExitThread-outside-a-thread longjmp here.
+     if (setjmp(*process_exit_jmp()) == 0) {
++        if (!win32_attach_static_imports(c, g_main)) {
++            LOGW("static DLL initialization failed: error %u", get_last_error());
++            sched_set_guest_thread(false);
++            return;
++        }
+         uint32_t count = 0;
+         for (uint32_t p = g_tls.callbacks; p && rva_ok(p - g_base, 4); p += 4) {
+             uint32_t cb = rd32(p);
+diff --git a/runtime/misc.cpp b/runtime/misc.cpp
+index 3c955d7..1204a59 100644
+--- a/runtime/misc.cpp
++++ b/runtime/misc.cpp
+@@ -964,12 +964,156 @@ void o_CoUninitialize(X86 *c) {
+     set_eax(c, 0);
+ }
+ 
++static uint32_t g_task_allocator = 0;
++static std::set<uint32_t> g_task_blocks;
++static std::map<uint32_t, uint32_t> g_message_filters;
++void o_CoRegisterMessageFilter(X86 *c) {
++    uint32_t next = arg(c, 0), out = arg(c, 1), tid = guest_current_thread_id();
++    if ((out && !gm_valid(out, 4)) || (next && !gm_valid(next, 4))) {
++        set_eax(c, 1);
++        return;
++    }
++    uint32_t previous = g_message_filters[tid];
++    if (next) {
++        uint32_t vt = rd32(next);
++        if (!gm_valid(vt, 12)) {
++            set_eax(c, 1);
++            return;
++        }
++        guest_call(c, rd32(vt + 4), next); // Registration acquires a reference.
++    }
++    g_message_filters[tid] = next;
++    if (out)
++        wr32(out, previous); // Transfer the previous registration's reference.
++    else if (previous && gm_valid(previous, 4) && gm_valid(rd32(previous), 12))
++        guest_call(c, rd32(rd32(previous) + 8), previous);
++    set_eax(c, 0);
++}
++uint32_t task_alloc(uint32_t size) {
++    uint32_t p = heap_alloc(size);
++    if (p)
++        g_task_blocks.insert(p);
++    return p;
++}
++void task_free(uint32_t p) {
++    g_task_blocks.erase(p);
++    if (p)
++        heap_free(p);
++}
++uint32_t task_realloc(uint32_t p, uint32_t size) {
++    if (!p)
++        return task_alloc(size);
++    if (!g_task_blocks.count(p))
++        return 0;
++    if (!size) {
++        task_free(p);
++        return 0;
++    }
++    uint32_t next = heap_realloc(p, size);
++    if (next) {
++        g_task_blocks.erase(p);
++        g_task_blocks.insert(next);
++    }
++    return next;
++}
+ void o_CoTaskMemAlloc(X86 *c) {
+-    set_eax(c, heap_alloc(arg(c, 0)));
++    set_eax(c, task_alloc(arg(c, 0)));
++}
++void o_CoTaskMemRealloc(X86 *c) {
++    set_eax(c, task_realloc(arg(c, 0), arg(c, 1)));
+ }
+ void o_CoTaskMemFree(X86 *c) {
+-    if (arg(c, 0))
+-        heap_free(arg(c, 0));
++    task_free(arg(c, 0));
++    set_eax(c, 0);
++}
++void malloc_addref(X86 *c) {
++    uint32_t refs = rd32(arg(c, 0) + 4) + 1;
++    wr32(arg(c, 0) + 4, refs);
++    set_eax(c, refs);
++}
++void malloc_release(X86 *c) {
++    uint32_t refs = rd32(arg(c, 0) + 4);
++    // The process retains its allocator even when no client owns a reference.
++    if (refs)
++        --refs;
++    wr32(arg(c, 0) + 4, refs);
++    set_eax(c, refs);
++}
++void malloc_query(X86 *c) {
++    uint32_t iid = arg(c, 1), out = arg(c, 2);
++    if (!out || !gm_valid(out, 4)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    wr32(out, 0);
++    static const uint8_t suffix[] = {0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46};
++    if (!iid || !gm_valid(iid, 16) || (rd32(iid) != 0 && rd32(iid) != 2) ||
++        memcmp(g_mem + iid + 4, suffix, sizeof suffix)) {
++        set_eax(c, 0x80004002u);
++        return;
++    }
++    wr32(out, arg(c, 0));
++    malloc_addref(c);
++    set_eax(c, 0);
++}
++void malloc_alloc(X86 *c) {
++    set_eax(c, task_alloc(arg(c, 1)));
++}
++void malloc_realloc(X86 *c) {
++    set_eax(c, task_realloc(arg(c, 1), arg(c, 2)));
++}
++void malloc_free(X86 *c) {
++    task_free(arg(c, 1));
++    set_eax(c, 0);
++}
++void malloc_size(X86 *c) {
++    uint32_t p = arg(c, 1);
++    set_eax(c, g_task_blocks.count(p) ? heap_size(p) : 0xffffffffu);
++}
++void malloc_did_alloc(X86 *c) {
++    uint32_t p = arg(c, 1);
++    set_eax(c, p ? (g_task_blocks.count(p) ? 1 : 0) : 0xffffffffu);
++}
++void malloc_minimize(X86 *c) {
++    // The guest heap coalesces adjacent free blocks on every release.
++    set_eax(c, 0);
++}
++void o_CoGetMalloc(X86 *c) {
++    uint32_t out = arg(c, 1);
++    if (!out || !gm_valid(out, 4)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    wr32(out, 0);
++    if (arg(c, 0) != 1) { // MEMCTX_TASK
++        set_eax(c, 0x80070057u);
++        return;
++    }
++    if (!g_task_allocator) {
++        static const ImportShim methods[] = {
++            {"ole32.dll", "IMalloc::QueryInterface", 3, malloc_query},
++            {"ole32.dll", "IMalloc::AddRef", 1, malloc_addref},
++            {"ole32.dll", "IMalloc::Release", 1, malloc_release},
++            {"ole32.dll", "IMalloc::Alloc", 2, malloc_alloc},
++            {"ole32.dll", "IMalloc::Realloc", 3, malloc_realloc},
++            {"ole32.dll", "IMalloc::Free", 2, malloc_free},
++            {"ole32.dll", "IMalloc::GetSize", 2, malloc_size},
++            {"ole32.dll", "IMalloc::DidAlloc", 2, malloc_did_alloc},
++            {"ole32.dll", "IMalloc::HeapMinimize", 1, malloc_minimize}};
++        // Keep the object and its nine-slot vtable in one process-owned block.
++        g_task_allocator = heap_alloc(8 + 9 * 4, true);
++        if (!g_task_allocator) {
++            set_eax(c, 0x8007000eu);
++            return;
++        }
++        wr32(g_task_allocator, g_task_allocator + 8);
++        for (uint32_t i = 0; i < 9; ++i)
++            wr32(g_task_allocator + 8 + i * 4,
++                 imports_alloc_trampoline(methods[i].dll, methods[i].name, methods[i].fn,
++                                          methods[i].argc_stdcall));
++    }
++    wr32(out, g_task_allocator);
++    wr32(g_task_allocator + 4, rd32(g_task_allocator + 4) + 1);
+     set_eax(c, 0);
+ }
+ void o_IsEqualGUID(X86 *c) {
+@@ -2037,7 +2181,10 @@ const ImportShim g_misc_shims[] = {
+     {"ole32.dll", "OleUninitialize", 0, o_CoUninitialize},
+     {"ole32.dll", "CoInitializeEx", 2, o_CoInitialize},
+     {"ole32.dll", "CoTaskMemAlloc", 1, o_CoTaskMemAlloc},
++    {"ole32.dll", "CoTaskMemRealloc", 2, o_CoTaskMemRealloc},
+     {"ole32.dll", "CoTaskMemFree", 1, o_CoTaskMemFree},
++    {"ole32.dll", "CoGetMalloc", 2, o_CoGetMalloc},
++    {"ole32.dll", "CoRegisterMessageFilter", 2, o_CoRegisterMessageFilter},
+     {"ole32.dll", "IsEqualGUID", 2, o_IsEqualGUID},
+     {"ole32.dll", "CoUninitialize", 0, o_CoUninitialize},
+     {"ole32.dll", "PropVariantClear", 1, o_PropVariantClear},
+@@ -2273,3 +2420,18 @@ const ImportShim g_misc_shims[] = {
+     {"weanetr.dll", "?SendChat@MLDPlay@@QAEHKPAGKPAK@Z", 4, nullptr},
+ };
+ const size_t g_misc_shim_count = sizeof(g_misc_shims) / sizeof(g_misc_shims[0]);
++
++void win32_reset_task_allocator() {
++    g_task_allocator = 0;
++    g_task_blocks.clear();
++    g_message_filters.clear();
++}
++uint32_t win32_task_alloc(uint32_t size, bool zero) {
++    uint32_t p = task_alloc(size);
++    if (p && zero)
++        memset(g_mem + p, 0, size);
++    return p;
++}
++void win32_task_free(uint32_t p) {
++    task_free(p);
++}
+diff --git a/runtime/oleaut32.cpp b/runtime/oleaut32.cpp
+index a9f6b9f..e97abc7 100644
+--- a/runtime/oleaut32.cpp
++++ b/runtime/oleaut32.cpp
+@@ -2,6 +2,7 @@
+ // the guest scheduler baton; copies own their strings and array elements.
+ #include "imports.h"
+ #include "memory.h"
++#include "win32.h"
+ #include <cmath>
+ #include <cstring>
+ #include <iomanip>
+@@ -9,38 +10,45 @@
+ #include <locale>
+ #include <sstream>
+ #include <array>
++#include <map>
+ 
+ namespace {
+ constexpr uint32_t INVALID = 0x80070057u, OOM = 0x8007000eu;
+ constexpr uint32_t MISMATCH = 0x80020005u, BADINDEX = 0x8002000bu;
+ constexpr uint16_t BYREF = 0x4000, ARRAY = 0x2000;
++std::map<uint32_t, uint32_t> error_info;
+ bool valid(uint32_t p, uint32_t n) {
+     return p && gm_valid(p, n);
+ }
+ 
+ // BSTR length counts bytes and includes embedded NULs; only the trailing NUL
+ // is excluded. Allocate before freeing so reallocation can alias its source.
+-uint32_t bstr_alloc(uint32_t source, uint32_t units) {
+-    if (units > (GUEST_SIZE - 6) / 2 || (source && !valid(source, units * 2)))
++uint32_t bstr_alloc_bytes(uint32_t source, uint32_t bytes) {
++    if (bytes > GUEST_SIZE - 6 || (source && !valid(source, bytes)))
+         return 0;
+-    uint32_t p = heap_alloc(units * 2 + 6, true);
++    uint32_t p = win32_task_alloc(bytes + 6, true);
+     if (!p)
+         return 0;
+-    wr32(p, units * 2);
+-    if (source && units)
+-        memcpy(g_mem + p + 4, g_mem + source, units * 2);
++    wr32(p, bytes);
++    if (source && bytes)
++        memcpy(g_mem + p + 4, g_mem + source, bytes);
+     return p + 4;
+ }
++uint32_t bstr_alloc(uint32_t source, uint32_t units) {
++    if (units > (GUEST_SIZE - 6) / 2)
++        return 0;
++    return bstr_alloc_bytes(source, units * 2);
++}
+ bool bstr_valid(uint32_t b) {
+     return !b || (b >= 4 && heap_owns(b - 4) && heap_size(b - 4) >= 6 &&
+-                  rd32(b - 4) <= heap_size(b - 4) - 6 && !(rd32(b - 4) & 1));
++                  rd32(b - 4) <= heap_size(b - 4) - 6);
+ }
+ void bstr_free(uint32_t b) {
+     if (b && bstr_valid(b))
+-        heap_free(b - 4);
++        win32_task_free(b - 4);
+ }
+ uint32_t bstr_copy(uint32_t b) {
+-    return b ? bstr_alloc(b, rd32(b - 4) / 2) : 0;
++    return b ? bstr_alloc_bytes(b, rd32(b - 4)) : 0;
+ }
+ uint32_t element_size(uint16_t vt) {
+     switch (vt) {
+@@ -94,14 +102,14 @@ uint32_t array_bound_at(uint32_t a, uint32_t left_index) {
+     return a + 16 + 8 * left_index;
+ }
+ 
+-bool array_valid(uint32_t a) {
+-    if (!valid(a, 24) || !heap_owns(a))
++bool array_descriptor_valid(uint32_t a) {
++    if (!valid(a, 24))
+         return false;
+     uint32_t dims = array_dims(a);
+     if (dims < 1 || dims > kArrayMaxDims)
+         return false;
+     uint32_t header = 16 + 8 * dims;
+-    if (heap_size(a) < header || !valid(a, header) || !rd32(a + 4))
++    if (!valid(a, header) || !rd32(a + 4))
+         return false;
+     uint64_t count = 1;
+     for (uint32_t i = 0; i < dims; ++i) {
+@@ -110,8 +118,16 @@ bool array_valid(uint32_t a) {
+             return false;
+     }
+     uint64_t bytes = uint64_t(rd32(a + 4)) * count;
++    return bytes <= GUEST_SIZE;
++}
++bool array_valid(uint32_t a) {
++    if (!array_descriptor_valid(a))
++        return false;
++    uint64_t bytes = rd32(a + 4);
++    for (uint32_t i = 0; i < array_dims(a); ++i)
++        bytes *= rd32(a + 16 + 8 * i);
+     uint32_t data = rd32(a + 12);
+-    return bytes <= GUEST_SIZE && (!bytes || (heap_owns(data) && heap_size(data) >= bytes));
++    return !bytes || valid(data, uint32_t(bytes));
+ }
+ 
+ // Every element, across every dimension.
+@@ -123,7 +139,7 @@ uint32_t array_count(uint32_t a) {
+ }
+ uint32_t variant_clear(uint32_t v);
+ uint32_t variant_copy(uint32_t dst, uint32_t src, bool indirect, unsigned depth = 0);
+-uint32_t array_destroy(uint32_t a) {
++uint32_t array_destroy_data(uint32_t a) {
+     if (!a)
+         return 0;
+     if (!array_valid(a))
+@@ -141,11 +157,28 @@ uint32_t array_destroy(uint32_t a) {
+                 return hr;
+         }
+     }
+-    if (data)
+-        heap_free(data);
+-    heap_free(a);
++    // Static element storage remains the caller's allocation. Descriptor
++    // lifetime is separate from data lifetime, including embedded descriptors.
++    if (data && !(rd16(a + 2) & 2))
++        win32_task_free(data);
++    wr32(a + 12, 0);
+     return 0;
+ }
++uint32_t array_destroy_descriptor(uint32_t a) {
++    if (!a)
++        return 0;
++    if (!array_descriptor_valid(a))
++        return INVALID;
++    if (rd32(a + 8))
++        return 0x8002000du;
++    if (!(rd16(a + 2) & 7))
++        win32_task_free(a);
++    return 0;
++}
++uint32_t array_destroy(uint32_t a) {
++    uint32_t hr = array_destroy_data(a);
++    return hr ? hr : array_destroy_descriptor(a);
++}
+ // `bounds` is the caller's rgsabound, already in OLE's rightmost-first order,
+ // and is copied through unchanged.
+ uint32_t array_create_dims(uint16_t vt, uint32_t dims, const uint32_t *counts,
+@@ -164,12 +197,12 @@ uint32_t array_create_dims(uint16_t vt, uint32_t dims, const uint32_t *counts,
+     if (uint64_t(step) * count > GUEST_SIZE)
+         return 0;
+     uint32_t header = 16 + 8 * dims;
+-    uint32_t a = heap_alloc(header, true);
++    uint32_t a = win32_task_alloc(header, true);
+     if (!a)
+         return 0;
+-    uint32_t data = count ? heap_alloc(step * (uint32_t)count, true) : 0;
++    uint32_t data = count ? win32_task_alloc(step * (uint32_t)count, true) : 0;
+     if (count && !data) {
+-        heap_free(a);
++        win32_task_free(a);
+         return 0;
+     }
+     wr16(a, uint16_t(dims));
+@@ -303,6 +336,40 @@ uint32_t variant_copy(uint32_t dst, uint32_t src, bool indirect, unsigned depth)
+ void o_SysAllocStringLen(X86 *c) {
+     set_eax(c, bstr_alloc(arg(c, 0), arg(c, 1)));
+ }
++void o_SysAllocStringByteLen(X86 *c) {
++    set_eax(c, bstr_alloc_bytes(arg(c, 0), arg(c, 1)));
++}
++uint32_t terminated_units(uint32_t p) {
++    uint32_t n = 0;
++    while (p && p < GUEST_SIZE && n < (GUEST_SIZE - p) / 2 && rd16(p + n * 2))
++        ++n;
++    return n;
++}
++void o_SysAllocString(X86 *c) {
++    uint32_t p = arg(c, 0);
++    set_eax(c, p ? bstr_alloc(p, terminated_units(p)) : 0);
++}
++void o_SysStringLen(X86 *c) {
++    uint32_t b = arg(c, 0);
++    set_eax(c, b && bstr_valid(b) ? rd32(b - 4) / 2 : 0);
++}
++void o_SysStringByteLen(X86 *c) {
++    uint32_t b = arg(c, 0);
++    set_eax(c, b && bstr_valid(b) ? rd32(b - 4) : 0);
++}
++void o_SysReAllocString(X86 *c) {
++    uint32_t out = arg(c, 0), p = arg(c, 1);
++    if (!valid(out, 4)) {
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t b = p ? bstr_alloc(p, terminated_units(p)) : 0;
++    if (!p || b) {
++        bstr_free(rd32(out));
++        wr32(out, b);
++    }
++    set_eax(c, !p || b);
++}
+ void o_SysFreeString(X86 *c) {
+     bstr_free(arg(c, 0));
+     set_eax(c, 0);
+@@ -451,6 +518,34 @@ void o_SafeArrayCreate(X86 *c) {
+     }
+     set_eax(c, array_create_dims(uint16_t(arg(c, 0)), dims, counts, lowers));
+ }
++void o_SafeArrayAllocData(X86 *c) {
++    uint32_t a = arg(c, 0);
++    if (!array_descriptor_valid(a)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (rd32(a + 8)) {
++        set_eax(c, 0x8002000du);
++        return;
++    }
++    uint32_t bytes = rd32(a + 4) * array_count(a);
++    uint32_t data = win32_task_alloc(bytes, true);
++    if (!data && bytes) {
++        set_eax(c, OOM);
++        return;
++    }
++    wr32(a + 12, data);
++    set_eax(c, 0);
++}
++void o_SafeArrayDestroyDescriptor(X86 *c) {
++    set_eax(c, array_destroy_descriptor(arg(c, 0)));
++}
++void o_SafeArrayDestroyData(X86 *c) {
++    set_eax(c, array_destroy_data(arg(c, 0)));
++}
++void o_SafeArrayDestroy(X86 *c) {
++    set_eax(c, array_destroy(arg(c, 0)));
++}
+ void array_bound(X86 *c, bool upper) {
+     uint32_t a = arg(c, 0), out = arg(c, 2);
+     if (!array_valid(a) || !valid(out, 4)) {
+@@ -549,21 +644,102 @@ void o_SafeArrayPtrOfIndex(X86 *c) {
+     array_element(c, false, true);
+ }
+ void o_GetErrorInfo(X86 *c) {
+-    if (valid(arg(c, 1), 4))
+-        wr32(arg(c, 1), 0);
+-    set_eax(c, 1);
++    uint32_t out = arg(c, 1), tid = guest_current_thread_id();
++    if (arg(c, 0) || !valid(out, 4)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    uint32_t previous = error_info[tid];
++    error_info.erase(tid);
++    wr32(out, previous); // Transfer ownership rather than adding a reference.
++    set_eax(c, previous ? 0 : 1);
++}
++void o_SetErrorInfo(X86 *c) {
++    uint32_t next = arg(c, 1), tid = guest_current_thread_id();
++    if (arg(c, 0) || (next && (!valid(next, 4) || !valid(rd32(next), 12)))) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (next)
++        guest_call(c, rd32(rd32(next) + 4), next);
++    uint32_t previous = error_info[tid];
++    error_info[tid] = next;
++    if (previous)
++        guest_call(c, rd32(rd32(previous) + 8), previous);
++    set_eax(c, 0);
++}
++void o_OaBuildVersion(X86 *c) {
++    // OLE Automation 2.20, build 4054: the Win9x-era API contract exposed here.
++    set_eax(c, (20u << 16) | 4054u);
+ }
+ const ImportShim shims[] = {
+ #define O(name, n) {"OLEAUT32.dll", #name, n, o_##name}
+-    O(VariantInit, 1),           O(VariantClear, 1),        O(VariantCopy, 2),
+-    O(VariantCopyInd, 2),        O(VariantChangeType, 4),   O(SysAllocStringLen, 2),
+-    O(SysReAllocStringLen, 3),   O(SysFreeString, 1),       O(SafeArrayCreate, 3),
+-    O(SafeArrayGetLBound, 3),    O(SafeArrayGetUBound, 3),  O(SafeArrayGetElement, 3),
+-    O(SafeArrayPutElement, 3),   O(SafeArrayPtrOfIndex, 3), O(SafeArrayAccessData, 2),
+-    O(SafeArrayUnaccessData, 1), O(GetErrorInfo, 2)
++    O(VariantInit, 1),
++    O(VariantClear, 1),
++    O(VariantCopy, 2),
++    O(VariantCopyInd, 2),
++    O(VariantChangeType, 4),
++    O(SysAllocStringLen, 2),
++    O(SysReAllocStringLen, 3),
++    O(SysFreeString, 1),
++    O(SafeArrayCreate, 3),
++    O(SafeArrayGetLBound, 3),
++    O(SafeArrayGetUBound, 3),
++    O(SafeArrayGetElement, 3),
++    O(SafeArrayPutElement, 3),
++    O(SafeArrayPtrOfIndex, 3),
++    O(SafeArrayAccessData, 2),
++    O(SafeArrayUnaccessData, 1),
++    O(GetErrorInfo, 2),
++    O(SetErrorInfo, 2),
++    O(OaBuildVersion, 0),
++    O(SysAllocString, 1),
++    O(SysReAllocString, 2),
++    O(SysStringLen, 1),
++    O(SysStringByteLen, 1),
++    O(SysAllocStringByteLen, 2),
++    O(SafeArrayAllocData, 1),
++    O(SafeArrayDestroyDescriptor, 1),
++    O(SafeArrayDestroyData, 1),
++    O(SafeArrayDestroy, 1),
++#define ORD(n, name, argc) {"OLEAUT32.dll", "ord" #n, argc, o_##name}
++    ORD(2, SysAllocString, 1),
++    ORD(3, SysReAllocString, 2),
++    ORD(4, SysAllocStringLen, 2),
++    ORD(5, SysReAllocStringLen, 3),
++    ORD(6, SysFreeString, 1),
++    ORD(7, SysStringLen, 1),
++    ORD(8, VariantInit, 1),
++    ORD(9, VariantClear, 1),
++    ORD(10, VariantCopy, 2),
++    ORD(11, VariantCopyInd, 2),
++    ORD(12, VariantChangeType, 4),
++    ORD(15, SafeArrayCreate, 3),
++    ORD(16, SafeArrayDestroy, 1),
++    ORD(19, SafeArrayGetUBound, 3),
++    ORD(20, SafeArrayGetLBound, 3),
++    ORD(23, SafeArrayAccessData, 2),
++    ORD(24, SafeArrayUnaccessData, 1),
++    ORD(25, SafeArrayGetElement, 3),
++    ORD(26, SafeArrayPutElement, 3),
++    ORD(37, SafeArrayAllocData, 1),
++    ORD(38, SafeArrayDestroyDescriptor, 1),
++    ORD(39, SafeArrayDestroyData, 1),
++    ORD(148, SafeArrayPtrOfIndex, 3),
++    ORD(149, SysStringByteLen, 1),
++    ORD(150, SysAllocStringByteLen, 2),
++    ORD(200, GetErrorInfo, 2),
++    ORD(201, SetErrorInfo, 2),
++#undef ORD
++    {"OLEAUT32.dll", "ord170", 0, o_OaBuildVersion}
+ #undef O
+ };
+ } // namespace
+ void oleaut32_register() {
+     imports_register(shims, sizeof shims / sizeof shims[0]);
+ }
++void oleaut32_reset() {
++    // The loader has discarded the previous arena; its interface addresses
++    // must not be called or reused during a new process initialization.
++    error_info.clear();
++}
+diff --git a/runtime/resources.cpp b/runtime/resources.cpp
+index 0e77db2..c4a06ce 100644
+--- a/runtime/resources.cpp
++++ b/runtime/resources.cpp
+@@ -13,8 +13,9 @@ bool fail(std::string *why, const char *message) {
+ // guest read. PE resource strings carry a WORD length, not a NUL terminator.
+ struct Directory {
+     uint32_t image = 0, image_size = 0, root = 0, size = 0;
++    uint32_t module;
+     std::string *why;
+-    explicit Directory(std::string *reason) : why(reason) {
++    explicit Directory(std::string *reason, uint32_t selected = 0) : module(selected), why(reason) {
+         if (why)
+             why->clear();
+     }
+@@ -25,8 +26,11 @@ struct Directory {
+         return offset <= size && bytes <= size - offset;
+     }
+     bool open() {
+-        image = loader_image_base();
+-        image_size = loader_image_size();
++        image = module ? module : loader_image_base();
++        const LoaderModule *mapped = loader_module_containing(image);
++        if (!mapped || mapped->base != image)
++            return fail(why, "invalid resource module");
++        image_size = mapped->size;
+         if (!image || !gm_valid(image, image_size) || image_size < 64 || rd16(image) != 0x5a4d)
+             return fail(why, "no loaded PE image");
+         uint32_t nt = rd32(image + 0x3c);
+@@ -142,8 +146,9 @@ bool identifier(uint32_t p, ResourceName &out, std::string *why) {
+ }
+ } // namespace
+ 
+-uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::string *why) {
+-    Directory dir(why);
++uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::string *why,
++                       uint32_t module) {
++    Directory dir(why, module);
+     ResourceName type, name;
+     if (!dir.open() || !identifier(type_id_or_name, type, why) ||
+         !identifier(name_id_or_name, name, why))
+@@ -167,14 +172,20 @@ uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::
+ uint32_t resource_data(uint32_t entry, uint32_t *size, std::string *why) {
+     if (size)
+         *size = 0;
+-    Directory dir(why);
++    const LoaderModule *mapped = loader_module_containing(entry);
++    if (!mapped) {
++        fail(why, "resource handle outside a mapped module");
++        return 0;
++    }
++    Directory dir(why, mapped->base);
+     return dir.open() ? dir.data(entry, size) : 0;
+ }
+-bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names, std::string *why) {
++bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names, std::string *why,
++                    uint32_t module) {
+     if (!names)
+         return fail(why, "missing resource-name output");
+     names->clear();
+-    Directory dir(why);
++    Directory dir(why, module);
+     ResourceName type;
+     uint32_t type_dir, first, count;
+     if (!dir.open() || !identifier(type_id_or_name, type, why) || !dir.child(0, type, type_dir) ||
+diff --git a/runtime/resources.h b/runtime/resources.h
+index d746097..3dc3b0d 100644
+--- a/runtime/resources.h
++++ b/runtime/resources.h
+@@ -14,10 +14,10 @@ struct ResourceName {
+ // Type and name accept integer IDs, UTF-16 "#123", or UTF-16 names. Select the
+ // first language and return its IMAGE_RESOURCE_DATA_ENTRY address, or zero.
+ uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name,
+-                       std::string *why = nullptr);
++                       std::string *why = nullptr, uint32_t module = 0);
+ // Validate a data-entry handle and return its image-backed payload and size.
+ uint32_t resource_data(uint32_t entry, uint32_t *size, std::string *why = nullptr);
+ // Snapshot the names before guest callbacks run; no references into the directory
+ // or temporary guest buffers escape this reader. False explains failure in why.
+ bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names,
+-                    std::string *why = nullptr);
++                    std::string *why = nullptr, uint32_t module = 0);
+diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
+index 7016990..a389f47 100644
+--- a/runtime/tests/runtime_tests.cpp
++++ b/runtime/tests/runtime_tests.cpp
+@@ -184,7 +184,8 @@ static bool pefile_sections(ExpectedImage &out, std::string &err) {
+         "[print('IMPORT %x %s %s' % (i.address, d.dll.decode(), "
+         "i.name.decode() if i.name else 'ord%d' % i.ordinal)) "
+         "for d in getattr(pe, 'DIRECTORY_ENTRY_IMPORT', []) for i in d.imports]"
+-        "\" 2>/dev/null";
++        "\" 2>" +
++        std::string(os_null_device());
+     const char *cmd = cmd_s.c_str();
+     FILE *p = popen(cmd, "r");
+     if (!p) {
+@@ -350,6 +351,335 @@ static void test_modules_and_wide() {
+           "gm_put_wstr rejects addresses outside the arena");
+ }
+ 
++static void test_wide_string_comparison() {
++    section("wide string comparison");
++    X86 c = *loader_context();
++    uint32_t a = scratch, b = scratch + 512;
++    gm_put_wstr(a, "Runtime", 64);
++    gm_put_wstr(b, "runtime", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpiW", {a, b}) == 0,
++          "lstrcmpiW ignores ASCII case and pops two arguments");
++    check((int32_t)call_import(&c, "KERNEL32.dll", "lstrcmpW", {a, b}) < 0,
++          "lstrcmpW preserves case");
++    gm_put_wstr(a, "\xc3\x89", 64);
++    gm_put_wstr(b, "\xc3\xa9", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpiW", {a, b}) == 0,
++          "lstrcmpiW folds Latin-1 letters");
++    wr16(a, 0x0141);
++    wr16(a + 2, 0);
++    wr16(b, 0x0041);
++    wr16(b + 2, 0);
++    check((int32_t)call_import(&c, "KERNEL32.dll", "lstrcmpiW", {a, b}) > 0,
++          "wide comparison retains the high byte of UTF-16 units");
++    gm_put_wstr(a, "a", 64);
++    gm_put_wstr(b, "ab", 64);
++    check((int32_t)call_import(&c, "KERNEL32.dll", "lstrcmpiW", {a, b}) < 0,
++          "a string sorts before a longer string with the same prefix");
++    gm_put_wstr(a, "", 64);
++    gm_put_wstr(b, "", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpW", {a, b}) == 0,
++          "empty wide strings compare equal");
++}
++
++static void test_task_allocator() {
++    section("COM task allocator");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t out = scratch, iid = scratch + 64;
++    check(call_import(&c, "ole32.dll", "CoGetMalloc", {2, out}) == 0x80070057u && rd32(out) == 0,
++          "CoGetMalloc rejects a non-task memory context");
++    check(call_import(&c, "ole32.dll", "CoGetMalloc", {1, out}) == 0,
++          "CoGetMalloc supplies a task allocator");
++    uint32_t obj = rd32(out), vt = rd32(obj);
++    check(obj && gm_valid(vt, 36), "allocator has a nine-slot guest vtable");
++    if (!obj || !gm_valid(vt, 36))
++        return;
++    auto method = [&](uint32_t slot, const std::vector<uint32_t> &args) {
++        uint32_t esp = c.r[R_ESP];
++        uint32_t result = guest_call(&c, rd32(vt + slot * 4), args.data(), args.size());
++        check(c.r[R_ESP] == esp, "IMalloc slot %u preserves the caller stack", slot);
++        return result;
++    };
++    uint32_t p = method(3, {obj, 17});
++    check(p && heap_owns(p) && method(6, {obj, p}) == 17,
++          "IMalloc allocation reports its requested size");
++    wr8(p, 0x5a);
++    uint32_t q = method(4, {obj, p, 4096});
++    check(q && rd8(q) == 0x5a && method(6, {obj, q}) == 4096,
++          "IMalloc Realloc preserves contents and updates the size");
++    uint32_t other = heap_alloc(16);
++    check(method(7, {obj, q}) == 1 && method(7, {obj, other}) == 0 &&
++              method(7, {obj, 0}) == 0xffffffffu,
++          "DidAlloc distinguishes task storage, other storage, and NULL");
++    uint32_t task = call_import(&c, "ole32.dll", "CoTaskMemAlloc", {25});
++    check(method(7, {obj, task}) == 1 && method(6, {obj, task}) == 25,
++          "CoTaskMemAlloc shares the IMalloc memory context");
++    method(5, {obj, task});
++    call_import(&c, "ole32.dll", "CoTaskMemFree", {q});
++    check(!heap_owns(task) && !heap_owns(q), "both APIs release shared task storage");
++    heap_free(other);
++    memset(g_mem + iid, 0, 16);
++    wr32(iid, 2);
++    wr8(iid + 8, 0xc0);
++    wr8(iid + 15, 0x46);
++    check(method(0, {obj, iid, out}) == 0 && rd32(out) == obj,
++          "QueryInterface for IMalloc retains the allocator identity");
++    method(2, {obj});
++    method(2, {obj});
++    check(call_import(&c, "ole32.dll", "CoGetMalloc", {1, out}) == 0 && rd32(out) == obj,
++          "the process retains its allocator after client references are released");
++    method(2, {obj});
++    check(call_import(&c, "OLEAUT32.dll", "OaBuildVersion", {}) ==
++              call_import(&c, "OLEAUT32.dll", "ord170", {}),
++          "OLE Automation version resolves by name and ordinal");
++}
++
++static void test_module_string_resources() {
++    section("mapped module string resources");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t out = scratch;
++    for (uint32_t m = 0; m < loader_module_count(); ++m) {
++        const LoaderModule *module = loader_module(m);
++        std::vector<ResourceName> names;
++        if (!resource_names(6, &names, nullptr, module->base))
++            continue;
++        for (const auto &name : names) {
++            if (name.is_string)
++                continue;
++            uint32_t bytes = 0;
++            uint32_t p = resource_data(resource_find(6, name.id, nullptr, module->base), &bytes);
++            uint32_t end = p + bytes;
++            for (uint32_t i = 0; p && i < 16 && p + 2 <= end; ++i) {
++                uint32_t n = rd16(p);
++                p += 2;
++                if (n > (end - p) / 2)
++                    break;
++                if (n) {
++                    uint32_t id = (name.id - 1) * 16 + i;
++                    check(call_import(&c, "USER32.dll", "LoadStringW",
++                                      {module->base, id, out, 0}) == n &&
++                              rd32(out) == p,
++                          "LoadStringW reads the selected auxiliary image");
++                    uint32_t copied = call_import(&c, "USER32.dll", "LoadStringA",
++                                                  {module->base, id, out + 16, 4});
++                    check(copied == std::min(n, 3u) && rd8(out + 16 + copied) == 0,
++                          "LoadStringA truncates and terminates its ANSI buffer");
++                    wr8(out + 16, 0x5a);
++                    check(call_import(&c, "USER32.dll", "LoadStringA",
++                                      {module->base, id, out + 16, 0}) == 0 &&
++                              rd8(out + 16) == 0x5a,
++                          "LoadStringA zero capacity does not write a pointer");
++                    return;
++                }
++                p += n * 2;
++            }
++        }
++    }
++    printf("  [skip] no auxiliary string resource\n");
++    ++g_skips;
++}
++
++static void test_vb_startup_platform_apis() {
++    section("shared ANSI startup APIs");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    check(call_import(&c, "KERNEL32.dll", "GetUserDefaultLangID", {}) == 0x0409 &&
++              call_import(&c, "KERNEL32.dll", "GetSystemDefaultLangID", {}) == 0x0409,
++          "language IDs agree with the runtime's en-US locale");
++    gm_put_str(s, "Text", 64);
++    check(call_import(&c, "USER32.dll", "CharNextA", {s}) == s + 1 &&
++              call_import(&c, "USER32.dll", "CharNextA", {s + 4}) == s + 4,
++          "CharNextA advances a code-page-1252 byte and stops at the terminator");
++    gm_put_str(s, "FixtureFormat", 64);
++    gm_put_wstr(s + 128, "fixtureformat", 64);
++    uint32_t fmt = call_import(&c, "USER32.dll", "RegisterClipboardFormatA", {s});
++    check(fmt >= 0xc000 && fmt <= 0xffff &&
++              call_import(&c, "USER32.dll", "RegisterClipboardFormatW", {s + 128}) == fmt,
++          "clipboard format names share ANSI/Unicode identity ignoring ASCII case");
++    uint32_t atom = call_import(&c, "KERNEL32.dll", "GlobalAddAtomA", {s});
++    check(atom >= 0xc000 && call_import(&c, "KERNEL32.dll", "GlobalFindAtomW", {s + 128}) == atom,
++          "ANSI atom addition shares the Unicode atom table");
++    call_import(&c, "KERNEL32.dll", "GlobalDeleteAtom", {atom});
++
++    gm_put_wstr(s + 256, "wide", 64);
++    uint32_t b = call_import(&c, "OLEAUT32.dll", "ord2", {s + 256});
++    check(b && rd32(b - 4) == 8 && gm_wstr(b) == "wide" &&
++              call_import(&c, "OLEAUT32.dll", "ord7", {b}) == 4,
++          "SysAllocString and SysStringLen resolve their actual export ordinals");
++    wr32(s + 384, b);
++    check(call_import(&c, "OLEAUT32.dll", "SysReAllocString", {s + 384, b + 2}) == 1 &&
++              gm_wstr(rd32(s + 384)) == "ide",
++          "BSTR reallocation can read from the original string before releasing it");
++    check(call_import(&c, "OLEAUT32.dll", "SysReAllocString", {s + 384, 0}) == 1 &&
++              rd32(s + 384) == 0,
++          "SysReAllocString NULL source releases the original BSTR");
++    check(call_import(&c, "ole32.dll", "CoRegisterMessageFilter", {0, s + 384}) == 0 &&
++              rd32(s + 384) == 0,
++          "revoking an absent message filter succeeds and returns NULL");
++    uint32_t hook = call_import(&c, "USER32.dll", "SetWindowsHookExA", {3, 1, 0, 0});
++    check(hook && call_import(&c, "USER32.dll", "UnhookWindowsHookEx", {hook}) == 1,
++          "ANSI hook registration uses the shared hook lifetime model");
++    uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
++    uint32_t original = call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 7});
++    uint32_t bitmap = call_import(&c, "GDI32.dll", "CreateCompatibleBitmap", {dc, 2, 3});
++    check(dc && original && bitmap &&
++              call_import(&c, "GDI32.dll", "SelectObject", {dc, bitmap}) == original &&
++              call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 7}) == bitmap,
++          "GetCurrentObject follows the bitmap selected into the DC");
++    call_import(&c, "GDI32.dll", "SelectObject", {dc, original});
++    check(call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 7}) == original &&
++              call_import(&c, "GDI32.dll", "GetCurrentObject", {0, 7}) == 0 &&
++              call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 99}) == 0,
++          "the default bitmap is restored and invalid queries fail");
++    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
++    call_import(&c, "GDI32.dll", "DeleteDC", {dc});
++
++    uint32_t wc = s + 512, info = s + 640;
++    gm_put_str(s, "StartupFixtureClass", 64);
++    memset(g_mem + wc, 0, 40);
++    wr32(wc, 0x23);
++    wr32(wc + 12, 16);
++    wr32(wc + 16, IMAGE_BASE);
++    wr32(wc + 36, s);
++    check(call_import(&c, "USER32.dll", "RegisterClassA", {wc}) != 0,
++          "ANSI fixture window class registers");
++    wr32(info + 48, 0x5a5a5a5a);
++    check(call_import(&c, "USER32.dll", "GetClassInfoA", {IMAGE_BASE, s, info}) == 1 &&
++              rd32(info) == 0x23 && rd32(info + 12) == 16 && rd32(info + 16) == IMAGE_BASE,
++          "GetClassInfoA returns WNDCLASS fields at their x86 offsets");
++    check(call_import(&c, "USER32.dll", "GetClassInfoExA", {IMAGE_BASE, s, info}) == 1 &&
++              rd32(info) == 48 && rd32(info + 4) == 0x23 && rd32(info + 16) == 16 &&
++              rd32(info + 48) == 0x5a5a5a5a,
++          "GetClassInfoExA shifts fields after cbSize without overflowing WNDCLASSEX");
++    call_import(&c, "USER32.dll", "UnregisterClassA", {s, IMAGE_BASE});
++    for (uint32_t m = 0; m < loader_module_count(); ++m) {
++        const LoaderModule *module = loader_module(m);
++        call_import(&c, "KERNEL32.dll", "GetModuleFileNameA", {module->base, s, 256});
++        check(gm_str(s) == std::string(RECOMP_GUEST_ROOT "\\") + module->name,
++              "GetModuleFileNameA selects the auxiliary module rather than the EXE");
++    }
++}
++
++static void fixture_interface_addref(X86 *c) {
++    uint32_t p = arg(c, 0);
++    wr32(p + 4, rd32(p + 4) + 1);
++    set_eax(c, rd32(p + 4));
++}
++static void fixture_interface_release(X86 *c) {
++    uint32_t p = arg(c, 0);
++    wr32(p + 4, rd32(p + 4) - 1);
++    set_eax(c, rd32(p + 4));
++}
++static void test_automation_interface_ownership() {
++    section("Automation interface ownership");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t obj = scratch, vt = scratch + 16, out = scratch + 48;
++    memset(g_mem + obj, 0, 64);
++    wr32(obj, vt);
++    wr32(obj + 4, 1);
++    uint32_t addref =
++        imports_alloc_trampoline("ownership-fixture.dll", "AddRef", fixture_interface_addref, 1);
++    uint32_t release =
++        imports_alloc_trampoline("ownership-fixture.dll", "Release", fixture_interface_release, 1);
++    wr32(vt + 4, addref);
++    wr32(vt + 8, release);
++    check(call_import(&c, "OLEAUT32.dll", "ord201", {0, obj}) == 0 && rd32(obj + 4) == 2,
++          "SetErrorInfo owns one additional interface reference");
++    check(call_import(&c, "OLEAUT32.dll", "SetErrorInfo", {0, obj}) == 0 && rd32(obj + 4) == 2,
++          "replacing error info with itself balances the old reference");
++    check(call_import(&c, "OLEAUT32.dll", "GetErrorInfo", {0, out}) == 0 && rd32(out) == obj &&
++              rd32(obj + 4) == 2,
++          "GetErrorInfo transfers the owned reference without adding another");
++    guest_call(&c, release, obj);
++    check(call_import(&c, "OLEAUT32.dll", "GetErrorInfo", {0, out}) == 1 && rd32(out) == 0,
++          "retrieving error information clears the thread's slot");
++    call_import(&c, "OLEAUT32.dll", "SetErrorInfo", {0, obj});
++    check(call_import(&c, "OLEAUT32.dll", "SetErrorInfo", {0, 0}) == 0 && rd32(obj + 4) == 1,
++          "clearing error information releases its reference");
++    check(call_import(&c, "ole32.dll", "CoRegisterMessageFilter", {obj, out}) == 0 &&
++              rd32(out) == 0 && rd32(obj + 4) == 2,
++          "message filter registration owns a reference");
++    check(call_import(&c, "ole32.dll", "CoRegisterMessageFilter", {0, out}) == 0 &&
++              rd32(out) == obj && rd32(obj + 4) == 2,
++          "the previous message filter reference is transferred to its caller");
++    guest_call(&c, release, obj);
++    call_import(&c, "ole32.dll", "CoRegisterMessageFilter", {obj, 0});
++    check(call_import(&c, "ole32.dll", "CoRegisterMessageFilter", {0, 0}) == 0 &&
++              rd32(obj + 4) == 1,
++          "replacing a filter without requesting it releases it");
++}
++
++static void test_automation_storage() {
++    section("Automation storage created outside SafeArrayCreate");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    wr8(s, 0x41);
++    wr8(s + 1, 0);
++    wr8(s + 2, 0x42);
++    uint32_t b = call_import(&c, "OLEAUT32.dll", "ord150", {s, 3});
++    check(b && rd32(b - 4) == 3 && rd8(b + 2) == 0x42 && rd16(b + 3) == 0 &&
++              call_import(&c, "OLEAUT32.dll", "SysStringByteLen", {b}) == 3,
++          "SysAllocStringByteLen preserves odd byte counts, embedded NULs and termination");
++    uint32_t src = s + 64, dst = s + 80;
++    memset(g_mem + src, 0, 32);
++    wr16(src, 8);
++    wr32(src + 8, b);
++    check(call_import(&c, "OLEAUT32.dll", "VariantCopy", {dst, src}) == 0 &&
++              rd32(rd32(dst + 8) - 4) == 3 && rd8(rd32(dst + 8) + 2) == 0x42,
++          "VariantCopy preserves all bytes of a binary BSTR");
++    call_import(&c, "OLEAUT32.dll", "VariantClear", {src});
++    call_import(&c, "OLEAUT32.dll", "VariantClear", {dst});
++
++    uint32_t a = call_import(&c, "ole32.dll", "CoTaskMemAlloc", {32});
++    memset(g_mem + a, 0, 32);
++    wr16(a, 2);
++    wr32(a + 4, 4);
++    wr32(a + 16, 2);
++    wr32(a + 20, uint32_t(-1));
++    wr32(a + 24, 3);
++    wr32(a + 28, 5);
++    check(call_import(&c, "OLEAUT32.dll", "ord37", {a}) == 0 && rd32(a + 12) != 0,
++          "SafeArrayAllocData accepts a caller-created two-dimensional descriptor");
++    uint32_t data = rd32(a + 12);
++    check(heap_size(data) == 24 && rd32(data) == 0 && rd32(data + 20) == 0,
++          "array storage has the product of the bounds and is zero initialized");
++    wr32(a + 8, 1);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyData", {a}) == 0x8002000du &&
++              call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyDescriptor", {a}) == 0x8002000du &&
++              heap_owns(a) && heap_owns(data),
++          "locked arrays retain both their descriptor and data");
++    wr32(a + 8, 0);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyData", {a}) == 0 && !heap_owns(data) &&
++              heap_owns(a) && rd32(a + 12) == 0,
++          "DestroyData releases only the elements and clears pvData");
++    check(call_import(&c, "OLEAUT32.dll", "ord38", {a}) == 0 && !heap_owns(a),
++          "DestroyDescriptor releases the descriptor separately");
++    a = s + 128;
++    memset(g_mem + a, 0, 24);
++    wr16(a, 1);
++    wr16(a + 2, 4);
++    wr32(a + 4, 1);
++    wr32(a + 16, 3);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayAllocData", {a}) == 0 &&
++              call_import(&c, "OLEAUT32.dll", "SafeArrayDestroy", {a}) == 0 && rd16(a) == 1,
++          "an embedded descriptor survives destruction of its allocated data");
++    a = call_import(&c, "ole32.dll", "CoTaskMemAlloc", {24});
++    memset(g_mem + a, 0, 24);
++    wr16(a, 1);
++    wr32(a + 4, 1);
++    wr32(a + 16, 4);
++    wr32(a + 12, call_import(&c, "ole32.dll", "CoTaskMemAlloc", {4}));
++    data = rd32(a + 12);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyDescriptor", {a}) == 0 &&
++              heap_owns(data),
++          "DestroyDescriptor does not release the data allocation");
++    call_import(&c, "ole32.dll", "CoTaskMemFree", {data});
++}
++
+ static void test_session_notification_service_unavailable() {
+     section("session notification service");
+     X86 c;
+@@ -755,18 +1085,27 @@ static void test_loader() {
+             uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
+             uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
+             uint32_t value = rd32(import.slot);
+-            if (data) {
++            const LoaderModule *mapped = loader_module_named(import.dll.c_str());
++            uint32_t mapped_address = 0;
++            if (mapped) {
++                mapped_address = import.name.compare(0, 3, "ord") == 0
++                                     ? loader_module_export_ordinal(
++                                           *mapped, strtoul(import.name.c_str() + 3, nullptr, 10))
++                                     : loader_module_export(*mapped, import.name.c_str());
++                iat_ok &=
++                    mapped_address && value == mapped_address && !imports_is_trampoline(value);
++            } else if (data) {
+                 ++data_slots;
+                 iat_ok &= value == data && !imports_is_trampoline(value);
+             } else {
+                 iat_ok &= value == trampoline && imports_is_trampoline(value) &&
+                           imports_describe(value) != nullptr;
+             }
+-            if (value != (data ? data : trampoline))
++            if (value != (mapped ? mapped_address : data ? data : trampoline))
+                 printf("  IAT mismatch at %08x for %s!%s\n", import.slot, import.dll.c_str(),
+                        import.name.c_str());
+         }
+-        check(iat_ok, "every PE import slot holds its symbol's trampoline or data storage");
++        check(iat_ok, "every PE import slot holds its mapped export, trampoline or data storage");
+         check(loader_iat_data_imports() == data_slots,
+               "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
+               data_slots);
+@@ -6434,6 +6773,21 @@ static void test_dll_lifetime() {
+     gm_put_wstr(s + 128, mapped->name.c_str(), 128);
+     check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
+           "lookup of a mapped but unloaded DLL does not initialize it");
++    LoaderModule importing;
++    importing.base = 0x0e120000;
++    importing.size = 0x1000;
++    memset(g_mem + importing.base, 0, importing.size);
++    wr32(importing.base + 0x3c, 0x80);
++    wr32(importing.base + 0x80 + 24 + 104, 0x200);
++    wr32(importing.base + 0x200 + 12, 0x300);
++    gm_put_str(importing.base + 0x300, mapped->name.c_str(), 128);
++    c.r[R_EAX] = 0x1234;
++    c.eip = 0x5678;
++    check(win32_attach_static_imports(&c, importing) && attaches == 1 && mapped->attached &&
++              c.r[R_EAX] == 0x1234 && c.eip == 0x5678 && c.r[R_ESP] == esp,
++          "static imports initialize dependencies before entry and preserve caller state");
++    call_import(&c, "KERNEL32.dll", "FreeLibrary", {mapped->base});
++    attaches = detaches = 0;
+     fail_attach = true;
+     check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
+               call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
+@@ -6687,6 +7041,12 @@ int main(int argc, char **argv) {
+         // remaining platform APIs or optional resources are supported.
+         scratch = 0x0ee00000;
+         test_startup_apis(loader_context());
++        test_wide_string_comparison();
++        test_task_allocator();
++        test_module_string_resources();
++        test_vb_startup_platform_apis();
++        test_automation_storage();
++        test_automation_interface_ownership();
+         test_registry(loader_context());
+         printf("\n%d startup checks, %d failures, %d skipped\n", g_checks, g_failures, g_skips);
+         return g_failures ? 1 : 0;
+@@ -6695,6 +7055,12 @@ int main(int argc, char **argv) {
+     test_startup_apis(loader_context());
+     test_import_return_trace();
+     test_modules_and_wide();
++    test_wide_string_comparison();
++    test_task_allocator();
++    test_module_string_resources();
++    test_vb_startup_platform_apis();
++    test_automation_storage();
++    test_automation_interface_ownership();
+     test_preferred_ui_languages();
+     test_session_notification_service_unavailable();
+     test_buffered_paint_unavailable();
+diff --git a/runtime/user32.cpp b/runtime/user32.cpp
+index 2ef5486..a659238 100644
+--- a/runtime/user32.cpp
++++ b/runtime/user32.cpp
+@@ -1398,6 +1398,18 @@ void u_MessageBoxA(X86 *c) {
+          gm_str(arg(c, 1), 1024).c_str(), answer);
+     set_eax(c, answer);
+ }
++void u_MessageBoxIndirectA(X86 *c) {
++    uint32_t p = arg(c, 0);
++    if (!p || !gm_valid(p, 40) || rd32(p) != 40) {
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t answer = message_box_default(rd32(p + 20));
++    LOGW("MessageBoxIndirectA: [%s] %s -> default button %u", gm_str(rd32(p + 16), 256).c_str(),
++         gm_str(rd32(p + 12), 1024).c_str(), answer);
++    set_eax(c, answer);
++}
+ 
+ void u_MessageBoxW(X86 *c) {
+     std::string text;
+@@ -1741,6 +1753,7 @@ const ImportShim g_user32_shims[] = {
+     {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
+     {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
+     {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
++    {"USER32.dll", "MessageBoxIndirectA", 1, u_MessageBoxIndirectA},
+     {"USER32.dll", "MessageBoxW", 4, u_MessageBoxW},
+     {"USER32.dll", "wvsprintfA", 3, u_wvsprintfA},
+     // Not imported by D3DPopTB.exe, but registered so GetProcAddress and the
+diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
+index dea756d..6a8bc73 100644
+--- a/runtime/user32_vcl.cpp
++++ b/runtime/user32_vcl.cpp
+@@ -1039,8 +1039,8 @@ void insert_menu(X86 *c) {
+ bool clipboard_open = false;
+ std::map<uint32_t, uint32_t> clipboard;
+ std::map<std::string, uint32_t> clipboard_formats, window_messages;
+-uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
+-    std::string name = gm_wstr(p);
++uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p, bool wide = true) {
++    std::string name = wide ? gm_wstr(p) : gm_str(p);
+     if (name.empty())
+         return 0;
+     for (char &ch : name)
+@@ -1057,6 +1057,9 @@ uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
+ void register_clipboard(X86 *c) {
+     set_eax(c, register_name(clipboard_formats, arg(c, 0)));
+ }
++void register_clipboard_a(X86 *c) {
++    set_eax(c, register_name(clipboard_formats, arg(c, 0), false));
++}
+ void register_message(X86 *c) {
+     set_eax(c, register_name(window_messages, arg(c, 0)));
+ }
+@@ -1458,8 +1461,10 @@ const ImportShim shims[] = {
+     U("EmptyClipboard", 0, empty_clipboard),
+     U("SetClipboardData", 2, set_clipboard),
+     U("RegisterClipboardFormatW", 1, register_clipboard),
++    U("RegisterClipboardFormatA", 1, register_clipboard_a),
+     U("RegisterWindowMessageW", 1, register_message),
+     U("SetWindowsHookExW", 4, set_hook),
++    U("SetWindowsHookExA", 4, set_hook),
+     U("UnhookWindowsHookEx", 1, unhook),
+     U("CallNextHookEx", 4, zero),
+     U("CreateAcceleratorTableW", 2, create_accelerator),
+diff --git a/runtime/user32_wide.cpp b/runtime/user32_wide.cpp
+index ff9b21d..efff03f 100644
+--- a/runtime/user32_wide.cpp
++++ b/runtime/user32_wide.cpp
+@@ -122,21 +122,40 @@ void unregister_w(X86 *c) {
+             ++i;
+     set_eax(c, 1);
+ }
+-void class_info(X86 *c) {
++void class_info_encoded(X86 *c, bool wide, bool extended) {
+     ensure_system_classes();
+-    auto it = classes().find(class_key(arg(c, 1), true));
++    auto it = classes().find(class_key(arg(c, 1), wide));
+     uint32_t p = arg(c, 2);
+-    if (it == classes().end() || !p || !gm_valid(p, 40)) {
++    uint32_t bytes = extended ? 48 : 40;
++    if (it == classes().end() || !p || !gm_valid(p, bytes)) {
+         set_eax(c, 0);
+         return;
+     }
+     const auto &w = it->second;
++    if (extended) {
++        wr32(p, 48);
++        p += 4;
++    }
+     uint32_t values[] = {w.style, w.wndproc, w.cls_extra, w.wnd_extra, w.hinstance,
+                          w.hicon, w.hcursor, w.hbrush,    w.menu_id,   arg(c, 1)};
+     for (uint32_t i = 0; i < 10; ++i)
+         wr32(p + 4 * i, values[i]);
++    if (extended)
++        wr32(p + 40, w.hicon);
+     set_eax(c, 1);
+ }
++void class_info(X86 *c) {
++    class_info_encoded(c, true, false);
++}
++void class_info_a(X86 *c) {
++    class_info_encoded(c, false, false);
++}
++void class_info_ex_a(X86 *c) {
++    class_info_encoded(c, false, true);
++}
++void class_info_ex_w(X86 *c) {
++    class_info_encoded(c, true, true);
++}
+ void class_long(X86 *c, bool set) {
+     Window *w = find_window(arg(c, 0));
+     auto it = w ? classes().find(w->cls) : classes().end();
+@@ -234,9 +253,10 @@ void find_ex_w(X86 *c) {
+     find_named(c, true);
+ }
+ // RT_STRING blocks contain sixteen WORD-length-prefixed UTF-16 strings.
+-void load_string(X86 *c) {
++void load_string_encoded(X86 *c, bool wide) {
+     uint32_t id = arg(c, 1) & 0xffff, out = arg(c, 2), cap = arg(c, 3), bytes = 0;
+-    uint32_t p = resource_data(resource_find(6, (id >> 4) + 1), &bytes), end = p + bytes;
++    uint32_t p = resource_data(resource_find(6, (id >> 4) + 1, nullptr, arg(c, 0)), &bytes),
++             end = p + bytes;
+     for (uint32_t i = 0; p && i < 16; ++i) {
+         if (end - p < 2)
+             break;
+@@ -248,12 +268,37 @@ void load_string(X86 *c) {
+             if (!out)
+                 break;
+             if (!cap) {
++                if (!wide)
++                    break;
+                 if (!gm_valid(out, 4))
+                     break;
+                 wr32(out, p);
+                 set_eax(c, n);
+                 return;
+             }
++            if (!wide) {
++                if (!gm_valid(out, cap))
++                    break;
++                n = std::min(n, cap - 1);
++                // The guest ANSI code page is 1252. Resource text outside its
++                // repertoire is represented by the default replacement byte.
++                static const uint16_t cp1252[] = {
++                    0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
++                    0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f,
++                    0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
++                    0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178};
++                for (uint32_t j = 0; j < n; ++j) {
++                    uint16_t w = rd16(p + j * 2);
++                    uint8_t ch = w < 0x80 || (w >= 0xa0 && w <= 0xff) ? (uint8_t)w : '?';
++                    for (uint32_t k = 0; k < 32; ++k)
++                        if (cp1252[k] == w)
++                            ch = 0x80 + k;
++                    wr8(out + j, ch);
++                }
++                wr8(out + n, 0);
++                set_eax(c, n);
++                return;
++            }
+             n = std::min(n, cap - 1);
+             if (!gm_valid(out, (n + 1) * 2))
+                 break;
+@@ -266,8 +311,14 @@ void load_string(X86 *c) {
+     }
+     set_eax(c, 0);
+ }
++void load_string(X86 *c) {
++    load_string_encoded(c, true);
++}
++void load_string_a(X86 *c) {
++    load_string_encoded(c, false);
++}
+ void load_bitmap(X86 *c) {
+-    uint32_t bytes = 0, p = resource_data(resource_find(2, arg(c, 1)), &bytes);
++    uint32_t bytes = 0, p = resource_data(resource_find(2, arg(c, 1), nullptr, arg(c, 0)), &bytes);
+     GdiImage image;
+     set_eax(c, p && gdi_decode_image(p, bytes, &image) ? gdi_image_bitmap(image) : 0);
+ }
+@@ -276,12 +327,12 @@ void load_icon(X86 *c) {
+         alias_ansi(c, "LoadIconA");
+         return;
+     }
+-    uint32_t bytes = 0, p = resource_data(resource_find(14, arg(c, 1)), &bytes);
++    uint32_t bytes = 0, p = resource_data(resource_find(14, arg(c, 1), nullptr, arg(c, 0)), &bytes);
+     if (!p || bytes < 20 || !rd16(p + 4)) {
+         set_eax(c, 0);
+         return;
+     }
+-    p = resource_data(resource_find(3, rd16(p + 18)), &bytes);
++    p = resource_data(resource_find(3, rd16(p + 18), nullptr, arg(c, 0)), &bytes);
+     GdiImage image;
+     // Icon DIB heights include the AND mask. Decode the XOR plane at half height.
+     if (!p || bytes < 40 || rd32(p) < 40) {
+@@ -299,6 +350,70 @@ void load_icon(X86 *c) {
+     heap_free(copy);
+     set_eax(c, ok ? gdi_create_icon(image) : 0);
+ }
++void load_image_encoded(X86 *c, bool wide) {
++    uint32_t module = arg(c, 0), name = arg(c, 1), type = arg(c, 2), flags = arg(c, 5);
++    int32_t width = (int32_t)arg(c, 3), height = (int32_t)arg(c, 4);
++    if (type > 2 || width < 0 || height < 0 || (flags & 0x10)) {
++        // File image decoding needs the file format path; do not treat a file
++        // name as an image resource or report a synthetic successful handle.
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t temporary = 0;
++    if (!wide && name > 0xffff) {
++        std::string text = gm_str(name);
++        temporary = heap_alloc((uint32_t(text.size()) + 1) * 2, true);
++        if (!temporary) {
++            set_eax(c, 0);
++            return;
++        }
++        gm_put_wstr(temporary, text, uint32_t(text.size()) + 1);
++        name = temporary;
++    }
++    const char *api = type == 0 ? "LoadBitmapW" : type == 1 ? "LoadIconW" : "LoadCursorW";
++    uint32_t handle = guest_call(c, imports_resolve("USER32.dll", api), module, name);
++    if (temporary)
++        heap_free(temporary);
++    if (handle && type <= 1 && (width || height || (flags & 0x40))) {
++        GdiImage source;
++        bool read = type ? gdi_read_icon(handle, &source) : gdi_read_bitmap(handle, &source);
++        if (read) {
++            if (!width)
++                width = flags & 0x40 ? 32 : source.width;
++            if (!height)
++                height = flags & 0x40 ? 32 : source.height;
++            if (width > 4096 || height > 4096) {
++                set_eax(c, 0);
++                return;
++            }
++            if (width != source.width || height != source.height) {
++                GdiImage scaled;
++                scaled.width = width;
++                scaled.height = height;
++                scaled.pixels.resize(size_t(width) * height);
++                for (int32_t y = 0; y < height; ++y)
++                    for (int32_t x = 0; x < width; ++x)
++                        scaled.pixels[size_t(y) * width + x] =
++                            source.pixels[size_t(y * source.height / height) * source.width +
++                                          x * source.width / width];
++                uint32_t resized = type ? gdi_create_icon(scaled) : gdi_image_bitmap(scaled);
++                if (type)
++                    gdi_delete_icon(handle);
++                else
++                    gdi_delete_bitmap(handle);
++                handle = resized;
++            }
++        }
++    }
++    set_eax(c, handle);
++}
++void load_image_a(X86 *c) {
++    load_image_encoded(c, false);
++}
++void load_image_w(X86 *c) {
++    load_image_encoded(c, true);
++}
+ void draw_text(X86 *c) {
+     set_eax(c, gdi::draw_text(arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4)));
+ }
+@@ -370,6 +485,11 @@ void next_char(X86 *c) {
+     uint32_t p = arg(c, 0);
+     set_eax(c, p && rd16(p) ? p + 2 : p);
+ }
++void next_char_a(X86 *c) {
++    uint32_t p = arg(c, 0);
++    // The runtime's ANSI code page, 1252, has single-byte characters.
++    set_eax(c, p && gm_valid(p, 1) && rd8(p) ? p + 1 : p);
++}
+ void map_key(X86 *c) {
+     // Set 1 scan codes for the US layout used by the host input gate.
+     static const uint8_t letters[26] = {30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+@@ -506,6 +626,9 @@ const ImportShim shims[] = {
+     W("RegisterClassW", 1, register_w),
+     W("UnregisterClassW", 2, unregister_w),
+     W("GetClassInfoW", 3, class_info),
++    W("GetClassInfoA", 3, class_info_a),
++    W("GetClassInfoExA", 3, class_info_ex_a),
++    W("GetClassInfoExW", 3, class_info_ex_w),
+     W("CreateWindowExW", 12, create_w),
+     W("DefWindowProcW", 4, def_w),
+     W("DefFrameProcW", 5, def_frame),
+@@ -524,7 +647,10 @@ const ImportShim shims[] = {
+     W("FindWindowExW", 4, find_ex_w),
+     W("LoadBitmapW", 2, load_bitmap),
+     W("LoadIconW", 2, load_icon),
++    W("LoadImageA", 6, load_image_a),
++    W("LoadImageW", 6, load_image_w),
+     W("LoadStringW", 4, load_string),
++    W("LoadStringA", 4, load_string_a),
+     W("DrawTextW", 5, draw_text),
+     W("DrawTextExW", 6, draw_text_ex),
+     W("CharUpperW", 1, upper),
+@@ -534,6 +660,7 @@ const ImportShim shims[] = {
+     W("CharUpperBuffA", 2, upper_buff_a),
+     W("CharLowerBuffA", 2, lower_buff_a),
+     W("CharNextW", 1, next_char),
++    W("CharNextA", 1, next_char_a),
+     W("MapVirtualKeyW", 2, map_key),
+     W("GetKeyNameTextW", 3, key_name),
+     W("GetKeyboardLayoutNameW", 1, layout_name),
+diff --git a/runtime/win32.h b/runtime/win32.h
+index b59ecac..d1d5e0e 100644
+--- a/runtime/win32.h
++++ b/runtime/win32.h
+@@ -8,6 +8,10 @@
+ #include <string>
+ #include <vector>
+ 
++void win32_reset_task_allocator();
++uint32_t win32_task_alloc(uint32_t size, bool zero = false);
++void win32_task_free(uint32_t address);
++
+ // The guest root's own directory name (the last component of RECOMP_GUEST_ROOT), so
+ // C:\<root>\data\x and \data\x resolve to the same host file.
+ static inline const char *win32_guest_root_name() {
+@@ -34,6 +38,9 @@ void win32_forget_scrollbars(uint32_t hwnd);
+ // directory that backs the guest root RECOMP_GUEST_ROOT (the directory holding the
+ // loaded EXE).
+ void win32_init(const std::string &game_dir);
++struct LoaderModule;
++// Initialize mapped PE import dependencies before the importing entry point.
++bool win32_attach_static_imports(X86 *c, const LoaderModule &module);
+ const std::string &win32_game_dir();
+ // Guest spelling shared by shell folder APIs; creation uses the write overlay.
+ std::string shell_folder_guest_path(uint32_t csidl, bool create);
+diff --git a/tests/test_game_config.py b/tests/test_game_config.py
+index 4f45372..e9d41f1 100644
+--- a/tests/test_game_config.py
++++ b/tests/test_game_config.py
+@@ -20,6 +20,22 @@ gen_game_config = load_module("gen_game_config")
+ 
+ 
+ class LoadTests(unittest.TestCase):
++    def test_runtime_interpreter_can_be_disabled_and_requires_a_boolean(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            game = Path(tmp)
++            stub = (ROOT / "games/stub/game.toml").read_text()
++            (game / "globals.toml").write_text("")
++            (game / "game.toml").write_text(stub.replace(
++                "[translate]\n", "[translate]\nallow_runtime_interpreter = false\n"))
++            cfg = game_config.load(game)
++            self.assertFalse(cfg["translate"]["allow_runtime_interpreter"])
++            self.assertIn("#define RECOMP_ALLOW_RUNTIME_INTERPRETER 0", gen_game_config.render_header(cfg))
++            for bad in ('"false"', "0", "1.0"):
++                (game / "game.toml").write_text(stub.replace(
++                    "[translate]\n", "[translate]\nallow_runtime_interpreter = %s\n" % bad))
++                with self.assertRaisesRegex(ValueError, "allow_runtime_interpreter"):
++                    game_config.load(game)
++
+     def test_cd_tracks_preserve_disc_order_and_reject_non_strings(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             game = Path(tmp)
+@@ -169,6 +185,7 @@ class LoadTests(unittest.TestCase):
+         self.assertEqual(base["game"]["guest_size"], 0x10000000)
+         self.assertIn("#define RECOMP_GUEST_SIZE 0x10000000u", gen_game_config.render_header(base))
+         self.assertIn("#define RECOMP_AUX_MODULE_COUNT 0", gen_game_config.render_header(base))
++        self.assertIn("#define RECOMP_ALLOW_RUNTIME_INTERPRETER 1", gen_game_config.render_header(base))
+         with tempfile.TemporaryDirectory() as tmp:
+             game = Path(tmp) / "g"
+             game.mkdir()
+diff --git a/tools/game_config.py b/tools/game_config.py
+index 20838eb..dd42c54 100644
+--- a/tools/game_config.py
++++ b/tools/game_config.py
+@@ -154,6 +154,9 @@ def load(game_dir):
+     windows_version(game.setdefault("windows_version", "4.10"))
+     translate = cfg.setdefault("translate", {})
+     resumable = translate.setdefault("resumable_stacks", False)
++    interpreter = translate.setdefault("allow_runtime_interpreter", True)
++    if type(interpreter) is not bool:
++        raise ValueError("%s: [translate] allow_runtime_interpreter must be a boolean" % source)
+     if not isinstance(resumable, bool):
+         raise ValueError("%s: [translate] resumable_stacks must be a boolean" % source)
+     alignment = translate.setdefault("function_alignment", 16)
+diff --git a/tools/gen_game_config.py b/tools/gen_game_config.py
+index e9d2983..7ccaf4b 100644
+--- a/tools/gen_game_config.py
++++ b/tools/gen_game_config.py
+@@ -64,6 +64,8 @@ def render_header(cfg):
+     lines.append("#define RECOMP_GUEST_SIZE %s" % c_hex(game["guest_size"]))
+     lines.append("#define RECOMP_RESUMABLE_STACKS %d" %
+                  int(cfg["translate"].get("resumable_stacks", False)))
++    lines.append("#define RECOMP_ALLOW_RUNTIME_INTERPRETER %d" %
++                 int(cfg["translate"].get("allow_runtime_interpreter", True)))
+     lines.append("#define RECOMP_CD_AUDIO_TRACKS %s" % c_string_list(cfg.get("media", {}).get("cd_tracks", [])))
+     # Auxiliary modules the loader maps beside the image: {name, developer path, sha256, base, size}.
+     lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
+diff --git a/tools/recomp/tests/test_translate_driver.py b/tools/recomp/tests/test_translate_driver.py
+index 71465b7..dc87018 100644
+--- a/tools/recomp/tests/test_translate_driver.py
++++ b/tools/recomp/tests/test_translate_driver.py
+@@ -101,6 +101,39 @@ def _walker_image(slots):
+     return img, fns
+ 
+ 
++@pytest.mark.parametrize("code,mnemonic", [
++    (b"\xd9\x31\xc3", "FNSTENV"),
++    (b"\xd9\x21\xc3", "FLDENV"),
++    (b"\xdd\x31\xc3", "FNSAVE"),
++    (b"\xdd\x21\xc3", "FRSTOR"),
++])
++def test_recovery_accepts_structured_x87_memory_operands(code, mnemonic):
++    img = synthetic_image({0x00401000: code})
++    instructions = img.recover(0x00401000, set())
++    assert not img.recover_errors
++    assert [i.mnem for i in instructions] == [mnemonic, "RET"]
++    assert T.parse_operand(instructions[0].ops[0]).kind == "mem"
++
++
++def test_recovery_normalizes_capstones_xlat_spelling():
++    img = synthetic_image({0x00401000: b"\xd7\xc3"})
++    instructions = img.recover(0x00401000, set())
++    assert [(i.mnem, i.ops) for i in instructions] == [("XLAT", []), ("RET", [])]
++
++
++def test_first_pass_defers_distant_switch_targets_for_recovery():
++    from types import SimpleNamespace
++    img = synthetic_image({0x00401000: b"\xc3", 0x00421000: b"\xc3"}, size=0x30000)
++    fn = T.Function(0x00401000, "switch", 1, img.recover(0x00401000, set()))
++    fn.measure(img)
++    tr = T.Translator(img, {fn.addr}, SimpleNamespace())
++    tr.want_target(fn, fn.insns[0], 0x00421000, 0)
++    assert tr.unlisted_targets == {0x00421000}
++    tr.strict = True
++    with pytest.raises(T.TranslateError, match="not an instruction boundary"):
++        tr.want_target(fn, fn.insns[0], 0x00421000, 0)
++
++
+ def test_initterm_takes_a_table_of_function_pointers():
+     """The walker is found by its shape, whatever registers it happens to use."""
+     img, fns = _walker_image([0x00401000, 0, 0x00401005])
+@@ -1672,3 +1705,15 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
+     import re
+     placed = set(re.findall(r"^(L_[0-9a-f]{8}): ;", text, re.M))
+     assert set(re.findall(r"goto (L_[0-9a-f]{8});", text)) <= placed
++
++
++def test_callback_stored_directly_in_a_memory_field_is_discovered(tmp_path, monkeypatch):
++    """A WNDCLASS/COM callback store need not pass through a register first."""
++    import struct
++    entry, callback = 0x00601000, 0x00601100
++    code = b"\xc7\x45\xfc" + struct.pack("<I", callback) + b"\xc3"
++    method = b"\x55\x8b\xec\xb8\x2a\x00\x00\x00\x5d\xc3"
++    img = synthetic_image({entry: code, callback: method}, base=0x00600000)
++    img.code_pointers = lambda *a, **kw: (set(), set())
++    text = translate_entry_fixture(tmp_path, monkeypatch, img, {entry: code})
++    assert "void fn_%08x(" % callback in text
+diff --git a/tools/recomp/tests/test_translate_noreturn.py b/tools/recomp/tests/test_translate_noreturn.py
+index f569db1..2d0d44d 100644
+--- a/tools/recomp/tests/test_translate_noreturn.py
++++ b/tools/recomp/tests/test_translate_noreturn.py
+@@ -70,3 +70,52 @@ def test_a_popped_jump_goes_only_to_pushed_continuations():
+     text = translate(listing)
+     assert "L_0040110e:" in text
+     assert "00401117" not in text
++
++
++def test_conditional_branch_across_a_listing_gap_keeps_its_taken_tail():
++    listing = ("00401100  TEST EAX,EAX\n"
++               "00401102  JNZ 0x00401120\n"
++               "00401110  CALL 0x00401000\n"
++               "00401115  ADD byte ptr [EAX],AL\n"
++               "00401120  MOV EAX,0x1\n"
++               "00401125  RET\n")
++    text = translate(listing)
++    assert "goto L_00401120" in text and "L_00401120:" in text
++    assert "00401115" not in text
++
++
++def test_split_epilogue_proves_a_callee_can_return():
++    listings = [
++        (0x00401200, "00401200  CALL 0x00401300\n"),
++        (0x00401300, "00401300  JMP 0x00401400\n"),
++        (0x00401400, "00401400  JMP 0x00401500\n"),
++        (0x00401500, "00401500  RET\n"),
++    ]
++    functions = [T.Function(a, "fragment", 5, T.parse_listing_text(s)) for a, s in listings]
++    assert 0x00401300 not in T.noreturn_callees_from(functions, {})
++
++
++def test_unreached_prefix_cannot_branch_to_a_pruned_tail():
++    listing = ("00401100  TEST EAX,EAX\n"
++               "00401102  JNZ 0x00401120\n"
++               "00401110  CALL 0x00401000\n"
++               "00401120  MOV EAX,0x1\n"
++               "00401125  JMP 0x00401110\n")
++    fn = T.Function(0x00401110, "entry_in_middle", 0x20, T.parse_listing_text(listing))
++    fn.measure(NoImage())
++    tr = T.Translator(NoImage(), {fn.addr, HALT}, Opts())
++    tr.noreturn_callees = {HALT}
++    tr.prepare(fn)
++    text = "\n".join(tr.translate(fn))
++    assert "00401100" not in text and "00401102" not in text
++    assert "goto L_00401120" not in text
++
++
++def test_disconnected_island_cannot_branch_to_a_pruned_tail():
++    listing = ("00401100  JMP 0x00401110\n"
++               "00401105  JNZ 0x00401120\n"
++               "00401110  CALL 0x00401000\n"
++               "00401120  MOV EAX,0x1\n"
++               "00401125  RET\n")
++    text = translate(listing)
++    assert "00401105" not in text and "goto L_00401120" not in text
+diff --git a/tools/recomp/translate.py b/tools/recomp/translate.py
+index 944f2ca..9ad10b0 100644
+--- a/tools/recomp/translate.py
++++ b/tools/recomp/translate.py
+@@ -1336,11 +1336,17 @@ class Image(object):
+                   "repne": "REPNE", "repnz": "REPNE"}
+     #: Mnemonics capstone spells differently from the listing grammar.
+     MNEM_ALIAS = {"POPAL": "POPAD", "PUSHAL": "PUSHAD",
++                  "XLATB": "XLAT",
+                   "POPFL": "POPFD", "PUSHFL": "PUSHFD",
+                   "CWTL": "CWDE", "CLTD": "CDQ", "CBTW": "CBW",
+                   "IRETD": "IRET"}
+ 
+     def _size_word(self, nbytes, mnem):
++        # Environment/save operands are structured blocks, not scalar values.
++        # Their emitters use the address and encode the architectural layout.
++        if (mnem in ("FNSTENV", "FSTENV", "FLDENV") and nbytes == 28
++                or mnem in ("FNSAVE", "FSAVE", "FRSTOR") and nbytes == 108):
++            return ""
+         if mnem.startswith("F") and mnem not in self.X87_INT:
+             return {4: "float", 8: "double", 10: "extended double"}.get(nbytes)
+         return {1: "byte", 2: "word", 4: "dword", 8: "qword",
+@@ -1369,7 +1375,7 @@ class Image(object):
+                              else "0x%x" % op.mem.disp)
+             inner = " + ".join(parts)
+             seg = ci.reg_name(op.mem.segment).upper() if op.mem.segment else ""
+-            return "%s ptr %s[%s]" % (word, seg + ":" if seg else "", inner)
++            return "%s%s[%s]" % (word + " ptr " if word else "", seg + ":" if seg else "", inner)
+         raise TranslateError("unknown capstone operand type %d" % op.type)
+ 
+     def to_insn(self, ci):
+@@ -1679,6 +1685,19 @@ def noreturn_callees_from(parsed, iat_names, image=None):
+ 
+     returns = {fn.addr for fn in parsed
+                if any(i.mnem == "RET" for i in fn.insns) and not ends_process(fn)}
++    # A listing can split a returning routine at an epilogue or a cold arm.
++    # Lack of a local RET is not a no-return proof when a literal tail branch
++    # reaches another listed block that returns.
++    changed = True
++    while changed:
++        changed = False
++        for fn in parsed:
++            if fn.addr in returns or ends_process(fn):
++                continue
++            if any((i.mnem == "JMP" or i.mnem in JCC)
++                   and Translator.branch_target(i) in returns for i in fn.insns):
++                returns.add(fn.addr)
++                changed = True
+     out = set()
+     for fn in parsed:
+         # A loop that cannot fall out of itself never returns either.
+@@ -2050,9 +2069,9 @@ class Translator(object):
+         through the bytes behind the call, and Delphi keeps string literals
+         there: Siege of Avalon's single-instance check ends CALL _Halt0 and is
+         followed by L"DigitalTomeSiegeOfAvalon", whose 16-bit addressing the
+-        emitter refuses. Only such a tail is dropped - a run behind a call
+-        that never returns, reached from no entry, pushed continuation or
+-        branch. A computed jump other than POP reg; JMP reg may land anywhere
++        emitter refuses. Drop only instructions reached from no entry,
++        pushed continuation or branch, including disconnected recovered
++        prefixes and islands. A computed jump other than POP reg; JMP reg may land anywhere
+         (RTL fill routines compute addresses into unrolled code), so a body
+         holding one keeps everything. POP reg; JMP reg goes where a
+         continuation was pushed, or out of the function.
+@@ -2060,13 +2079,11 @@ class Translator(object):
+         if not any(self.never_returns(ins) for ins in fn.insns):
+             return set()
+         live = self.reached(fn, {fn.addr} | set(entries))
+-        dead, after_noreturn = set(), False
+-        for i, ins in enumerate(fn.insns):
+-            if i in live:
+-                after_noreturn = self.never_returns(ins)
+-            elif after_noreturn:
+-                dead.add(i)
+-        return dead
++        # Recursive recovery can include disconnected prefixes and islands.
++        # Emitting an unreachable branch while pruning its unreachable target
++        # leaves undefined C labels. The same reachability proof must govern
++        # both ends; computed jumps conservatively keep all instructions.
++        return set(range(len(fn.insns))) - live
+ 
+     def reached(self, fn, roots):
+         """Indices control flow reaches from `roots` and the pushed
+@@ -2094,6 +2111,9 @@ class Translator(object):
+                 t = fn.fallthrough[i]
+                 if t in fn.index:
+                     work.append(fn.index[t])
++                # A conditional branch still has its taken edge even when
++                # the listing omits the fall-through block.
++                work.extend(j for j in self.successors(fn, i) if j is not None)
+                 continue
+             work.extend(j for j in self.successors(fn, i) if j is not None)
+         return live
+@@ -2465,11 +2485,9 @@ class Translator(object):
+             if target is not None and self.image.is_exec(target):
+                 self.unlisted_targets.add(target)
+             return
+-        # Ghidra's recorded function size is sometimes far short of the real
+-        # body, so bound recovery by a generous window past the entry rather
+-        # than by fn.end.
+-        if (not self.strict and target is not None
+-                and fn.addr <= target < fn.addr + 0x10000):
++        # Hot and cold switch arms can be far apart. Defer any in-image code
++        # target on the first pass; the strict pass still requires a boundary.
++        if (not self.strict and target is not None and self.image.is_exec(target)):
+             self.unlisted_targets.add(target)
+             return
+         raise TranslateError(
+@@ -2730,6 +2748,11 @@ class Translator(object):
+             for e in entries:
+                 out.append("void fn_%08x(X86 *c) { body_%08x(c, %s); }"
+                            % (e, fn.addr, hexlit(e)))
++        emitted = "\n".join(out)
++        defined = set(re.findall(r"\b(L_[0-9a-f]{8}):", emitted))
++        referenced = set(re.findall(r"\bgoto (L_[0-9a-f]{8})\b", emitted))
++        if referenced - defined:
++            raise TranslateError("undefined local branch labels: " + ", ".join(sorted(referenced - defined)))
+         return out
+ 
+     # ---- helpers used by emit -------------------------------------------
+@@ -4968,7 +4991,10 @@ def main():
+                             dst = parse_operand(ins.ops[0])
+                         except TranslateError:
+                             continue
+-                        if dst.kind != "reg" or dst.size != 32:
++                        # Window classes and COM objects often receive callback
++                        # pointers directly in a stack or object field. Those
++                        # stores name code just as a register assignment does.
++                        if dst.kind not in ("reg", "mem") or dst.size != 32:
+                             continue
+                     immediates.add(src.imm)
+             # Collect all scan candidates against the settled protected code
+diff --git a/tools/test.py b/tools/test.py
+index 0aea3f4..a0adf75 100644
+--- a/tools/test.py
++++ b/tools/test.py
+@@ -10,6 +10,7 @@ import json
+ import os
+ from pathlib import Path
+ import platform
++import re
+ import subprocess
+ import sys
+ import tempfile
+@@ -56,12 +57,17 @@ def configure(preset, game_dir, build_root):
+     return build_dir
+ 
+ 
+-def native(preset, env, jobs, run_tests, game_dir, build_root):
++def native(preset, env, jobs, run_tests, game_dir, build_root, targets=()):
+     """Build every test binary this platform has; run the suites that need no snapshot."""
+     build_dir = configure(preset, game_dir, build_root)
+-    build_py.build(preset, ["check_binaries"], jobs, build_dir=build_dir)
++    build_py.build(preset, list(targets) or ["check_binaries"], jobs, build_dir=build_dir)
+     if run_tests:
+-        ctest(build_dir, "nogame|game|gpu|device", env)
++        if targets:
++            pattern = "^(" + "|".join(re.escape(target) for target in targets) + ")$"
++            run([build_py.cmake_tool("ctest"), "--test-dir", str(build_dir), "-R", pattern,
++                 "--output-on-failure", "--no-tests=error"], env)
++        else:
++            ctest(build_dir, "nogame|game|gpu|device", env)
+ 
+ 
+ def mods_targets(game_dir):
+@@ -163,9 +169,13 @@ def main():
+     group.add_argument("--compile-only", action="store_true", help="Build the native test binaries only")
+     parser.add_argument("--preset", default=build_py.default_preset())
+     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
++    parser.add_argument("--native-target", action="append", default=[], metavar="TARGET",
++                        help="Build selected native test targets instead of every test binary")
+     parser.add_argument("--game-dir", type=Path, default=ROOT / "games/stub",
+                         help="Absolute directory holding the game.toml (default: the kit's stub game)")
+     args = parser.parse_args()
++    if args.native_target and not (args.native or args.compile_only):
++        parser.error("--native-target requires --native or --compile-only")
+     if not args.game_dir.is_absolute() or not (args.game_dir / "game.toml").is_file():
+         parser.error("--game-dir must be an absolute directory holding game.toml: %s" % args.game_dir)
+     cfg = build_py.game_config.load(args.game_dir)
+@@ -188,7 +198,7 @@ def main():
+         elif args.integration:
+             integration(env, args.game_dir, build_root)
+         elif args.native or args.compile_only:
+-            native(args.preset, env, args.jobs, args.native, args.game_dir, build_root)
++            native(args.preset, env, args.jobs, args.native, args.game_dir, build_root, args.native_target)
+         else:
+             run([sys.executable, "-m", "pytest", "-q"] + PORTABLE_TESTS, env)
+     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError, TimeoutError) as error:
