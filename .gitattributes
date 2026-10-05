@@ -1,1 +1,3 @@
-* text=auto eol=lf
+# Unified patches use a leading space on blank context lines. The patched
+# source is checked separately; preserve this required patch syntax verbatim.
+patches/*.patch -whitespace
