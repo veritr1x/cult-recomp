@@ -1,11 +1,16 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..7144fa4 100644
+index 20fdc15..6d2d720 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,25 @@
+@@ -2,6 +2,50 @@
  
  ## Unreleased
  
++- Render plain ANSI text and anisotropic OLE picture blits. Route pure GDI
++  desktop input in screen coordinates, and clamp Boolean button check states.
++- Support legacy file reads/seeks/closes and guest-overlay path searches.
++- Allow smoke scripts to run profiles without built-in entity/counter globals.
++
 +- Share ANSI and UTF-16 window-class queries, clipboard formats, global atoms,
 +  and mapped-module string resources. Load resource icons and bitmaps through
 +  the existing guest GDI image model, including requested image dimensions.
@@ -14,6 +19,16 @@ index 20fdc15..7144fa4 100644
 +  documented ordinal aliases and BSTR string entry points.
 +- Support binary BSTR byte counts, separately allocated SAFEARRAY descriptors
 +  and data, and transfer the ownership of thread-local Automation error objects.
++- Track nested SAFEARRAY data-access locks and reject unbalanced releases.
++- Bind the legacy Automation thread-setup compatibility export CoSetState.
++- Share ANSI and wide font objects with correctly sized LOGFONT queries and
++  selected-face names, including Windows-1252 conversion.
++- Decode ANSI resource icons into inspectable, drawable pixels with their AND
++  transparency mask. Add logical pen creation and per-window context-help IDs.
++- Provide system button painting, check states and pointer/keyboard click
++  notifications for framework subclasses; share ANSI window properties.
++- Delegate COM disconnection to custom marshalers and preserve their reference
++  ownership. Bind shutdown APIs without launching an unsupported help viewer.
 +
 +- Bind mapped DLL imports after all configured export tables are visible, and
 +  initialize static DLL dependencies before entering their caller.
@@ -22,6 +37,16 @@ index 20fdc15..7144fa4 100644
 +  recognize split returning epilogues before inferring calls that never return.
 +- Discover callback addresses stored directly into memory fields.
 +- Preserve interface adjustors whose shared method body has its own vtable entry.
++- Retain explicit branch targets that are intentional debugger breakpoints,
++  while continuing to exclude unrelated INT3 padding.
++- Translate indexed interface dispatchers that consume their CALL return
++  address, and apply the interpreter-disable setting to unknown tail jumps.
++- Preserve storage-medium ownership, compatible bitmap dimensions and DDB/DIB
++  layouts, and consume byte-sized icon arguments according to their ABI.
++- Adapt complete generated lazy-interface and object-getter callback templates
++  to translated methods, preserving HRESULT cleanup and COM reference ownership.
++- Add ANSI extended text output, update-region queries and Boolean region
++  operations whose complex coverage retains holes in GDI clipping.
 +- Allow static ports to disable runtime instruction interpretation with
 +  `[translate] allow_runtime_interpreter = false`.
 +
@@ -47,6 +72,110 @@ index bb8776b..60714de 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
+diff --git a/host/input.cpp b/host/input.cpp
+index 091660f..eace5b3 100644
+--- a/host/input.cpp
++++ b/host/input.cpp
+@@ -511,9 +511,9 @@ void host_input_motion(int32_t x, int32_t y, int32_t dx, int32_t dy) {
+     g.y = y;
+     g.dx += dx;
+     g.dy += dy;
+-    // GetCursorPos and MSG.pt are screen coordinates. DirectInput and the
+-    // mouse messages' lParam stay in client pixels, even for a moved window.
+-    host_set_client_cursor_pos(host_main_window(), x, y);
++    // DirectInput keeps frame coordinates. The desktop compositor uses screen
++    // pixels; a graphics surface uses client pixels, converted at this bridge.
++    host_set_display_cursor_pos(x, y);
+     notify_input_changed();
+ }
+ 
+diff --git a/host/input_gate.cpp b/host/input_gate.cpp
+index 2dd011b..35ed2a5 100644
+--- a/host/input_gate.cpp
++++ b/host/input_gate.cpp
+@@ -52,8 +52,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
+         return;
+     }
+     if (msg >= 0x0200 && msg <= 0x0209) {
+-        host_post_client_mouse_message(host_main_window(), msg, wparam, int16_t(lparam),
+-                                       int16_t(lparam >> 16));
++        host_post_display_mouse_message(msg, wparam, int16_t(lparam), int16_t(lparam >> 16));
+         return;
+     }
+     uint32_t hwnd = host_main_window();
+diff --git a/host/script.cpp b/host/script.cpp
+index 19d5522..8ec9ab7 100644
+--- a/host/script.cpp
++++ b/host/script.cpp
+@@ -11,8 +11,18 @@ double host_script_counter_metric(const char *name, uint32_t (*guest_u32)(uint32
+     const bool is_turn = !strcmp(name, "turn");
+     if (!is_turn && strcmp(name, "command_frame"))
+         return -1.0;
+-    const uint32_t value =
+-        guest_u32(is_turn ? RECOMP_GLOBAL_SIMULATION_TURN_ADDR : RECOMP_GLOBAL_COMMAND_FRAME_ADDR);
++    uint32_t address = 0;
++#ifdef RECOMP_GLOBAL_SIMULATION_TURN_ADDR
++    if (is_turn)
++        address = RECOMP_GLOBAL_SIMULATION_TURN_ADDR;
++#endif
++#ifdef RECOMP_GLOBAL_COMMAND_FRAME_ADDR
++    if (!is_turn)
++        address = RECOMP_GLOBAL_COMMAND_FRAME_ADDR;
++#endif
++    if (!address || !guest_u32)
++        return -1.0; // This profile has no audited counter for this metric.
++    const uint32_t value = guest_u32(address);
+     auto view = is_turn ? view_turn : view_command_frame;
+     if (view) {
+         const uint32_t observed = view();
+diff --git a/host/sdl/main.cpp b/host/sdl/main.cpp
+index d983f15..8fd45a5 100644
+--- a/host/sdl/main.cpp
++++ b/host/sdl/main.cpp
+@@ -137,8 +137,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
+         return;
+     }
+     if (msg >= 0x200 && msg <= 0x209) {
+-        host_post_client_mouse_message(host_main_window(), msg, wparam, int16_t(lparam),
+-                                       int16_t(lparam >> 16));
++        host_post_display_mouse_message(msg, wparam, int16_t(lparam), int16_t(lparam >> 16));
+         return;
+     }
+     uint32_t hwnd = host_main_window();
+diff --git a/host/smoke_main.cpp b/host/smoke_main.cpp
+index 9525259..d036a70 100644
+--- a/host/smoke_main.cpp
++++ b/host/smoke_main.cpp
+@@ -253,9 +253,16 @@ void write_dump(const char *name) {
+ // offsets are the ones the game's tests/entity_codec.hpp encodes and decodes: flags at
+ // +12, kind at +42, state at +44, owner at +47, and the position at +61 as
+ // three 16-bit words, x then z then altitude. A blue brave is owner 0, kind 1.
+-const uint32_t kEntityBase = RECOMP_GLOBAL_ENTITY_BASE_ADDR;
+-const uint32_t kEntityStride = RECOMP_GLOBAL_ENTITY_BASE_STRIDE;
+-const uint32_t kEntityCount = RECOMP_GLOBAL_ENTITY_BASE_COUNT; // record 0 is the null entity
++#if defined(RECOMP_GLOBAL_ENTITY_BASE_ADDR) && defined(RECOMP_GLOBAL_ENTITY_BASE_STRIDE) &&        \
++    defined(RECOMP_GLOBAL_ENTITY_BASE_COUNT)
++constexpr uint32_t kEntityBase = RECOMP_GLOBAL_ENTITY_BASE_ADDR;
++constexpr uint32_t kEntityStride = RECOMP_GLOBAL_ENTITY_BASE_STRIDE;
++constexpr uint32_t kEntityCount = RECOMP_GLOBAL_ENTITY_BASE_COUNT; // record 0 is the null entity
++#else
++// Screen input and frame capture work for profiles with no audited entity
++// table. Entity-specific scripts see an empty table, never another game's data.
++constexpr uint32_t kEntityBase = 0, kEntityStride = 1, kEntityCount = 0;
++#endif
+ const uint32_t kOffFlags = 12;
+ const uint32_t kOffKind = 42;
+ const uint32_t kOffState = 44;
+@@ -696,8 +703,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
+         return;
+     }
+     if (msg >= 0x200 && msg <= 0x209) {
+-        host_post_client_mouse_message(host_main_window(), msg, wparam, int16_t(lparam),
+-                                       int16_t(lparam >> 16));
++        host_post_display_mouse_message(msg, wparam, int16_t(lparam), int16_t(lparam >> 16));
+         return;
+     }
+     uint32_t hwnd = host_main_window();
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
 index 06d5e2b..0c84a00 100644
 --- a/runtime/cpu.cpp
@@ -61,10 +190,96 @@ index 06d5e2b..0c84a00 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..ab9ac33 100644
+index 13ba56f..615265b 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
-@@ -504,6 +504,32 @@ void g_CreateCompatibleDC(X86 *c) {
+@@ -6,6 +6,7 @@
+ #include "user32_internal.h"
+ #include "display_seam.h"
+ #include <climits>
++#include <cmath>
+ #include <algorithm>
+ #include "memory.h"
+ #include "win32.h"
+@@ -105,6 +106,8 @@ struct Dib {
+     uint32_t size = 0;
+     uint32_t compression = 0;
+     bool owned = true;
++    bool section = false;
++    int32_t preferred_width = 0, preferred_height = 0;
+     uint32_t masks[3] = {0, 0, 0};
+     std::vector<uint32_t> colors; // RGBQUADs for bpp <= 8
+ };
+@@ -392,12 +395,12 @@ void g_CreateCompatibleBitmap(X86 *c) {
+ 
+ // GetObjectA(handle, bytes, out): BITMAP (24 bytes) or DIBSECTION (84) for a
+ // bitmap, the entry count (a WORD) for a palette.
+-void g_GetObjectA(X86 *c) {
++void get_object(X86 *c, bool wide) {
+     uint32_t handle = arg(c, 0), bytes = arg(c, 1), out = arg(c, 2);
+     if (Dib *d = dib_of(handle)) {
+-        uint32_t have = bytes >= 84 ? 84u : 24u;
++        uint32_t have = d->section && bytes >= 84 ? 84u : 24u;
+         if (!out) {
+-            set_eax(c, 84);
++            set_eax(c, d->section ? 84 : 24);
+             return;
+         }
+         if (bytes < 24 || !gm_valid(out, have)) {
+@@ -411,7 +414,9 @@ void g_GetObjectA(X86 *c) {
+         wr32(out + 12, d->stride);
+         wr16(out + 16, 1);
+         wr16(out + 18, d->bpp);
+-        wr32(out + 20, d->bits);
++        // DDB storage is queried via GetBitmapBits; only a DIB section
++        // exposes its pixel pointer through BITMAP.bmBits.
++        wr32(out + 20, d->section ? d->bits : 0);
+         if (have == 84) {
+             uint32_t bmih = out + 24;
+             wr32(bmih + 0, 40);
+@@ -436,7 +441,7 @@ void g_GetObjectA(X86 *c) {
+     auto object = objects().find(handle);
+     if (object != objects().end()) {
+         const Object &o = object->second;
+-        uint32_t size = o.kind == Object::Font ? 92 : o.kind == Object::Pen ? 16 : 12;
++        uint32_t size = o.kind == Object::Font ? (wide ? 92 : 60) : o.kind == Object::Pen ? 16 : 12;
+         if (!out) {
+             set_eax(c, size);
+             return;
+@@ -446,9 +451,15 @@ void g_GetObjectA(X86 *c) {
+             return;
+         }
+         memset(g_mem + out, 0, size);
+-        if (o.kind == Object::Font)
+-            memcpy(g_mem + out, o.logfont.data(), size);
+-        else {
++        if (o.kind == Object::Font) {
++            memcpy(g_mem + out, o.logfont.data(), wide ? 92 : 28);
++            if (!wide)
++                for (uint32_t i = 0; i < 32; ++i) {
++                    uint16_t unit;
++                    memcpy(&unit, o.logfont.data() + 28 + 2 * i, 2);
++                    wr8(out + 28 + i, font_ansi_byte(unit));
++                }
++        } else {
+             wr32(out, o.style);
+             wr32(out + 4, o.kind == Object::Pen ? o.width : o.color);
+             if (o.kind == Object::Pen)
+@@ -467,6 +478,13 @@ void g_GetObjectA(X86 *c) {
+     set_eax(c, 0);
+ }
+ 
++void g_GetObjectA(X86 *c) {
++    get_object(c, false);
++}
++void g_GetObjectW(X86 *c) {
++    get_object(c, true);
++}
++
+ // DeleteObject(handle): a bitmap gives its pixels back; a palette goes away;
+ // a stock object is fine to delete, as on Windows.
+ void g_DeleteObject(X86 *c) {
+@@ -504,6 +522,50 @@ void g_CreateCompatibleDC(X86 *c) {
  void g_DeleteDC(X86 *c) {
      set_eax(c, dcs().erase(arg(c, 0)) ? 1 : 0);
  }
@@ -94,17 +309,755 @@ index 13ba56f..ab9ac33 100644
 +    }
 +    set_eax(c, object);
 +}
++void g_GetObjectType(X86 *c) {
++    uint32_t handle = arg(c, 0), type = 0;
++    if (auto *dc = dc_of(handle))
++        type = dc->memory ? 10 : 3;
++    else if (dib_of(handle))
++        type = 7;
++    else if (handle == DEFAULT_PALETTE || palettes().count(handle))
++        type = 5;
++    else {
++        auto it = objects().find(handle);
++        if (it != objects().end())
++            type = it->second.kind == Object::Brush  ? 2
++                   : it->second.kind == Object::Pen  ? 1
++                   : it->second.kind == Object::Font ? 6
++                                                     : 8;
++    }
++    set_eax(c, type);
++}
  
  // SelectObject(hdc, object): a bitmap goes into the DC and the previous one
  // comes back; a pen, brush or font is accepted as selected.
-@@ -772,6 +798,7 @@ const ImportShim g_gdi32_shims[] = {
+@@ -533,8 +595,12 @@ void g_SelectObject(X86 *c) {
+     *slot = obj;
+     if (it->second.kind == Object::Region) {
+         dc.clipped = true;
+-        dc.clip = {it->second.rect};
+-        set_eax(c, 2);
++        dc.clip = it->second.region_parts.empty() ? std::vector<Rect>{it->second.rect}
++                                                  : it->second.region_parts;
++        set_eax(c, it->second.rect.l >= it->second.rect.r || it->second.rect.t >= it->second.rect.b
++                       ? 1
++                   : it->second.region_parts.size() > 1 ? 3
++                                                        : 2);
+     } else
+         set_eax(c, prev);
+ }
+@@ -689,11 +755,7 @@ void g_GetDeviceCaps(X86 *c) {
+     set_eax(c, value);
+ }
+ 
+-// Text: accepted and measured with fixed metrics, not drawn.
+-void g_TextOutA(X86 *c) {
+-    log_once("gdi.textout", "gdi: TextOutA is accepted and not drawn in this runtime");
+-    set_eax(c, 1);
+-}
++// Legacy ANSI measurement entries are refined by the shared font backend.
+ void g_GetTextMetricsA(X86 *c) {
+     uint32_t tm = arg(c, 1);
+     if (!tm || !gm_valid(tm, 56)) {
+@@ -765,13 +827,14 @@ const ImportShim g_gdi32_shims[] = {
+     {"GDI32.dll", "ExtTextOutA", 8, nullptr},
+     {"GDI32.dll", "CreateCompatibleBitmap", 3, g_CreateCompatibleBitmap},
+     // Named for its argument count; the result is ERROR, which is honest.
+-    {"GDI32.dll", "CombineRgn", 4, nullptr},
+     {"GDI32.dll", "GetObjectA", 3, g_GetObjectA},
+-    {"GDI32.dll", "GetObjectW", 3, g_GetObjectA},
++    {"GDI32.dll", "GetObjectW", 3, g_GetObjectW},
+     {"GDI32.dll", "DeleteObject", 1, g_DeleteObject},
      {"GDI32.dll", "CreateCompatibleDC", 1, g_CreateCompatibleDC},
      {"GDI32.dll", "DeleteDC", 1, g_DeleteDC},
      {"GDI32.dll", "SelectObject", 2, g_SelectObject},
 +    {"GDI32.dll", "GetCurrentObject", 2, g_GetCurrentObject},
++    {"GDI32.dll", "GetObjectType", 1, g_GetObjectType},
      {"GDI32.dll", "SetDIBColorTable", 4, g_SetDIBColorTable},
      {"GDI32.dll", "CreatePalette", 1, g_CreatePalette},
      {"GDI32.dll", "SelectPalette", 3, g_SelectPalette},
+@@ -781,7 +844,6 @@ const ImportShim g_gdi32_shims[] = {
+     {"GDI32.dll", "SetSystemPaletteUse", 2, g_SetSystemPaletteUse},
+     {"GDI32.dll", "GetDIBits", 7, g_GetDIBits},
+     {"GDI32.dll", "GetDeviceCaps", 2, g_GetDeviceCaps},
+-    {"GDI32.dll", "TextOutA", 5, g_TextOutA},
+     {"GDI32.dll", "GetTextMetricsA", 2, g_GetTextMetricsA},
+     {"GDI32.dll", "GetTextExtentPointA", 4, g_GetTextExtentPointA},
+     {"GDI32.dll", "SetTextColor", 2, g_SetTextColor},
+@@ -861,8 +923,13 @@ Surface *surface_of(DeviceContext &dc) {
+     return &s;
+ }
+ void offset(DeviceContext &dc, int64_t *x, int64_t *y) {
+-    *x += int64_t(dc.viewport_x) - dc.org_x;
+-    *y += int64_t(dc.viewport_y) - dc.org_y;
++    auto mapped = [](int64_t p, int32_t origin, int32_t viewport, int32_t window, int32_t extent) {
++        long double value =
++            std::round((static_cast<long double>(p) - origin) * extent / window) + viewport;
++        return int64_t(std::clamp<long double>(value, INT_MIN, INT_MAX));
++    };
++    *x = mapped(*x, dc.org_x, dc.viewport_x, dc.window_ext_x, dc.viewport_ext_x);
++    *y = mapped(*y, dc.org_y, dc.viewport_y, dc.window_ext_y, dc.viewport_ext_y);
+     if (dc.window && dc.window != dc.surface) {
+         int32_t wx = 0, wy = 0, sx = 0, sy = 0;
+         user32::client_origin(dc.window, &wx, &wy);
+@@ -1058,6 +1125,31 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
+ bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p, bool blend) {
+     return pixel(dc, x, y, &p, true, blend);
+ }
++bool mapping_point(uint32_t hdc, int64_t *x, int64_t *y) {
++    auto *dc = dc_of(hdc);
++    if (!dc)
++        return false;
++    auto mapped = [](int64_t p, int32_t origin, int32_t viewport, int32_t window, int32_t extent) {
++        long double value =
++            std::round((static_cast<long double>(p) - origin) * extent / window) + viewport;
++        return int64_t(std::clamp<long double>(value, INT_MIN, INT_MAX));
++    };
++    *x = mapped(*x, dc->org_x, dc->viewport_x, dc->window_ext_x, dc->viewport_ext_x);
++    *y = mapped(*y, dc->org_y, dc->viewport_y, dc->window_ext_y, dc->viewport_ext_y);
++    return true;
++}
++uint32_t device_space_dc(uint32_t hdc) {
++    auto *dc = dc_of(hdc);
++    if (!dc)
++        return 0;
++    DeviceContext copy = *dc;
++    copy.map_mode = 1;
++    copy.org_x = copy.org_y = copy.viewport_x = copy.viewport_y = 0;
++    copy.window_ext_x = copy.window_ext_y = copy.viewport_ext_x = copy.viewport_ext_y = 1;
++    uint32_t handle = gdi_new_dc();
++    *dc_of(handle) = std::move(copy);
++    return handle;
++}
+ bool drawable(uint32_t dc, int64_t x, int64_t y) {
+     uint32_t p;
+     return read_pixel(dc, x, y, &p);
+@@ -1099,10 +1191,29 @@ Rect clip_box(uint32_t hdc) {
+     }
+     int64_t x = 0, y = 0;
+     offset(dc, &x, &y);
+-    auto clamp = [](int64_t v) { return int32_t(std::clamp<int64_t>(v, INT_MIN, INT_MAX)); };
+-    return {clamp(r.l - x), clamp(r.t - y), clamp(r.r - x), clamp(r.b - y)};
++    auto clamp = [](long double v) {
++        return int32_t(std::llround(
++            std::clamp(v, static_cast<long double>(INT_MIN), static_cast<long double>(INT_MAX))));
++    };
++    int32_t l = clamp(static_cast<long double>(r.l - x) * dc.window_ext_x / dc.viewport_ext_x);
++    int32_t t = clamp(static_cast<long double>(r.t - y) * dc.window_ext_y / dc.viewport_ext_y);
++    int32_t right = clamp(static_cast<long double>(r.r - x) * dc.window_ext_x / dc.viewport_ext_x);
++    int32_t bottom = clamp(static_cast<long double>(r.b - y) * dc.window_ext_y / dc.viewport_ext_y);
++    return {std::min(l, right), std::min(t, bottom), std::max(l, right), std::max(t, bottom)};
+ }
+ void fill(uint32_t dc, Rect r, uint32_t p) {
++    if (auto *state = dc_of(dc); state && state->map_mode != 1) {
++        int64_t l = r.l, t = r.t, right = r.r, bottom = r.b;
++        mapping_point(dc, &l, &t);
++        mapping_point(dc, &right, &bottom);
++        uint32_t device = device_space_dc(dc);
++        fill(device,
++             {int32_t(std::min(l, right)), int32_t(std::min(t, bottom)),
++              int32_t(std::max(l, right)), int32_t(std::max(t, bottom))},
++             p);
++        dcs().erase(device);
++        return;
++    }
+     Rect clip = clip_box(dc);
+     for (int64_t y = std::max(r.t, clip.t); y < std::min(r.b, clip.b); ++y)
+         for (int64_t x = std::max(r.l, clip.l); x < std::min(r.r, clip.r); ++x)
+@@ -1293,6 +1404,9 @@ bool presented_pixels(PresentedSurface &s) {
+ }
+ } // namespace
+ 
++bool gdi_desktop_input() {
++    return !presented_surface().owner && !ddraw_gdi_primary_active();
++}
+ void gdi_present_windows(bool refresh) {
+     auto surfaces = visible_surfaces();
+     auto &presented = presented_surface();
+@@ -1480,6 +1594,21 @@ void brush_indirect(X86 *c) {
+ void pen_indirect(X86 *c) {
+     indirect_object(c, true);
+ }
++void create_pen(X86 *c) {
++    uint32_t style = arg(c, 0);
++    int32_t width = int32_t(arg(c, 1));
++    if (style > 6 || width < 0) {
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    Object o;
++    o.kind = Object::Pen;
++    o.width = width;
++    o.style = width > 1 && style >= 1 && style <= 4 ? 0 : style;
++    o.color = arg(c, 2);
++    set_eax(c, make_object(o));
++}
+ void stock_object(X86 *c) {
+     uint32_t i = arg(c, 0);
+     set_eax(c, i <= 19 ? 0x4f100 + i : 0);
+@@ -1579,6 +1708,61 @@ void get_stretch_mode(X86 *c) {
+     auto *dc = dc_of(arg(c, 0));
+     set_eax(c, dc ? dc->stretch_mode : 0);
+ }
++void map_mode(X86 *c) {
++    auto *dc = dc_of(arg(c, 0));
++    uint32_t mode = arg(c, 1);
++    if (!dc || (mode != 1 && mode != 8)) {
++        if (dc_of(arg(c, 0)))
++            log_once("unsupported-mapping-mode", "SetMapMode: mapping mode %u is unsupported",
++                     arg(c, 1));
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    set_eax(c, uint32_t(dc->map_mode));
++    dc->map_mode = int(mode);
++    if (mode == 1)
++        dc->window_ext_x = dc->window_ext_y = dc->viewport_ext_x = dc->viewport_ext_y = 1;
++}
++void get_map_mode(X86 *c) {
++    auto *dc = dc_of(arg(c, 0));
++    set_eax(c, dc ? uint32_t(dc->map_mode) : 0);
++}
++// MM_TEXT ignores extent setters. MM_ANISOTROPIC scales the two axes
++// independently, including the inverted y axis used by OLE pictures.
++void mapping_extent(X86 *c, bool set, bool viewport) {
++    auto *dc = dc_of(arg(c, 0));
++    uint32_t out = arg(c, set ? 3 : 1);
++    int32_t x = set ? int32_t(arg(c, 1)) : 0, y = set ? int32_t(arg(c, 2)) : 0;
++    if (!dc || (!set && !out) || (out && !gm_valid(out, 8)) ||
++        (set && dc->map_mode == 8 && (!x || !y))) {
++        set_eax(c, 0);
++        return;
++    }
++    int32_t &ex = viewport ? dc->viewport_ext_x : dc->window_ext_x;
++    int32_t &ey = viewport ? dc->viewport_ext_y : dc->window_ext_y;
++    if (out) {
++        wr32(out, uint32_t(ex));
++        wr32(out + 4, uint32_t(ey));
++    }
++    if (set && dc->map_mode == 8) {
++        ex = x;
++        ey = y;
++    }
++    set_eax(c, 1);
++}
++void set_window_extent(X86 *c) {
++    mapping_extent(c, true, false);
++}
++void set_viewport_extent(X86 *c) {
++    mapping_extent(c, true, true);
++}
++void get_window_extent(X86 *c) {
++    mapping_extent(c, false, false);
++}
++void get_viewport_extent(X86 *c) {
++    mapping_extent(c, false, true);
++}
+ void rop2(X86 *c) {
+     auto *dc = dc_of(arg(c, 0));
+     int v = int(arg(c, 1));
+@@ -1589,6 +1773,10 @@ void rop2(X86 *c) {
+     set_eax(c, dc->rop2);
+     dc->rop2 = v;
+ }
++void get_rop2(X86 *c) {
++    auto *dc = dc_of(arg(c, 0));
++    set_eax(c, dc ? uint32_t(dc->rop2) : 0);
++}
+ void flush(X86 *c) {
+     set_eax(c, 1);
+ }
+@@ -1642,12 +1830,19 @@ void gdi_model_register() {
+     static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
+                                        G("CreateBrushIndirect", 1, brush_indirect),
+                                        G("CreatePenIndirect", 1, pen_indirect),
++                                       G("CreatePen", 3, create_pen),
+                                        G("GetStockObject", 1, stock_object),
+                                        G("GetPixel", 3, get_pixel),
+                                        G("SetPixel", 4, set_pixel),
+                                        G("SaveDC", 1, save_dc),
+                                        G("RestoreDC", 2, restore_dc),
+                                        G("SetWindowOrgEx", 4, window_org),
++                                       G("SetMapMode", 2, map_mode),
++                                       G("GetMapMode", 1, get_map_mode),
++                                       G("SetWindowExtEx", 4, set_window_extent),
++                                       G("SetViewportExtEx", 4, set_viewport_extent),
++                                       G("GetWindowExtEx", 2, get_window_extent),
++                                       G("GetViewportExtEx", 2, get_viewport_extent),
+                                        G("GetWindowOrgEx", 2, get_window_org),
+                                        G("SetViewportOrgEx", 4, viewport_org),
+                                        G("SetBrushOrgEx", 4, brush_org),
+@@ -1657,6 +1852,7 @@ void gdi_model_register() {
+                                        G("SetStretchBltMode", 2, stretch_mode),
+                                        G("GetStretchBltMode", 1, get_stretch_mode),
+                                        G("SetROP2", 2, rop2),
++                                       G("GetROP2", 1, get_rop2),
+                                        G("GdiFlush", 0, flush),
+                                        G("UnrealizeObject", 1, unrealize),
+                                        G("ResizePalette", 2, resize_palette),
+@@ -1671,10 +1867,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+     auto *dc = dc_of(hdc);
+     if (!dc)
+         return {};
+-    int64_t x = 0, y = 0;
++    int64_t x = r.l, y = r.t, right = r.r, bottom = r.b;
+     offset(*dc, &x, &y);
++    offset(*dc, &right, &bottom);
+     auto bound = [](int64_t v) { return int32_t(std::clamp<int64_t>(v, INT_MIN, INT_MAX)); };
+-    return {bound(r.l + x), bound(r.t + y), bound(r.r + x), bound(r.b + y)};
++    return {bound(std::min(x, right)), bound(std::min(y, bottom)), bound(std::max(x, right)),
++            bound(std::max(y, bottom))};
+ }
+ } // namespace gdi
+ namespace {
+@@ -1741,6 +1939,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+ }
+ void create_section(X86 *c) {
+     Dib d;
++    d.section = true;
+     uint32_t out = arg(c, 3);
+     if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
+         !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
+@@ -1864,6 +2063,12 @@ void dib_to_device(X86 *c, bool stretch) {
+         set_eax(c, 0);
+         return;
+     }
++    LOGV("GDI upload: %s src=%dx%d bpp=%u dest=%d,%d %dx%d srcpos=%d,%d range=%d,%d rop=%08x "
++         "first=%08x",
++         stretch ? "StretchDIBits" : "SetDIBitsToDevice", src.width, src.height, src.bpp,
++         int32_t(arg(c, 1)), int32_t(arg(c, 2)), int32_t(arg(c, 3)), int32_t(arg(c, 4)),
++         int32_t(arg(c, 5)), int32_t(arg(c, 6)), int32_t(arg(c, 7)), int32_t(arg(c, 8)),
++         stretch ? arg(c, 12) : 0x00cc0020, gm_valid(bits, 4) ? rd32(bits) : 0);
+     uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
+     if (start >= count) {
+         set_eax(c, 0);
+@@ -1927,17 +2132,48 @@ void stretch_dibits(X86 *c) {
+ void set_dibits_device(X86 *c) {
+     dib_to_device(c, false);
+ }
++void get_bitmap_dimension(X86 *c) {
++    Dib *d = dib_of(arg(c, 0));
++    uint32_t out = arg(c, 1);
++    if (!d || d->section || !out || !gm_valid(out, 8)) {
++        set_eax(c, 0);
++        return;
++    }
++    wr32(out, d->preferred_width);
++    wr32(out + 4, d->preferred_height);
++    set_eax(c, 1);
++}
++void set_bitmap_dimension(X86 *c) {
++    Dib *d = dib_of(arg(c, 0));
++    uint32_t out = arg(c, 3);
++    if (!d || d->section || (out && !gm_valid(out, 8))) {
++        set_eax(c, 0);
++        return;
++    }
++    if (out) {
++        wr32(out, d->preferred_width);
++        wr32(out + 4, d->preferred_height);
++    }
++    d->preferred_width = int32_t(arg(c, 1));
++    d->preferred_height = int32_t(arg(c, 2));
++    set_eax(c, 1);
++}
+ } // namespace
+ void gdi_bitmaps_register() {
+ #define G(n, a, f)                                                                                 \
+     {                                                                                              \
+         "GDI32.dll", n, a, f                                                                       \
+     }
+-    static const ImportShim shims[] = {
+-        G("CreateDIBSection", 6, create_section),      G("CreateBitmap", 5, create_bitmap),
+-        G("CreateDIBitmap", 6, create_dibitmap),       G("SetDIBits", 7, set_dibits),
+-        G("SetDIBitsToDevice", 12, set_dibits_device), G("StretchDIBits", 13, stretch_dibits),
+-        G("GetDIBColorTable", 4, color_table),         G("GetBitmapBits", 3, bitmap_bits)};
++    static const ImportShim shims[] = {G("CreateDIBSection", 6, create_section),
++                                       G("CreateBitmap", 5, create_bitmap),
++                                       G("CreateDIBitmap", 6, create_dibitmap),
++                                       G("SetDIBits", 7, set_dibits),
++                                       G("SetDIBitsToDevice", 12, set_dibits_device),
++                                       G("StretchDIBits", 13, stretch_dibits),
++                                       G("GetDIBColorTable", 4, color_table),
++                                       G("GetBitmapBits", 3, bitmap_bits),
++                                       G("GetBitmapDimensionEx", 2, get_bitmap_dimension),
++                                       G("SetBitmapDimensionEx", 4, set_bitmap_dimension)};
+ #undef G
+     imports_register(shims, sizeof(shims) / sizeof(shims[0]));
+ }
+diff --git a/runtime/gdi32_draw.cpp b/runtime/gdi32_draw.cpp
+index c22dc11..44221fe 100644
+--- a/runtime/gdi32_draw.cpp
++++ b/runtime/gdi32_draw.cpp
+@@ -61,6 +61,25 @@ void pen_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p) {
+ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src, int32_t sx,
+           int32_t sy, int32_t sw, int32_t sh, uint32_t rop, uint32_t mask = 0, int32_t mx = 0,
+           int32_t my = 0) {
++    auto *dest = dc_of(dst), *source = dc_of(src);
++    if (dest && source && (dest->map_mode != 1 || source->map_mode != 1)) {
++        int64_t dx = x, dy = y, right = int64_t(x) + w, bottom = int64_t(y) + h;
++        int64_t ax = sx, ay = sy, ar = int64_t(sx) + sw, ab = int64_t(sy) + sh;
++        mapping_point(dst, &dx, &dy);
++        mapping_point(dst, &right, &bottom);
++        mapping_point(src, &ax, &ay);
++        mapping_point(src, &ar, &ab);
++        if (std::abs(right - dx) > INT_MAX || std::abs(bottom - dy) > INT_MAX ||
++            std::abs(ar - ax) > INT_MAX || std::abs(ab - ay) > INT_MAX)
++            return false;
++        uint32_t device_dst = device_space_dc(dst), device_src = device_space_dc(src);
++        bool ok = blit(device_dst, int32_t(dx), int32_t(dy), int32_t(right - dx),
++                       int32_t(bottom - dy), device_src, int32_t(ax), int32_t(ay), int32_t(ar - ax),
++                       int32_t(ab - ay), rop, mask, mx, my);
++        dcs().erase(device_dst);
++        dcs().erase(device_src);
++        return ok;
++    }
+     int dw, dh, srcw, srch;
+     if (!dc_size(dst, &dw, &dh) || !dc_size(src, &srcw, &srch) || !w || !h || !sw || !sh)
+         return false;
+@@ -452,6 +471,7 @@ void set_region(X86 *c) {
+         return;
+     }
+     it->second.rect = rectangle(c);
++    it->second.region_parts.clear();
+     set_eax(c, 1);
+ }
+ void region_box(X86 *c) {
+@@ -466,7 +486,75 @@ void region_box(X86 *c) {
+     wr32(p + 4, r.t);
+     wr32(p + 8, r.r);
+     wr32(p + 12, r.b);
+-    set_eax(c, nonempty(r) ? 2 : 1);
++    set_eax(c, nonempty(r) ? (it->second.region_parts.size() > 1 ? 3 : 2) : 1);
++}
++std::vector<Rect> region_parts(const Object &o) {
++    return !o.region_parts.empty() ? o.region_parts
++           : nonempty(o.rect)      ? std::vector<Rect>{o.rect}
++                                   : std::vector<Rect>{};
++}
++std::vector<Rect> region_difference(std::vector<Rect> a, const std::vector<Rect> &b) {
++    for (Rect cut : b) {
++        std::vector<Rect> next;
++        for (Rect old : a) {
++            Rect hit = intersection(old, cut);
++            if (!nonempty(hit)) {
++                next.push_back(old);
++                continue;
++            }
++            for (Rect piece : {Rect{old.l, old.t, old.r, hit.t}, Rect{old.l, hit.b, old.r, old.b},
++                               Rect{old.l, hit.t, hit.l, hit.b}, Rect{hit.r, hit.t, old.r, hit.b}})
++                if (nonempty(piece))
++                    next.push_back(piece);
++        }
++        a = std::move(next);
++    }
++    return a;
++}
++// Boolean operations retain exact holes, rather than treating a complex
++// region's bounding box as its coverage. Snapshot sources for destination aliases.
++void combine_region(X86 *c) {
++    auto out = objects().find(arg(c, 0)), a = objects().find(arg(c, 1)),
++         b = objects().find(arg(c, 2));
++    uint32_t mode = arg(c, 3);
++    if (mode < 1 || mode > 5 || out == objects().end() || a == objects().end() ||
++        out->second.kind != Object::Region || a->second.kind != Object::Region ||
++        (mode != 5 && (b == objects().end() || b->second.kind != Object::Region))) {
++        set_eax(c, 0);
++        return;
++    }
++    auto first = region_parts(a->second);
++    auto second = mode == 5 ? std::vector<Rect>{} : region_parts(b->second);
++    std::vector<Rect> result;
++    if (mode == 1) {
++        for (Rect x : first)
++            for (Rect y : second) {
++                Rect hit = intersection(x, y);
++                if (nonempty(hit))
++                    result.push_back(hit);
++            }
++    } else if (mode == 2 || mode == 3) {
++        result = mode == 2 ? first : region_difference(first, second);
++        auto extra = region_difference(second, first);
++        result.insert(result.end(), extra.begin(), extra.end());
++    } else
++        result = mode == 4 ? region_difference(first, second) : first;
++    Rect bounds{};
++    uint64_t area = 0;
++    for (size_t i = 0; i < result.size(); ++i) {
++        Rect r = result[i];
++        bounds = i == 0 ? r
++                        : Rect{std::min(bounds.l, r.l), std::min(bounds.t, r.t),
++                               std::max(bounds.r, r.r), std::max(bounds.b, r.b)};
++        area += uint64_t(int64_t(r.r) - r.l) * uint64_t(int64_t(r.b) - r.t);
++    }
++    uint64_t box_area =
++        uint64_t(int64_t(bounds.r) - bounds.l) * uint64_t(int64_t(bounds.b) - bounds.t);
++    if (area && area == box_area)
++        result = {bounds};
++    out->second.rect = bounds;
++    out->second.region_parts = std::move(result);
++    set_eax(c, !area ? 1 : out->second.region_parts.size() == 1 ? 2 : 3);
+ }
+ void frame_region(X86 *c) {
+     auto it = objects().find(arg(c, 1));
+@@ -477,6 +565,10 @@ void frame_region(X86 *c) {
+         set_eax(c, 0);
+         return;
+     }
++    if (it->second.region_parts.size() > 1) {
++        set_eax(c, 0); // Complex-region framing needs a boundary stroke implementation.
++        return;
++    }
+     Rect r = it->second.rect, clip = intersection(r, clip_box(arg(c, 0)));
+     for (int64_t y = clip.t; y < clip.b; ++y)
+         for (int64_t x = clip.l; x < clip.r; ++x)
+@@ -561,6 +653,15 @@ void line(uint32_t dc, int32_t x, int32_t y, int32_t x1, int32_t y1) {
+     auto *d = dc_of(dc);
+     if (!d)
+         return;
++    if (d->map_mode != 1) {
++        int64_t ax = x, ay = y, bx = x1, by = y1;
++        mapping_point(dc, &ax, &ay);
++        mapping_point(dc, &bx, &by);
++        uint32_t device = device_space_dc(dc);
++        line(device, int32_t(ax), int32_t(ay), int32_t(bx), int32_t(by));
++        dcs().erase(device);
++        return;
++    }
+     auto pen = objects().find(d->pen);
+     if (pen == objects().end() || pen->second.style == 5)
+         return;
+@@ -632,6 +733,7 @@ void register_draw() {
+                                        G("CreateRectRgn", 4, create_region),
+                                        G("SetRectRgn", 5, set_region),
+                                        G("GetRgnBox", 2, region_box),
++                                       G("CombineRgn", 4, combine_region),
+                                        G("FrameRgn", 5, frame_region),
+                                        G("IntersectClipRect", 5, intersect_clip),
+                                        G("ExcludeClipRect", 5, exclude_clip),
+diff --git a/runtime/gdi32_internal.h b/runtime/gdi32_internal.h
+index d70b9d1..da27538 100644
+--- a/runtime/gdi32_internal.h
++++ b/runtime/gdi32_internal.h
+@@ -6,6 +6,23 @@
+ #include <array>
+ #include <map>
+ namespace gdi {
++// The runtime's ANSI code page is Windows-1252. Font records are stored as
++// LOGFONTW internally, so creation and queries must use the same conversion.
++inline uint16_t font_ansi_unit(uint8_t b) {
++    constexpr uint16_t table[] = {0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
++                                  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f,
++                                  0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
++                                  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178};
++    return b >= 0x80 && b < 0xa0 ? table[b - 0x80] : b;
++}
++inline uint8_t font_ansi_byte(uint16_t unit) {
++    if (unit < 0x80 || (unit >= 0xa0 && unit <= 0xff))
++        return uint8_t(unit);
++    for (uint16_t b = 0x80; b < 0xa0; ++b)
++        if (font_ansi_unit(uint8_t(b)) == unit)
++            return uint8_t(b);
++    return '?';
++}
+ struct Surface {
+     int w = 0, h = 0;
+     bool dirty = false;
+@@ -18,6 +35,8 @@ struct DcState {
+     uint32_t surface = 0;
+     int32_t org_x = 0, org_y = 0, viewport_x = 0, viewport_y = 0;
+     int32_t brush_x = 0, brush_y = 0;
++    int map_mode = 1;
++    int32_t window_ext_x = 1, window_ext_y = 1, viewport_ext_x = 1, viewport_ext_y = 1;
+     uint32_t pen = 0x4f107, brush = 0x4f100, font = 0x4f10d;
+     uint32_t bitmap = 0, palette = 0, region = 0;
+     uint32_t text_color = 0, bk_color = 0xffffff;
+@@ -40,6 +59,7 @@ struct Object {
+     int32_t width = 1;
+     std::array<uint8_t, 92> logfont{};
+     Rect rect{};
++    std::vector<Rect> region_parts; // Disjoint pieces; empty uses rect for a simple region.
+ };
+ std::map<uint32_t, DeviceContext> &dcs();
+ DeviceContext *dc_of(uint32_t dc);
+@@ -59,6 +79,10 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *pixel, bool preserv
+ // (x, y) is inside it. A set bit selects the foreground raster operation.
+ bool mask_bit(uint32_t bitmap, int64_t x, int64_t y, bool *set);
+ bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t pixel, bool blend = false);
++// Map logical coordinates to device coordinates within the DC's client.
++bool mapping_point(uint32_t dc, int64_t *x, int64_t *y);
++// Borrowed backing and clipping, with coordinates already mapped to pixels.
++uint32_t device_space_dc(uint32_t dc);
+ Rect clip_box(uint32_t dc);
+ bool drawable(uint32_t dc, int64_t x, int64_t y);
+ void fill(uint32_t dc, Rect r, uint32_t pixel);
+@@ -83,4 +107,7 @@ uint32_t gdi_new_dc();
+ 
+ // Called only with the guest baton. A present owns the composed pixel copy.
+ void gdi_present_windows(bool refresh = false);
++// A pure GDI frame composes windows in virtual-screen coordinates; a graphics
++// surface instead supplies the game's client image to the host input mapper.
++bool gdi_desktop_input();
+ void gdi_composite_windows(uint32_t *argb, int w, int h);
+diff --git a/runtime/gdi32_text.cpp b/runtime/gdi32_text.cpp
+index a6dd8fa..a7cf2c7 100644
+--- a/runtime/gdi32_text.cpp
++++ b/runtime/gdi32_text.cpp
+@@ -25,17 +25,81 @@ int32_t font_scale(uint32_t dc) {
+     int64_t height = it == objects().end() ? 16 : int32_t(font_word(it->second, 0));
+     return int32_t(std::max<int64_t>(1, std::abs(height) / 16));
+ }
+-void create_font(X86 *c) {
++void create_font_record(X86 *c, bool wide) {
+     uint32_t p = arg(c, 0);
+-    if (!p || !gm_valid(p, 92)) {
++    if (!p || !gm_valid(p, wide ? 92 : 60)) {
+         set_eax(c, 0);
+         return;
+     }
+     Object font;
+     font.kind = Object::Font;
+-    memcpy(font.logfont.data(), g_mem + p, 92);
++    memcpy(font.logfont.data(), g_mem + p, wide ? 92 : 28);
++    if (!wide)
++        for (size_t i = 0; i < 32; ++i) {
++            uint16_t unit = font_ansi_unit(rd8(p + 28 + uint32_t(i)));
++            memcpy(font.logfont.data() + 28 + 2 * i, &unit, 2);
++        }
+     set_eax(c, make_object(font));
+ }
++void create_font(X86 *c) {
++    create_font_record(c, true);
++}
++void create_font_ansi(X86 *c) {
++    create_font_record(c, false);
++}
++// Query the selected font's family in the canvas model. A stock font uses
++// System. Buffer queries include NUL; successful copies exclude it in EAX.
++void text_face(X86 *c, bool wide) {
++    auto *dc = dc_of(arg(c, 0));
++    int32_t capacity = int32_t(arg(c, 1));
++    uint32_t out = arg(c, 2);
++    if (!dc) {
++        set_eax(c, 0);
++        return;
++    }
++    std::vector<uint16_t> name;
++    auto it = objects().find(dc->font);
++    if (it != objects().end() && it->second.kind == Object::Font)
++        for (size_t i = 0; i < 32; ++i) {
++            uint16_t unit;
++            memcpy(&unit, it->second.logfont.data() + 28 + 2 * i, 2);
++            if (!unit)
++                break;
++            name.push_back(unit);
++        }
++    if (name.empty())
++        for (char ch : std::string("System"))
++            name.push_back(uint16_t(ch));
++    if (!out) {
++        set_eax(c, uint32_t(name.size() + 1));
++        return;
++    }
++    if (capacity <= 0) {
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t count = std::min(uint32_t(name.size()), uint32_t(capacity - 1));
++    if (!gm_valid(out, (count + 1) * (wide ? 2u : 1u))) {
++        set_eax(c, 0);
++        return;
++    }
++    for (uint32_t i = 0; i < count; ++i)
++        if (wide)
++            wr16(out + 2 * i, name[i]);
++        else
++            wr8(out + i, font_ansi_byte(name[i]));
++    if (wide)
++        wr16(out + 2 * count, 0);
++    else
++        wr8(out + count, 0);
++    set_eax(c, count);
++}
++void text_face_ansi(X86 *c) {
++    text_face(c, false);
++}
++void text_face_wide(X86 *c) {
++    text_face(c, true);
++}
+ // TEXTMETRICW is 60 bytes on x86: eleven DWORDs, four UTF-16
+ // characters, five BYTE fields and three bytes of trailing padding.
+ void metrics(uint32_t out, int32_t scale, uint32_t weight) {
+@@ -191,14 +255,16 @@ void extent(X86 *c) {
+     wr32(out + 4, uint32_t(pen.height()));
+     set_eax(c, 1);
+ }
+-void text_out(X86 *c) {
+-    uint32_t hdc = arg(c, 0), flags = arg(c, 3), rp = arg(c, 4), text = arg(c, 5), n = arg(c, 6),
+-             dx = arg(c, 7);
++void text_out(X86 *c, bool wide, bool extended = true) {
++    uint32_t hdc = arg(c, 0), flags = extended ? arg(c, 3) : 0, rp = extended ? arg(c, 4) : 0,
++             text = arg(c, extended ? 5 : 3), n = arg(c, extended ? 6 : 4),
++             dx = extended ? arg(c, 7) : 0;
+     auto *dc = dc_of(hdc);
+     int w, h;
+-    if (!dc || !dc_size(hdc, &w, &h) || n > GUEST_SIZE / 4 ||
+-        (n && (!text || !gm_valid(text, n * 2))) || (dx && !gm_valid(dx, n * 4)) ||
+-        ((flags & 6) && (!rp || !gm_valid(rp, 16)))) {
++    uint32_t stride = flags & 0x2000 ? 8 : 4;
++    if (!dc || !dc_size(hdc, &w, &h) || n > GUEST_SIZE / stride ||
++        (n && (!text || !gm_valid(text, n * (wide ? 2 : 1)))) ||
++        (dx && !gm_valid(dx, n * stride)) || ((flags & 6) && (!rp || !gm_valid(rp, 16)))) {
+         set_eax(c, 0);
+         return;
+     }
+@@ -226,14 +292,28 @@ void text_out(X86 *c) {
+     const Pen pen = pen_of(hdc);
+     int64_t x = int32_t(arg(c, 1)), y = int32_t(arg(c, 2));
+     for (uint32_t i = 0; i < n; ++i) {
+-        uint32_t unit = rd16(text + 2 * i);
++        uint32_t unit = wide ? rd16(text + 2 * i) : font_ansi_unit(rd8(text + i));
+         pen.draw(hdc, x, y, unit, false);
+-        x += dx ? int32_t(rd32(dx + 4 * i)) : pen.advance(unit);
++        x += dx ? int32_t(rd32(dx + stride * i)) : pen.advance(unit);
++        if (dx && stride == 8)
++            y += int32_t(rd32(dx + stride * i + 4));
+     }
+     dc->clip = std::move(old_clip);
+     dc->clipped = old_clipped;
+     set_eax(c, 1);
+ }
++void text_out_wide(X86 *c) {
++    text_out(c, true);
++}
++void text_out_ansi(X86 *c) {
++    text_out(c, false);
++}
++void plain_text_wide(X86 *c) {
++    text_out(c, true, false);
++}
++void plain_text_ansi(X86 *c) {
++    text_out(c, false, false);
++}
+ // The fonts are kept, so a DC whose font names one of them draws with it. Data
+ // the rasterizer cannot read still gets a handle, as it always has here.
+ void memory_font(X86 *c) {
+@@ -423,7 +503,13 @@ void register_text() {
+         "GDI32.dll", n, a, f                                                                       \
+     }
+     static const ImportShim shims[] = {G("CreateFontIndirectW", 1, create_font),
+-                                       G("ExtTextOutW", 8, text_out),
++                                       G("CreateFontIndirectA", 1, create_font_ansi),
++                                       G("GetTextFaceA", 3, text_face_ansi),
++                                       G("GetTextFaceW", 3, text_face_wide),
++                                       G("ExtTextOutW", 8, text_out_wide),
++                                       G("ExtTextOutA", 8, text_out_ansi),
++                                       G("TextOutW", 5, plain_text_wide),
++                                       G("TextOutA", 5, plain_text_ansi),
+                                        G("GetTextExtentPoint32W", 4, extent),
+                                        G("GetTextExtentPointW", 4, extent),
+                                        G("GetTextMetricsW", 2, get_metrics),
 diff --git a/runtime/imports.h b/runtime/imports.h
 index d01eb0a..262790b 100644
 --- a/runtime/imports.h
@@ -118,7 +1071,7 @@ index d01eb0a..262790b 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..2fdbb9e 100644
+index 529d27d..fb40e63 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
 @@ -533,6 +533,8 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
@@ -130,7 +1083,143 @@ index 529d27d..2fdbb9e 100644
      g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
      g_cur_dir = RECOMP_GUEST_ROOT;
      g_last_error = 0;
-@@ -1059,6 +1061,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
+@@ -664,6 +666,15 @@ void k_GlobalReAlloc(X86 *c) {
+ void k_GlobalFree(X86 *c) {
+     set_eax(c, heap_free(arg(c, 0)) ? 0 : arg(c, 0));
+ }
++void k_GlobalSize(X86 *c) {
++    uint32_t p = arg(c, 0);
++    if (!heap_owns(p)) {
++        set_last_error(6);
++        set_eax(c, 0);
++        return;
++    }
++    set_eax(c, heap_size(p));
++}
+ void k_GlobalLock(X86 *c) {
+     set_eax(c, arg(c, 0));
+ }
+@@ -935,6 +946,119 @@ void k_CloseHandle(X86 *c) {
+     set_eax(c, 1);
+ }
+ 
++// Legacy HFILE entry points share the normal file handles, overlay resolution
++// and access checks. Their results differ: read returns a byte count, while
++// close returns zero on success and HFILE_ERROR on failure.
++void k_lopen(X86 *c) {
++    uint32_t access = arg(c, 1) & 3;
++    if (access == 3) {
++        set_last_error(87);
++        set_eax(c, 0xffffffff);
++        return;
++    }
++    uint32_t args[] = {
++        arg(c, 0), access == 0 ? 0x80000000u : access == 1 ? 0x40000000u : 0xc0000000u, 3, 0, 3, 0,
++        0};
++    uint32_t result = guest_call(c, imports_resolve("KERNEL32.dll", "CreateFileA"), args, 7);
++    set_eax(c, result);
++}
++void k_lread(X86 *c) {
++    uint32_t count = heap_alloc(4, true);
++    if (!count) {
++        set_eax(c, 0xffffffff);
++        return;
++    }
++    uint32_t args[] = {arg(c, 0), arg(c, 1), arg(c, 2), count, 0};
++    uint32_t ok = guest_call(c, imports_resolve("KERNEL32.dll", "ReadFile"), args, 5);
++    uint32_t result = ok ? rd32(count) : 0xffffffff;
++    heap_free(count);
++    set_eax(c, result);
++}
++void k_llseek(X86 *c) {
++    set_eax(c, guest_call(c, imports_resolve("KERNEL32.dll", "SetFilePointer"), arg(c, 0),
++                          arg(c, 1), 0, arg(c, 2)));
++}
++void k_lclose(X86 *c) {
++    set_eax(c, guest_call(c, imports_resolve("KERNEL32.dll", "CloseHandle"), arg(c, 0))
++                   ? 0
++                   : 0xffffffff);
++}
++
++// This virtual filesystem has no separate 8.3 aliases. Windows permits the
++// unchanged long name in that case, but the named file must still exist.
++void k_GetShortPathNameA(X86 *c) {
++    std::string name = gm_str(arg(c, 0));
++    std::string host = win32_host_path_op(name, WIN32_FILE_READ);
++    OsStat st{};
++    if (host.empty() || os_stat(host.c_str(), &st) != 0) {
++        set_last_error(ERROR_FILE_NOT_FOUND_);
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t out = arg(c, 1), capacity = arg(c, 2);
++    if (capacity <= name.size()) {
++        set_eax(c, uint32_t(name.size() + 1));
++        return;
++    }
++    if (!out || !gm_valid(out, uint32_t(name.size() + 1))) {
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    gm_put_str(out, name.c_str(), capacity);
++    set_eax(c, uint32_t(name.size()));
++}
++void k_SearchPathA(X86 *c) {
++    std::string file = gm_str(arg(c, 1)), extension = gm_str(arg(c, 2));
++    const size_t slash = file.find_last_of("\\/");
++    if (file.find('.', slash == std::string::npos ? 0 : slash + 1) == std::string::npos)
++        file += extension;
++    std::vector<std::string> candidates;
++    if (slash != std::string::npos || file.find(':') != std::string::npos)
++        candidates.push_back(file);
++    else if (arg(c, 0)) {
++        const std::string path = gm_str(arg(c, 0));
++        size_t begin = 0;
++        for (;;) {
++            size_t end = path.find(';', begin);
++            std::string dir = path.substr(begin, end == std::string::npos ? end : end - begin);
++            candidates.push_back(dir.empty() ? file : dir + "\\" + file);
++            if (end == std::string::npos)
++                break;
++            begin = end + 1;
++        }
++    } else {
++        for (const std::string &dir :
++             {std::string(RECOMP_GUEST_ROOT), g_cur_dir, std::string("C:\\Windows\\System32"),
++              std::string("C:\\Windows")})
++            candidates.push_back(dir + "\\" + file);
++    }
++    for (const std::string &candidate : candidates) {
++        const std::string host = win32_host_path_op(candidate, WIN32_FILE_READ);
++        OsStat st{};
++        if (host.empty() || os_stat(host.c_str(), &st) != 0 || st.is_dir)
++            continue;
++        std::string full = full_path_named(candidate);
++        uint32_t capacity = arg(c, 3), out = arg(c, 4), part = arg(c, 5);
++        if (capacity <= full.size()) {
++            set_eax(c, uint32_t(full.size() + 1));
++            return;
++        }
++        if (!out || !gm_valid(out, uint32_t(full.size() + 1)) || (part && !gm_valid(part, 4))) {
++            set_last_error(87);
++            set_eax(c, 0);
++            return;
++        }
++        gm_put_str(out, full.c_str(), capacity);
++        if (part)
++            wr32(part, out + uint32_t(full.find_last_of('\\') + 1));
++        set_eax(c, uint32_t(full.size()));
++        return;
++    }
++    set_last_error(ERROR_FILE_NOT_FOUND_);
++    set_eax(c, 0);
++}
++
+ void k_FlushFileBuffers(X86 *c) {
+     HObj *o = handle_get(arg(c, 0), H_FILE);
+     if (o)
+@@ -1059,6 +1183,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
  std::string module_file_name(uint32_t hmod) {
      std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
      if (hmod && hmod != IMAGE_BASE) {
@@ -140,7 +1229,7 @@ index 529d27d..2fdbb9e 100644
          for (const auto &kv : modules())
              if (kv.second == hmod) {
                  path = RECOMP_GUEST_ROOT "\\" + kv.first;
-@@ -1163,7 +1168,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1163,7 +1290,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
              memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
              m->attached = true;
              m->load_refs = 1;
@@ -150,7 +1239,7 @@ index 529d27d..2fdbb9e 100644
                  call_dll_entry(c, *m, 0);    // failed attach still receives detach
                  m->attached = false;
                  m->load_refs = 0;
-@@ -1306,6 +1312,43 @@ void win32_reset_command_line_for_test() {
+@@ -1306,6 +1434,43 @@ void win32_reset_command_line_for_test() {
      kernel32_wide_reset_command_line();
      g_cmdline_addr = 0;
  }
@@ -194,7 +1283,27 @@ index 529d27d..2fdbb9e 100644
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1753,6 +1796,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1483,6 +1648,19 @@ void k_GetSystemDirectoryA(X86 *c) {
+     memcpy(g_mem + buf, dir, len + 1);
+     set_eax(c, len);
+ }
++void k_GetWindowsDirectoryA(X86 *c) {
++    const std::string dir = "C:\\Windows";
++    uint32_t out = arg(c, 0), cap = arg(c, 1);
++    if (cap <= dir.size()) {
++        set_eax(c, uint32_t(dir.size()) + 1);
++        return;
++    }
++    set_eax(c, gm_valid(out, uint32_t(dir.size()) + 1) ? gm_put_str(out, dir.c_str(), cap) : 0);
++}
++void k_lstrcmpA(X86 *c) {
++    int result = gm_str(arg(c, 0)).compare(gm_str(arg(c, 1)));
++    set_eax(c, uint32_t(result < 0 ? -1 : result > 0 ? 1 : 0));
++}
+ 
+ void k_GetLogicalDriveStringsA(X86 *c) {
+     logical_drive_strings(c, false);
+@@ -1753,6 +1931,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -202,7 +1311,38 @@ index 529d27d..2fdbb9e 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -4935,6 +4979,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4742,6 +4921,8 @@ const ImportShim g_kernel32_shims[] = {
+     {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
+     {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
+     {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
++    {"KERNEL32.dll", "GlobalSize", 1, k_GlobalSize},
++    {"KERNEL32.dll", "LocalSize", 1, k_GlobalSize},
+     {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
+     {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
+     {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
+@@ -4758,6 +4939,12 @@ const ImportShim g_kernel32_shims[] = {
+     {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
+     {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
+     {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
++    {"KERNEL32.dll", "_lopen", 2, k_lopen},
++    {"KERNEL32.dll", "_lread", 3, k_lread},
++    {"KERNEL32.dll", "_llseek", 3, k_llseek},
++    {"KERNEL32.dll", "_lclose", 1, k_lclose},
++    {"KERNEL32.dll", "GetShortPathNameA", 3, k_GetShortPathNameA},
++    {"KERNEL32.dll", "SearchPathA", 6, k_SearchPathA},
+     {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
+     {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
+     {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
+@@ -4777,6 +4964,8 @@ const ImportShim g_kernel32_shims[] = {
+     {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
+     {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
+     {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
++    {"KERNEL32.dll", "GetWindowsDirectoryA", 2, k_GetWindowsDirectoryA},
++    {"KERNEL32.dll", "lstrcmpA", 2, k_lstrcmpA},
+     {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
+     {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
+     // modules and process state
+@@ -4935,6 +5124,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -390,12 +1530,58 @@ index 75269f0..c747dc0 100644
          for (uint32_t p = g_tls.callbacks; p && rva_ok(p - g_base, 4); p += 4) {
              uint32_t cb = rd32(p);
 diff --git a/runtime/misc.cpp b/runtime/misc.cpp
-index 3c955d7..1204a59 100644
+index 3c955d7..170b38e 100644
 --- a/runtime/misc.cpp
 +++ b/runtime/misc.cpp
-@@ -964,12 +964,156 @@ void o_CoUninitialize(X86 *c) {
+@@ -963,13 +963,230 @@ void o_CoInitialize(X86 *c) {
+ void o_CoUninitialize(X86 *c) {
      set_eax(c, 0);
  }
++void o_CoFreeUnusedLibraries(X86 *c) {
++    // There is no COM class-factory DLL cache yet. Mapped auxiliary modules
++    // belong to explicit/static LoadLibrary references, which this API must
++    // not release. Its return type is void.
++    (void)c;
++}
++// Legacy Automation calls this compatibility export during thread setup.
++// A native Windows reference probe returns S_OK for NULL and IUnknown pointers
++// without invoking AddRef/Release. The library owns its TLS storage itself.
++void o_CoSetState(X86 *c) {
++    set_eax(c, 0);
++}
++// An in-process object without IMarshal has no remote connections in this
++// runtime. Custom marshalers own their disconnect behavior and receive the
++// documented call; the temporary QueryInterface reference is always released.
++void o_CoDisconnectObject(X86 *c) {
++    uint32_t obj = arg(c, 0);
++    if (arg(c, 1) || !obj || !gm_valid(obj, 4) || !gm_valid(rd32(obj), 12)) {
++        set_eax(c, 0x80070057u);
++        return;
++    }
++    uint32_t tmp = heap_alloc(20, true);
++    if (!tmp) {
++        set_eax(c, 0x8007000eu);
++        return;
++    }
++    wr32(tmp, 3);
++    wr8(tmp + 8, 0xc0);
++    wr8(tmp + 15, 0x46); // IID_IMarshal
++    uint32_t hr = guest_call(c, rd32(rd32(obj)), obj, tmp, tmp + 16);
++    if (hr == 0x80004002u)
++        hr = 0; // The standard in-process case.
++    else if (!hr) {
++        uint32_t marshal = rd32(tmp + 16);
++        if (!marshal || !gm_valid(marshal, 4) || !gm_valid(rd32(marshal), 36))
++            hr = 0x80004003u;
++        else {
++            uint32_t vt = rd32(marshal);
++            hr = guest_call(c, rd32(vt + 32), marshal, 0);
++            guest_call(c, rd32(vt + 8), marshal);
++        }
++    }
++    heap_free(tmp);
++    set_eax(c, hr);
++}
  
 +static uint32_t g_task_allocator = 0;
 +static std::set<uint32_t> g_task_blocks;
@@ -432,6 +1618,34 @@ index 3c955d7..1204a59 100644
 +    g_task_blocks.erase(p);
 +    if (p)
 +        heap_free(p);
++}
++void o_ReleaseStgMedium(X86 *c) {
++    uint32_t p = arg(c, 0);
++    if (!p || !gm_valid(p, 12))
++        return;
++    uint32_t type = rd32(p), value = rd32(p + 4), owner = rd32(p + 8);
++    auto release = [&](uint32_t obj) {
++        if (obj && gm_valid(obj, 4) && gm_valid(rd32(obj), 12))
++            guest_call(c, rd32(rd32(obj) + 8), obj);
++    };
++    // Stream/storage and file-name references are released even when a
++    // provider owns the medium. Handles belong to that provider when non-NULL.
++    if (type == 4 || type == 8)
++        release(value);
++    else if (type == 2) {
++        if (!owner && value)
++            guest_call(c, imports_resolve("KERNEL32.dll", "DeleteFileW"), value);
++        task_free(value);
++    } else if (!owner && value) {
++        if (type == 1)
++            guest_call(c, imports_resolve("KERNEL32.dll", "GlobalFree"), value);
++        else if (type == 16)
++            guest_call(c, imports_resolve("GDI32.dll", "DeleteObject"), value);
++        else if (type == 32 || type == 64)
++            LOGW("ReleaseStgMedium: metafile medium %u is unsupported", type);
++    }
++    release(owner);
++    wr32(p, 0); // Native ReleaseStgMedium invalidates tymed, retaining the union.
 +}
 +uint32_t task_realloc(uint32_t p, uint32_t size) {
 +    if (!p)
@@ -553,9 +1767,35 @@ index 3c955d7..1204a59 100644
      set_eax(c, 0);
  }
  void o_IsEqualGUID(X86 *c) {
-@@ -2037,7 +2181,10 @@ const ImportShim g_misc_shims[] = {
+@@ -1855,6 +2072,20 @@ void m_mciSendCommandA(X86 *c) {
+     log_once("mciSendCommandA", "mciSendCommandA(%08x): MCI is not implemented", arg(c, 1));
+     set_eax(c, 266); // MCIERR_DEVICE_NOT_INSTALLED
+ }
++void m_mciSendStringA(X86 *c) {
++    std::string command = gm_str(arg(c, 0));
++    LOGV("mciSendStringA(\"%s\"): no MCI media device is installed", command.c_str());
++    if (arg(c, 1) && arg(c, 2) && gm_valid(arg(c, 1), 1))
++        wr8(arg(c, 1), 0);
++    set_eax(c, 266); // MCIERR_DEVICE_NOT_INSTALLED, matching mciSendCommandA.
++}
++void m_sndPlaySoundA(X86 *c) {
++    uint32_t sound = arg(c, 0);
++    LOGV("sndPlaySoundA(%08x, %08x): waveform sound service is unavailable", sound, arg(c, 1));
++    // NULL stops an outstanding waveform request. No request is active in
++    // this backend; named or in-memory playback honestly reports failure.
++    set_eax(c, sound == 0 ? 1 : 0);
++}
+ 
+ } // namespace
+ 
+@@ -2036,8 +2267,15 @@ const ImportShim g_misc_shims[] = {
+     {"ole32.dll", "OleInitialize", 1, o_CoInitialize},
      {"ole32.dll", "OleUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "CoInitializeEx", 2, o_CoInitialize},
++    {"ole32.dll", "CoSetState", 1, o_CoSetState},
++    {"ole32.dll", "CoFreeUnusedLibraries", 0, o_CoFreeUnusedLibraries},
++    {"ole32.dll", "ReleaseStgMedium", 1, o_ReleaseStgMedium},
++    {"ole32.dll", "CoDisconnectObject", 2, o_CoDisconnectObject},
      {"ole32.dll", "CoTaskMemAlloc", 1, o_CoTaskMemAlloc},
 +    {"ole32.dll", "CoTaskMemRealloc", 2, o_CoTaskMemRealloc},
      {"ole32.dll", "CoTaskMemFree", 1, o_CoTaskMemFree},
@@ -564,7 +1804,16 @@ index 3c955d7..1204a59 100644
      {"ole32.dll", "IsEqualGUID", 2, o_IsEqualGUID},
      {"ole32.dll", "CoUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "PropVariantClear", 1, o_PropVariantClear},
-@@ -2273,3 +2420,18 @@ const ImportShim g_misc_shims[] = {
+@@ -2093,6 +2331,8 @@ const ImportShim g_misc_shims[] = {
+     {"WINMM.dll", "midiOutPrepareHeader", 3, m_midiOutPrepareHeader},
+     {"WINMM.dll", "midiOutUnprepareHeader", 3, m_midiOutUnprepareHeader},
+     {"WINMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
++    {"WINMM.dll", "mciSendStringA", 4, m_mciSendStringA},
++    {"WINMM.dll", "sndPlaySoundA", 2, m_sndPlaySoundA},
+     // _inmm exposes the same WinMM ABI. Until CD-file playback is modeled,
+     // report the actual unavailable MCI device with its proper stack cleanup.
+     {"_INMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
+@@ -2273,3 +2513,18 @@ const ImportShim g_misc_shims[] = {
      {"weanetr.dll", "?SendChat@MLDPlay@@QAEHKPAGKPAK@Z", 4, nullptr},
  };
  const size_t g_misc_shim_count = sizeof(g_misc_shims) / sizeof(g_misc_shims[0]);
@@ -584,7 +1833,7 @@ index 3c955d7..1204a59 100644
 +    task_free(p);
 +}
 diff --git a/runtime/oleaut32.cpp b/runtime/oleaut32.cpp
-index a9f6b9f..e97abc7 100644
+index a9f6b9f..17057aa 100644
 --- a/runtime/oleaut32.cpp
 +++ b/runtime/oleaut32.cpp
 @@ -2,6 +2,7 @@
@@ -707,8 +1956,8 @@ index a9f6b9f..e97abc7 100644
 +    if (data && !(rd16(a + 2) & 2))
 +        win32_task_free(data);
 +    wr32(a + 12, 0);
-     return 0;
- }
++    return 0;
++}
 +uint32_t array_destroy_descriptor(uint32_t a) {
 +    if (!a)
 +        return 0;
@@ -718,8 +1967,8 @@ index a9f6b9f..e97abc7 100644
 +        return 0x8002000du;
 +    if (!(rd16(a + 2) & 7))
 +        win32_task_free(a);
-+    return 0;
-+}
+     return 0;
+ }
 +uint32_t array_destroy(uint32_t a) {
 +    uint32_t hr = array_destroy_data(a);
 +    return hr ? hr : array_destroy_descriptor(a);
@@ -819,7 +2068,50 @@ index a9f6b9f..e97abc7 100644
  void array_bound(X86 *c, bool upper) {
      uint32_t a = arg(c, 0), out = arg(c, 2);
      if (!array_valid(a) || !valid(out, 4)) {
-@@ -549,21 +644,102 @@ void o_SafeArrayPtrOfIndex(X86 *c) {
+@@ -467,19 +562,37 @@ void array_bound(X86 *c, bool upper) {
+     wr32(out, rd32(b + 4) + (upper ? rd32(b) - 1 : 0));
+     set_eax(c, 0);
+ }
+-// Access hands out the element storage and nothing else changes: the kit
+-// keeps no lock count, so unaccess has nothing to undo.
++// Nested locks protect the storage from destruction. The supplied Automation
++// runtime caps cLocks at 0xffff even though the descriptor field is a dword.
++// These updates run under the guest scheduler baton.
++uint32_t array_lock(uint32_t a, bool acquire) {
++    if (!array_descriptor_valid(a))
++        return INVALID;
++    uint32_t locks = rd32(a + 8);
++    if (acquire ? locks >= 0xffffu : locks == 0)
++        return 0x8000ffffu; // E_UNEXPECTED, without changing the count.
++    wr32(a + 8, acquire ? locks + 1 : locks - 1);
++    return 0;
++}
++void o_SafeArrayLock(X86 *c) {
++    set_eax(c, array_lock(arg(c, 0), true));
++}
++void o_SafeArrayUnlock(X86 *c) {
++    set_eax(c, array_lock(arg(c, 0), false));
++}
+ void o_SafeArrayAccessData(X86 *c) {
+     uint32_t a = arg(c, 0), out = arg(c, 1);
+     if (!array_valid(a) || !valid(out, 4)) {
+         set_eax(c, INVALID);
+         return;
+     }
+-    wr32(out, rd32(a + 12));
+-    set_eax(c, 0);
++    uint32_t hr = array_lock(a, true);
++    if (!hr)
++        wr32(out, rd32(a + 12));
++    set_eax(c, hr);
+ }
+ void o_SafeArrayUnaccessData(X86 *c) {
+-    set_eax(c, array_valid(arg(c, 0)) ? 0 : INVALID);
++    set_eax(c, array_lock(arg(c, 0), false));
+ }
+ void o_SafeArrayGetLBound(X86 *c) {
+     array_bound(c, false);
+@@ -549,21 +662,106 @@ void o_SafeArrayPtrOfIndex(X86 *c) {
      array_element(c, false, true);
  }
  void o_GetErrorInfo(X86 *c) {
@@ -878,6 +2170,8 @@ index a9f6b9f..e97abc7 100644
 +    O(SafeArrayPtrOfIndex, 3),
 +    O(SafeArrayAccessData, 2),
 +    O(SafeArrayUnaccessData, 1),
++    O(SafeArrayLock, 1),
++    O(SafeArrayUnlock, 1),
 +    O(GetErrorInfo, 2),
 +    O(SetErrorInfo, 2),
 +    O(OaBuildVersion, 0),
@@ -906,6 +2200,8 @@ index a9f6b9f..e97abc7 100644
 +    ORD(16, SafeArrayDestroy, 1),
 +    ORD(19, SafeArrayGetUBound, 3),
 +    ORD(20, SafeArrayGetLBound, 3),
++    ORD(21, SafeArrayLock, 1),
++    ORD(22, SafeArrayUnlock, 1),
 +    ORD(23, SafeArrayAccessData, 2),
 +    ORD(24, SafeArrayUnaccessData, 1),
 +    ORD(25, SafeArrayGetElement, 3),
@@ -1013,11 +2309,253 @@ index d746097..3dc3b0d 100644
  bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names,
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
+diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
+index cf0d171..9339f77 100644
+--- a/runtime/tests/gdi_tests.cpp
++++ b/runtime/tests/gdi_tests.cpp
+@@ -237,6 +237,13 @@ static void test_drawing() {
+     wr32(s + 4, 1);
+     wr32(s + 12, 0xff);
+     uint32_t pen = call_import(&c, "GDI32.dll", "CreatePenIndirect", {s});
++    uint32_t direct = call_import(&c, "GDI32.dll", "CreatePen", {2, 3, 0x123456});
++    check(direct && call_import(&c, "GDI32.dll", "GetObjectA", {direct, 16, s + 32}) == 16 &&
++              rd32(s + 32) == 0 && rd32(s + 36) == 3 && rd32(s + 44) == 0x123456,
++          "wide dashed CreatePen requests become solid logical pens");
++    call_import(&c, "GDI32.dll", "DeleteObject", {direct});
++    check(call_import(&c, "GDI32.dll", "CreatePen", {7, 1, 0}) == 0,
++          "CreatePen rejects unsupported styles");
+     call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
+     call_import(&c, "GDI32.dll", "MoveToEx", {dc, 0, 16, 0});
+     check(call_import(&c, "GDI32.dll", "LineTo", {dc, 16, 16}) == 1 &&
+@@ -380,7 +387,14 @@ static void test_dib_rows_and_regions() {
+     uint32_t pen = call_import(&c, "GDI32.dll", "GetStockObject", {8});
+     call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
+     call_import(&c, "GDI32.dll", "SetPixel", {dc, 11, 11, 0xff});
++    check(call_import(&c, "GDI32.dll", "GetROP2", {dc}) == 13,
++          "new window DC uses copy-pen raster operation");
+     call_import(&c, "GDI32.dll", "SetROP2", {dc, 7});
++    check(call_import(&c, "GDI32.dll", "GetROP2", {dc}) == 7 &&
++              call_import(&c, "GDI32.dll", "SetROP2", {dc, 0}) == 0 &&
++              call_import(&c, "GDI32.dll", "GetROP2", {dc}) == 7 &&
++              call_import(&c, "GDI32.dll", "GetROP2", {0}) == 0,
++          "raster-operation queries track selection and reject invalid DCs");
+     call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
+     call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
+     check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 11, 11}) == 0xff,
+@@ -390,6 +404,49 @@ static void test_dib_rows_and_regions() {
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
++static void test_region_boolean_operations() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00309800, hwnd = make_test_window(&c, s, 16, 16);
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    uint32_t outer = call_import(&c, "GDI32.dll", "CreateRectRgn", {0, 0, 8, 8});
++    uint32_t inner = call_import(&c, "GDI32.dll", "CreateRectRgn", {2, 2, 6, 6});
++    check(call_import(&c, "GDI32.dll", "CombineRgn", {outer, outer, inner, 4}) == 3 &&
++              call_import(&c, "GDI32.dll", "GetRgnBox", {outer, s}) == 3 && rd32(s) == 0 &&
++              rd32(s + 8) == 8,
++          "aliased region subtraction retains a complex hole and its bounds");
++    check(call_import(&c, "GDI32.dll", "SelectObject", {dc, outer}) == 3,
++          "selecting a complex region reports complex clipping");
++    uint32_t brush = call_import(&c, "GDI32.dll", "CreateSolidBrush", {0xff});
++    wr32(s, 0);
++    wr32(s + 4, 0);
++    wr32(s + 8, 16);
++    wr32(s + 12, 16);
++    call_import(&c, "USER32.dll", "FillRect", {dc, s, brush});
++    uint32_t reader = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    check(call_import(&c, "GDI32.dll", "GetPixel", {reader, 1, 1}) == 0xff &&
++              call_import(&c, "GDI32.dll", "GetPixel", {reader, 3, 3}) == 0 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {reader, 9, 9}) == 0,
++          "region coverage paints the ring and preserves its hole and exterior");
++    check(call_import(&c, "GDI32.dll", "CombineRgn", {outer, outer, inner, 2}) == 2 &&
++              call_import(&c, "GDI32.dll", "GetRgnBox", {outer, s}) == 2,
++          "union with the removed centre restores a simple rectangle");
++    check(call_import(&c, "GDI32.dll", "CombineRgn", {inner, outer, inner, 1}) == 2 &&
++              call_import(&c, "GDI32.dll", "GetRgnBox", {inner, s}) == 2 && rd32(s) == 2 &&
++              rd32(s + 8) == 6,
++          "intersection snapshots an aliased second source");
++    check(call_import(&c, "GDI32.dll", "CombineRgn", {outer, outer, outer, 3}) == 1 &&
++              call_import(&c, "GDI32.dll", "GetRgnBox", {outer, s}) == 1 && rd32(s + 8) == 0 &&
++              call_import(&c, "GDI32.dll", "CombineRgn", {outer, inner, 0, 5}) == 2,
++          "identical XOR empties the region and COPY ignores its unused second source");
++    call_import(&c, "GDI32.dll", "DeleteObject", {inner});
++    call_import(&c, "GDI32.dll", "DeleteObject", {outer});
++    call_import(&c, "GDI32.dll", "DeleteObject", {brush});
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, reader});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
++
+ static void test_text() {
+     X86 c;
+     loader_init_context(&c);
+@@ -415,6 +472,29 @@ static void test_text() {
+               rd32(s + 340) == 16 && rd32(s + 344) == 16 && rd8(s + 375) == 0x30 &&
+               rd8(s + 376) == 0,
+           "TEXTMETRICW layout and scaled metrics");
++    uint32_t lf = s + 512, result = s + 608;
++    memset(g_mem + lf, 0, 60);
++    wr32(lf, uint32_t(-24));
++    wr32(lf + 16, 400);
++    const uint8_t family[] = {'R', 0x80, 'c', 'o', 'm', 'p', 0};
++    memcpy(g_mem + lf + 28, family, sizeof family);
++    uint32_t ansi_font = call_import(&c, "GDI32.dll", "CreateFontIndirectA", {lf});
++    check(ansi_font && call_import(&c, "GDI32.dll", "GetObjectA", {ansi_font, 60, result}) == 60 &&
++              rd32(result) == uint32_t(-24) && !memcmp(g_mem + result + 28, family, sizeof family),
++          "ANSI fonts round trip a 60-byte LOGFONTA with CP1252 names");
++    check(call_import(&c, "GDI32.dll", "GetObjectW", {ansi_font, 92, result}) == 92 &&
++              rd16(result + 30) == 0x20ac,
++          "the same font exposes the 92-byte wide record and decoded Euro character");
++    call_import(&c, "GDI32.dll", "SelectObject", {dc, ansi_font});
++    check(call_import(&c, "GDI32.dll", "GetTextFaceA", {dc, 0, 0}) == 7 &&
++              call_import(&c, "GDI32.dll", "GetTextFaceA", {dc, 32, result}) == 6 &&
++              !memcmp(g_mem + result, family, sizeof family),
++          "GetTextFaceA size query includes NUL while the copied count excludes it");
++    check(call_import(&c, "GDI32.dll", "GetTextFaceW", {dc, 3, result}) == 2 &&
++              rd16(result) == 'R' && rd16(result + 2) == 0x20ac && rd16(result + 4) == 0,
++          "GetTextFaceW truncates at the requested character capacity");
++    call_import(&c, "GDI32.dll", "SelectObject", {dc, font});
++    call_import(&c, "GDI32.dll", "DeleteObject", {ansi_font});
+     call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
+     call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
+     check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
+@@ -1124,12 +1204,100 @@ static void test_windows_face_substitute() {
+         return rd32(s + 0x220);
+     };
+     uint32_t w;
+-    check((w = width("Tahoma", 400)) == 118, "Tahoma is drawn with Open Sans (%u)", w);
+-    check((w = width("SEGOE UI", 0)) == 118,
+-          "the face name is matched without case, and weight 0 is regular (%u)", w);
+-    check((w = width("Tahoma", 700)) == 123, "a bold request takes the semibold (%u)", w);
+-    check((w = width("Courier New", 400)) == 96, "a fixed-pitch face keeps the 8x16 cells (%u)", w);
+-    check((w = width("RecompUnknown", 400)) == 96, "an unknown face keeps the 8x16 cells (%u)", w);
++    w = width("Tahoma", 400);
++    check(w == 118, "Tahoma is drawn with Open Sans (%u)", w);
++    w = width("SEGOE UI", 0);
++    check(w == 118, "the face name is matched without case, and weight 0 is regular (%u)", w);
++    w = width("Tahoma", 700);
++    check(w == 123, "a bold request takes the semibold (%u)", w);
++    w = width("Courier New", 400);
++    check(w == 96, "a fixed-pitch face keeps the 8x16 cells (%u)", w);
++    w = width("RecompUnknown", 400);
++    check(w == 96, "an unknown face keeps the 8x16 cells (%u)", w);
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
++// OLE pictures draw in HIMETRIC coordinates. A scaled 2x2 source must cover
++// every device pixel, and a negative viewport extent must invert the image.
++static void test_anisotropic_picture_mapping() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00348000;
++    uint32_t hwnd = make_test_window(&c, s, 16, 16);
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    uint32_t reader = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    uint32_t source = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
++    uint32_t bitmap = call_import(&c, "GDI32.dll", "CreateBitmap", {2, 2, 1, 32, 0});
++    call_import(&c, "GDI32.dll", "SelectObject", {source, bitmap});
++    const uint32_t colors[] = {0x0000ff, 0x00ff00, 0xff0000, 0xffffff};
++    for (uint32_t y = 0; y < 2; ++y)
++        for (uint32_t x = 0; x < 2; ++x)
++            call_import(&c, "GDI32.dll", "SetPixel", {source, x, y, colors[y * 2 + x]});
++    check(call_import(&c, "GDI32.dll", "SetMapMode", {dc, 8}) == 1,
++          "anisotropic mapping preserves the previous mode");
++    call_import(&c, "GDI32.dll", "SetWindowExtEx", {dc, 1000, 1000, 0});
++    call_import(&c, "GDI32.dll", "SetViewportExtEx", {dc, 4, 4, 0});
++    call_import(&c, "GDI32.dll", "SetViewportOrgEx", {dc, 2, 3, 0});
++    check(call_import(&c, "GDI32.dll", "StretchBlt",
++                      {dc, 0, 0, 1000, 1000, source, 0, 0, 2, 2, 0x00cc0020}) != 0,
++          "HIMETRIC picture renders through StretchBlt");
++    bool complete = true;
++    for (uint32_t y = 0; y < 4; ++y)
++        for (uint32_t x = 0; x < 4; ++x)
++            complete &= call_import(&c, "GDI32.dll", "GetPixel", {reader, x + 2, y + 3}) ==
++                        colors[(y / 2) * 2 + x / 2];
++    check(complete, "scaled picture fills all four colored quadrants without gaps");
++    uint32_t saved = call_import(&c, "GDI32.dll", "SaveDC", {dc});
++    call_import(&c, "GDI32.dll", "SetViewportExtEx", {dc, 4, uint32_t(-4), 0});
++    call_import(&c, "GDI32.dll", "SetViewportOrgEx", {dc, 8, 7, 0});
++    call_import(&c, "GDI32.dll", "StretchBlt",
++                {dc, 0, 0, 1000, 1000, source, 0, 0, 2, 2, 0x00cc0020});
++    complete = true;
++    for (uint32_t y = 0; y < 4; ++y)
++        for (uint32_t x = 0; x < 4; ++x)
++            complete &= call_import(&c, "GDI32.dll", "GetPixel", {reader, x + 8, y + 3}) ==
++                        colors[((3 - y) / 2) * 2 + x / 2];
++    check(complete, "negative viewport y extent mirrors the complete image");
++    check(call_import(&c, "GDI32.dll", "RestoreDC", {dc, saved}) != 0,
++          "RestoreDC restores picture mapping state");
++    call_import(&c, "GDI32.dll", "GetViewportExtEx", {dc, s + 0x100});
++    check(rd32(s + 0x100) == 4 && rd32(s + 0x104) == 4,
++          "saved mapping extents survive a temporary inversion");
++    check(call_import(&c, "GDI32.dll", "SetWindowExtEx", {dc, 0, 1000, 0}) == 0,
++          "zero anisotropic extent is refused");
++    call_import(&c, "GDI32.dll", "GetWindowExtEx", {dc, s + 0x100});
++    check(rd32(s + 0x100) == 1000 && rd32(s + 0x104) == 1000,
++          "invalid extent leaves the previous mapping intact");
++    call_import(&c, "GDI32.dll", "DeleteDC", {source});
++    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, reader});
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
++static void test_plain_ansi_text() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00350000;
++    uint32_t hwnd = make_test_window(&c, s, 32, 40);
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    wr8(s + 0x100, 'A');
++    wr8(s + 0x101, 0x80); // CP1252 Euro, with a byte count instead of UTF-16 units.
++    wr16(s + 0x110, 'A');
++    wr16(s + 0x112, 0x20ac);
++    call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
++    call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ff});
++    check(call_import(&c, "GDI32.dll", "TextOutA", {dc, 0, 0, s + 0x100, 2}) == 1 &&
++              call_import(&c, "GDI32.dll", "TextOutW", {dc, 0, 20, s + 0x110, 2}) == 1,
++          "plain ANSI and wide text output both draw");
++    bool same = true;
++    unsigned red = 0;
++    for (uint32_t y = 0; y < 16; ++y)
++        for (uint32_t x = 0; x < 16; ++x) {
++            uint32_t a = call_import(&c, "GDI32.dll", "GetPixel", {dc, x, y});
++            same &= a == call_import(&c, "GDI32.dll", "GetPixel", {dc, x, y + 20});
++            red += a == 0x0000ff;
++        }
++    check(same && red > 0, "ANSI text leaves visible pixels matching its decoded wide text");
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
+@@ -1147,6 +1315,9 @@ int main(int argc, char **argv) {
+         test_layered_window();
+         test_msimg32();
+         test_dib_rows_and_regions();
++        test_region_boolean_operations();
++        test_anisotropic_picture_mapping();
++        test_plain_ansi_text();
+         test_static_control();
+         test_clip_children();
+         test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..a389f47 100644
+index 7016990..e256e45 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
-@@ -184,7 +184,8 @@ static bool pefile_sections(ExpectedImage &out, std::string &err) {
+@@ -6,9 +6,11 @@
+ #include "../../dx/dx.h"
+ #include "../../dx/ddraw.h"
+ #include "../resources.h"
++#include "../gdi_image.h"
+ #include "../mods_seam.h"
+ #include "../intrinsics.h"
+ #include "../interp.h"
++#include "../thunks.h"
+ #include "../loader.h"
+ #include "../discovery.h"
+ #include "../memory.h"
+@@ -184,7 +186,8 @@ static bool pefile_sections(ExpectedImage &out, std::string &err) {
          "[print('IMPORT %x %s %s' % (i.address, d.dll.decode(), "
          "i.name.decode() if i.name else 'ord%d' % i.ordinal)) "
          "for d in getattr(pe, 'DIRECTORY_ENTRY_IMPORT', []) for i in d.imports]"
@@ -1027,7 +2565,7 @@ index 7016990..a389f47 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +351,335 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,588 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -1160,6 +2698,156 @@ index 7016990..a389f47 100644
 +    ++g_skips;
 +}
 +
++static uint32_t button_notifications = 0, button_notification_id = 0;
++static void fixture_button_parent(X86 *c) {
++    if (arg(c, 1) == 0x111) {
++        ++button_notifications;
++        button_notification_id = arg(c, 2);
++    }
++    set_eax(c, arg(c, 1) == 0x81 ? 1 : 0);
++}
++static void test_legacy_file_reads() {
++    section("legacy HFILE reads and virtual path lookup");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    const std::string path = std::string(RECOMP_GUEST_ROOT) + "\\recomp-legacy-contract.txt";
++    gm_put_str(s, path.c_str(), 260);
++    uint32_t created = call_import(&c, "KERNEL32.dll", "CreateFileA",
++                                   {s, 0xc0000000, 3, 0, 1, 0, 0}); // CREATE_NEW
++    if (!check(created != 0xffffffff, "create an isolated legacy-file fixture"))
++        return;
++    memcpy(g_mem + s + 0x200, "abcd", 4);
++    call_import(&c, "KERNEL32.dll", "WriteFile", {created, s + 0x200, 4, s + 0x210, 0});
++    call_import(&c, "KERNEL32.dll", "CloseHandle", {created});
++    uint32_t handle = call_import(&c, "KERNEL32.dll", "_lopen", {s, 0});
++    check(handle != 0xffffffff && call_import(&c, "KERNEL32.dll", "GetFileSize", {handle, 0}) == 4,
++          "legacy open shares normal file handles and sizes");
++    check(call_import(&c, "KERNEL32.dll", "_llseek", {handle, uint32_t(-2), 2}) == 2 &&
++              call_import(&c, "KERNEL32.dll", "_lread", {handle, s + 0x200, 4}) == 2 &&
++              !memcmp(g_mem + s + 0x200, "cd", 2),
++          "signed end-relative seek and a short EOF read return real bytes");
++    check(call_import(&c, "KERNEL32.dll", "_lread", {handle, s + 0x200, 4}) == 0,
++          "an EOF read succeeds with zero bytes");
++    check(call_import(&c, "KERNEL32.dll", "_lclose", {handle}) == 0 &&
++              call_import(&c, "KERNEL32.dll", "_lread", {handle, s + 0x200, 1}) == 0xffffffff,
++          "legacy close returns zero and closed reads return HFILE_ERROR");
++    check(call_import(&c, "KERNEL32.dll", "GetShortPathNameA", {s, 0, 0}) == path.size() + 1,
++          "a path-size query includes its terminator");
++    wr32(s + 0x220, 0x12345678);
++    check(call_import(&c, "KERNEL32.dll", "GetShortPathNameA", {s, s + 0x220, 2}) ==
++                  path.size() + 1 &&
++              rd32(s + 0x220) == 0x12345678,
++          "an undersized short-path buffer is not partially overwritten");
++    check(call_import(&c, "KERNEL32.dll", "GetShortPathNameA", {s, s + 0x300, 260}) ==
++                  path.size() &&
++              gm_str(s + 0x300) == path,
++          "a filesystem without short aliases returns the usable original name");
++    gm_put_str(s + 0x500, "recomp-legacy-contract", 64);
++    gm_put_str(s + 0x550, ".txt", 16);
++    check(call_import(&c, "KERNEL32.dll", "SearchPathA",
++                      {0, s + 0x500, s + 0x550, 260, s + 0x300, s + 0x560}) == path.size() &&
++              gm_str(s + 0x300) == path && gm_str(rd32(s + 0x560)) == "recomp-legacy-contract.txt",
++          "SearchPath appends an extension and returns a guest filename pointer");
++    call_import(&c, "KERNEL32.dll", "DeleteFileA", {s});
++    check(call_import(&c, "KERNEL32.dll", "GetShortPathNameA", {s, s + 0x300, 260}) == 0,
++          "short-path lookup refuses a nonexistent file");
++}
++static void test_point_in_rect() {
++    section("rectangle hit testing with a by-value POINT");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t rect = scratch;
++    wr32(rect, uint32_t(-10));
++    wr32(rect + 4, uint32_t(-20));
++    wr32(rect + 8, 10);
++    wr32(rect + 12, 20);
++    check(call_import(&c, "USER32.dll", "PtInRect", {rect, uint32_t(-10), uint32_t(-20)}) == 1,
++          "negative left and top edges are included");
++    check(call_import(&c, "USER32.dll", "PtInRect", {rect, 10, 0}) == 0 &&
++              call_import(&c, "USER32.dll", "PtInRect", {rect, 0, 20}) == 0,
++          "right and bottom edges are excluded");
++    wr32(rect + 8, uint32_t(-10));
++    check(call_import(&c, "USER32.dll", "PtInRect", {rect, uint32_t(-10), 0}) == 0,
++          "an empty rectangle contains no point");
++}
++static void test_system_button() {
++    section("system button input and paint");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    memset(g_mem + s, 0, 128);
++    gm_put_str(s + 64, "ButtonFixtureParent", 32);
++    wr32(s + 4, imports_alloc_trampoline("fixture.dll", "button parent", fixture_button_parent, 4));
++    wr32(s + 36, s + 64);
++    call_import(&c, "USER32.dll", "RegisterClassA", {s});
++    uint32_t parent = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                  {0, s + 64, 0, 0, 0, 0, 100, 100, 0, 0, 0, 0});
++    gm_put_str(s + 96, "Button", 32);
++    uint32_t button = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                  {0, s + 96, 0, 0x50000003, 0, 0, 50, 25, parent, 42, 0, 0});
++    button_notifications = 0;
++    check(button && call_import(&c, "USER32.dll", "GetWindowContextHelpId", {button}) == 0 &&
++              call_import(&c, "USER32.dll", "SetWindowContextHelpId", {button, 123}) == 1 &&
++              call_import(&c, "USER32.dll", "GetWindowContextHelpId", {button}) == 123,
++          "context help IDs belong to the window");
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf5, 0, 0});
++    check(button_notifications == 1 && button_notification_id == 42 &&
++              call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf0, 0, 0}) == 1,
++          "BM_CLICK toggles an automatic checkbox and sends BN_CLICKED");
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0x201, 1, 0x00040004});
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0x202, 0, 0x00040004});
++    check(button_notifications == 2 &&
++              call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf0, 0, 0}) == 0,
++          "pointer press and release route a real click");
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0x201, 1, 0x00040004});
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0x202, 0, 0xfffffff0});
++    check(button_notifications == 2, "release outside the button does not click");
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf1, 0xffffffff, 0});
++    check(call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf0, 0, 0}) == 1,
++          "a Boolean true check request is clamped to the checkbox's checked state");
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf1, 0, 0});
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf5, 0, 0});
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf, 0, 0});
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {button});
++    check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 6, 10}) == 0 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 20, 20}) == 0xf0f0f0,
++          "checkbox painting writes its check and face pixels to the window surface");
++    call_import(&c, "USER32.dll", "ReleaseDC", {button, dc});
++    call_import(&c, "USER32.dll", "EnableWindow", {button, 0});
++    call_import(&c, "USER32.dll", "SendMessageA", {button, 0xf5, 0, 0});
++    check(button_notifications == 3, "disabled buttons do not emit clicks");
++    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
++    call_import(&c, "USER32.dll", "UnregisterClassA", {s + 64, 0});
++}
++static void test_module_icon_resources() {
++    section("mapped module icon resources");
++    X86 c;
++    loader_init_context(&c);
++    for (uint32_t m = 0; m < loader_module_count(); ++m) {
++        const LoaderModule *module = loader_module(m);
++        std::vector<ResourceName> names;
++        if (!resource_names(14, &names, nullptr, module->base))
++            continue;
++        for (const auto &name : names) {
++            if (name.is_string)
++                continue;
++            uint32_t icon = call_import(&c, "USER32.dll", "LoadIconA", {module->base, name.id});
++            GdiImage pixels;
++            check(icon && gdi_read_icon(icon, &pixels) && pixels.width == 32 && pixels.height == 32,
++                  "LoadIconA decodes and sizes a real auxiliary icon resource");
++            check(call_import(&c, "USER32.dll", "GetIconInfo", {icon, scratch}) == 1 &&
++                      rd32(scratch + 12) && rd32(scratch + 16),
++                  "loaded icon inspection returns real caller-owned bitmaps");
++            call_import(&c, "GDI32.dll", "DeleteObject", {rd32(scratch + 12)});
++            call_import(&c, "GDI32.dll", "DeleteObject", {rd32(scratch + 16)});
++            call_import(&c, "USER32.dll", "DestroyIcon", {icon});
++            return;
++        }
++    }
++    ++g_skips;
++    printf("  [skip] no auxiliary icon resources\n");
++}
 +static void test_vb_startup_platform_apis() {
 +    section("shared ANSI startup APIs");
 +    X86 c;
@@ -1204,6 +2892,20 @@ index 7016990..a389f47 100644
 +    uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
 +    uint32_t original = call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 7});
 +    uint32_t bitmap = call_import(&c, "GDI32.dll", "CreateCompatibleBitmap", {dc, 2, 3});
++    check(call_import(&c, "GDI32.dll", "GetObjectA", {bitmap, 84, s + 448}) == 24 &&
++              rd32(s + 468) == 0 &&
++              call_import(&c, "GDI32.dll", "GetObjectW", {bitmap, 0, 0}) == 24,
++          "DDB queries expose BITMAP without a caller-accessible pixel pointer");
++    check(call_import(&c, "GDI32.dll", "GetBitmapDimensionEx", {bitmap, s + 448}) == 1 &&
++              rd32(s + 448) == 0 && rd32(s + 452) == 0,
++          "fresh compatible bitmaps have no preferred physical dimensions");
++    check(call_import(&c, "GDI32.dll", "SetBitmapDimensionEx", {bitmap, 200, 300, s + 448}) == 1 &&
++              rd32(s + 448) == 0 &&
++              call_import(&c, "GDI32.dll", "GetBitmapDimensionEx", {bitmap, s + 448}) == 1 &&
++              rd32(s + 448) == 200 && rd32(s + 452) == 300 &&
++              call_import(&c, "GDI32.dll", "GetObjectA", {bitmap, 24, s + 464}) == 24 &&
++              rd32(s + 468) == 2 && rd32(s + 472) == 3,
++          "preferred dimensions round trip without resizing bitmap pixels");
 +    check(dc && original && bitmap &&
 +              call_import(&c, "GDI32.dll", "SelectObject", {dc, bitmap}) == original &&
 +              call_import(&c, "GDI32.dll", "GetCurrentObject", {dc, 7}) == bitmap,
@@ -1233,6 +2935,22 @@ index 7016990..a389f47 100644
 +              rd32(info) == 48 && rd32(info + 4) == 0x23 && rd32(info + 16) == 16 &&
 +              rd32(info + 48) == 0x5a5a5a5a,
 +          "GetClassInfoExA shifts fields after cbSize without overflowing WNDCLASSEX");
++    uint32_t hwnd = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                {0, s, 0, 0, 0, 0, 32, 32, 0, 0, IMAGE_BASE, 0});
++    gm_put_str(s + 768, "Property", 32);
++    wr8(s + 776, 0x80);
++    wr8(s + 777, 0);
++    gm_put_wstr(s + 832, "Property\xe2\x82\xac", 32);
++    check(hwnd && call_import(&c, "USER32.dll", "SetPropA", {hwnd, s + 768, 0x1234}) == 1 &&
++              call_import(&c, "USER32.dll", "GetPropW", {hwnd, s + 832}) == 0x1234 &&
++              call_import(&c, "USER32.dll", "RemovePropW", {hwnd, s + 832}) == 0x1234 &&
++              call_import(&c, "USER32.dll", "GetPropA", {hwnd, s + 768}) == 0,
++          "ANSI property names decode CP1252 and share Unicode removal");
++    check(call_import(&c, "USER32.dll", "SetPropW", {hwnd, 0xc123, 9}) == 1 &&
++              call_import(&c, "USER32.dll", "GetPropA", {hwnd, 0xc123}) == 9 &&
++              call_import(&c, "USER32.dll", "RemovePropA", {hwnd, 0xc123}) == 9,
++          "integer atom properties share ANSI and Unicode storage");
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
 +    call_import(&c, "USER32.dll", "UnregisterClassA", {s, IMAGE_BASE});
 +    for (uint32_t m = 0; m < loader_module_count(); ++m) {
 +        const LoaderModule *module = loader_module(m);
@@ -1252,12 +2970,29 @@ index 7016990..a389f47 100644
 +    wr32(p + 4, rd32(p + 4) - 1);
 +    set_eax(c, rd32(p + 4));
 +}
++static void fixture_interface_query(X86 *c) {
++    uint32_t p = arg(c, 0), iid = arg(c, 1), out = arg(c, 2);
++    wr32(out, 0);
++    if (!rd32(p + 8) || rd32(iid) != 3 || rd32(iid + 4) || rd32(iid + 8) != 0xc0 ||
++        rd32(iid + 12) != 0x46000000) {
++        set_eax(c, 0x80004002u);
++        return;
++    }
++    wr32(p + 4, rd32(p + 4) + 1);
++    wr32(out, p);
++    set_eax(c, 0);
++}
++static void fixture_interface_disconnect(X86 *c) {
++    uint32_t p = arg(c, 0);
++    wr32(p + 12, rd32(p + 12) + 1);
++    set_eax(c, arg(c, 1) ? 0x80070057u : 0x80004005u);
++}
 +static void test_automation_interface_ownership() {
 +    section("Automation interface ownership");
 +    X86 c;
 +    loader_init_context(&c);
-+    uint32_t obj = scratch, vt = scratch + 16, out = scratch + 48;
-+    memset(g_mem + obj, 0, 64);
++    uint32_t obj = scratch, vt = scratch + 16, out = scratch + 96;
++    memset(g_mem + obj, 0, 128);
 +    wr32(obj, vt);
 +    wr32(obj + 4, 1);
 +    uint32_t addref =
@@ -1266,6 +3001,47 @@ index 7016990..a389f47 100644
 +        imports_alloc_trampoline("ownership-fixture.dll", "Release", fixture_interface_release, 1);
 +    wr32(vt + 4, addref);
 +    wr32(vt + 8, release);
++    wr32(vt, imports_alloc_trampoline("ownership-fixture.dll", "QueryInterface",
++                                      fixture_interface_query, 3));
++    wr32(vt + 32, imports_alloc_trampoline("ownership-fixture.dll", "DisconnectObject",
++                                           fixture_interface_disconnect, 2));
++    check(call_import(&c, "ole32.dll", "CoDisconnectObject", {obj, 0}) == 0 && rd32(obj + 4) == 1 &&
++              rd32(obj + 12) == 0,
++          "objects without custom marshalers have no remote connections");
++    wr32(obj + 8, 1);
++    check(call_import(&c, "ole32.dll", "CoDisconnectObject", {obj, 0}) == 0x80004005u &&
++              rd32(obj + 4) == 1 && rd32(obj + 12) == 1,
++          "custom disconnect returns its HRESULT and releases the query reference");
++    check(call_import(&c, "ole32.dll", "CoDisconnectObject", {obj, 1}) == 0x80070057u &&
++              rd32(obj + 12) == 1,
++          "reserved disconnect flags fail before invoking the object");
++    check(call_import(&c, "ole32.dll", "CoSetState", {obj}) == 0 && rd32(obj + 4) == 1 &&
++              call_import(&c, "ole32.dll", "CoSetState", {0}) == 0,
++          "legacy CoSetState matches native Windows without acquiring a reference");
++    uint32_t medium = scratch + 128;
++    uint32_t block = call_import(&c, "KERNEL32.dll", "GlobalAlloc", {0, 16});
++    wr32(medium, 1);
++    wr32(medium + 4, block);
++    wr32(medium + 8, 0);
++    call_import(&c, "ole32.dll", "ReleaseStgMedium", {medium});
++    check(!heap_owns(block) && rd32(medium) == 0 && rd32(medium + 4) == block,
++          "a recipient-owned HGLOBAL is freed and the medium invalidated");
++    block = call_import(&c, "KERNEL32.dll", "GlobalAlloc", {0, 16});
++    wr32(obj + 4, 2);
++    wr32(medium, 1);
++    wr32(medium + 4, block);
++    wr32(medium + 8, obj);
++    call_import(&c, "ole32.dll", "ReleaseStgMedium", {medium});
++    check(heap_owns(block) && rd32(obj + 4) == 1 && rd32(medium) == 0,
++          "provider-owned handles survive while the provider reference is released");
++    call_import(&c, "KERNEL32.dll", "GlobalFree", {block});
++    wr32(obj + 4, 3);
++    wr32(medium, 4);
++    wr32(medium + 4, obj);
++    wr32(medium + 8, obj);
++    call_import(&c, "ole32.dll", "ReleaseStgMedium", {medium});
++    check(rd32(obj + 4) == 1,
++          "stream and provider references are both released for an owned stream medium");
 +    check(call_import(&c, "OLEAUT32.dll", "ord201", {0, obj}) == 0 && rd32(obj + 4) == 2,
 +          "SetErrorInfo owns one additional interface reference");
 +    check(call_import(&c, "OLEAUT32.dll", "SetErrorInfo", {0, obj}) == 0 && rd32(obj + 4) == 2,
@@ -1327,11 +3103,26 @@ index 7016990..a389f47 100644
 +    uint32_t data = rd32(a + 12);
 +    check(heap_size(data) == 24 && rd32(data) == 0 && rd32(data + 20) == 0,
 +          "array storage has the product of the bounds and is zero initialized");
-+    wr32(a + 8, 1);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayAccessData", {a, s + 112}) == 0 &&
++              rd32(s + 112) == data && rd32(a + 8) == 1,
++          "AccessData acquires a lock and returns guest storage");
++    check(call_import(&c, "OLEAUT32.dll", "ord21", {a}) == 0 && rd32(a + 8) == 2,
++          "explicit and data-access locks share the nested count");
 +    check(call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyData", {a}) == 0x8002000du &&
 +              call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyDescriptor", {a}) == 0x8002000du &&
 +              heap_owns(a) && heap_owns(data),
 +          "locked arrays retain both their descriptor and data");
++    check(call_import(&c, "OLEAUT32.dll", "ord24", {a}) == 0 && rd32(a + 8) == 1 &&
++              call_import(&c, "OLEAUT32.dll", "ord22", {a}) == 0 && rd32(a + 8) == 0,
++          "balanced UnaccessData and Unlock release the nested locks");
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayUnlock", {a}) == 0x8000ffffu &&
++              rd32(a + 8) == 0,
++          "unlock underflow returns E_UNEXPECTED without changing storage");
++    wr32(a + 8, 0xffffu);
++    wr32(s + 112, 0x12345678u);
++    check(call_import(&c, "OLEAUT32.dll", "SafeArrayAccessData", {a, s + 112}) == 0x8000ffffu &&
++              rd32(a + 8) == 0xffffu && rd32(s + 112) == 0x12345678u,
++          "lock overflow preserves both the count and data output");
 +    wr32(a + 8, 0);
 +    check(call_import(&c, "OLEAUT32.dll", "SafeArrayDestroyData", {a}) == 0 && !heap_owns(data) &&
 +              heap_owns(a) && rd32(a + 12) == 0,
@@ -1363,7 +3154,7 @@ index 7016990..a389f47 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1085,27 @@ static void test_loader() {
+@@ -755,18 +1340,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -1394,7 +3185,148 @@ index 7016990..a389f47 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -6434,6 +6773,21 @@ static void test_dll_lifetime() {
+@@ -3244,6 +3838,98 @@ static void test_scheduling(X86 *c) {
+     }
+ }
+ 
++static uint32_t vb_thunk_object, vb_thunk_result, vb_thunk_calls;
++static void vb_thunk_resolve(X86 *c) {
++    check(rd32(arg(c, 1)) == 1, "interface resolver receives the method slot index");
++    wr32(arg(c, 0), vb_thunk_object);
++    if (vb_thunk_result >> 31)
++        wr32(arg(c, 1), 8);
++    set_eax(c, vb_thunk_result);
++}
++static void vb_thunk_method(X86 *c) {
++    ++vb_thunk_calls;
++    check(arg(c, 0) == vb_thunk_object && arg(c, 1) == 0x12345678,
++          "generated interface tail call receives replaced this and original arguments");
++    set_eax(c, 0x600d);
++}
++static void test_vb_interface_thunks() {
++    section("generated lazy interface callback ABI");
++    X86 c = *loader_context();
++    uint32_t code = heap_alloc(128, true), sp = c.r[R_ESP] - 32;
++    uint32_t resolver = imports_alloc_trampoline("test", "interface_resolver", vb_thunk_resolve, 2);
++    uint32_t method = imports_alloc_trampoline("test", "interface_method", vb_thunk_method, 2);
++    const uint8_t bytes[] = {0x68, 1,    0,    0,    0,    0x8b, 0xc4, 0x50, 0x8d, 0x44, 0x24,
++                             0x0c, 0x50, 0xb9, 0,    0,    0,    0,    0xff, 0xd1, 0x59, 0x0b,
++                             0xc0, 0x78, 0x0c, 0x8b, 0x44, 0x24, 0x04, 0x8b, 0x00, 0xff, 0xa0,
++                             4,    0,    0,    0,    0x5a, 0x03, 0xe1, 0x52, 0xc3};
++    memcpy(g_mem + code, bytes, sizeof bytes);
++    wr32(code + 14, resolver);
++    vb_thunk_object = code + 64;
++    wr32(vb_thunk_object, code + 80);
++    wr32(code + 84, method);
++    auto frame = [&]() {
++        c.r[R_ESP] = sp;
++        wr32(sp, g_fake_ret);
++        wr32(sp + 4, 0);
++        wr32(sp + 8, 0x12345678);
++    };
++    frame();
++    vb_thunk_calls = vb_thunk_result = 0;
++    check(recomp_run_thunk(&c, code) && vb_thunk_calls == 1 && c.r[R_EAX] == 0x600d &&
++              c.r[R_ESP] == sp + 12 && c.eip == g_fake_ret,
++          "successful resolver tail dispatches with the original return and stdcall cleanup");
++    frame();
++    vb_thunk_result = 0x80004005;
++    check(recomp_run_thunk(&c, code) && vb_thunk_calls == 1 && c.r[R_EAX] == vb_thunk_result &&
++              c.r[R_ESP] == sp + 12 && c.eip == g_fake_ret && c.r[R_EDX] == g_fake_ret,
++          "failed resolver returns HRESULT without dispatching a method");
++    frame();
++    wr8(code + 24, 0x0b);
++    X86 before = c;
++    wr32(sp - 4, 0xabcdef01);
++    check(!recomp_run_thunk(&c, code) && memcmp(&c, &before, sizeof c) == 0 &&
++              rd32(sp - 4) == 0xabcdef01 && vb_thunk_calls == 1,
++          "incomplete interface template leaves CPU and speculative stack writes intact");
++    heap_free(code);
++}
++
++static uint32_t vb_getter_object, vb_getter_refs;
++static void vb_getter_addref(X86 *c) {
++    check(arg(c, 0) == vb_getter_object, "generated getter AddRef receives its returned interface");
++    set_eax(c, ++vb_getter_refs);
++}
++static void test_vb_object_getters() {
++    section("generated COM object getter ABI");
++    X86 c = *loader_context();
++    uint32_t code = heap_alloc(256, true), sp = c.r[R_ESP] - 32;
++    const uint8_t bytes[] = {0x55, 0x8b, 0xec, 0x8b, 0x55, 0x08, 0x8b, 0x92, 12,   0,
++                             0,    0,    0x8b, 0x82, 8,    0,    0,    0,    0x50, 0x50,
++                             0x8b, 0x10, 0xff, 0x52, 0x04, 0x58, 0xc9, 0xc2, 0x04, 0x00};
++    memcpy(g_mem + code, bytes, sizeof bytes);
++    uint32_t addref = imports_alloc_trampoline("test", "getter_addref", vb_getter_addref, 1);
++    vb_getter_object = code + 128;
++    wr32(code + 76, code + 96);
++    wr32(code + 104, vb_getter_object);
++    wr32(vb_getter_object, code + 144);
++    wr32(code + 148, addref);
++    c.r[R_EBP] = 0x1234;
++    c.r[R_ESP] = sp;
++    wr32(sp, g_fake_ret);
++    wr32(sp + 4, code + 64);
++    vb_getter_refs = 1;
++    check(recomp_run_thunk(&c, code) && c.r[R_EAX] == vb_getter_object && vb_getter_refs == 2 &&
++              c.r[R_EBP] == 0x1234 && c.r[R_ESP] == sp + 8 && c.eip == g_fake_ret,
++          "object getter returns an owned reference and restores the caller frame");
++    c.r[R_ESP] = sp;
++    wr8(code + 28, 8);
++    X86 before = c;
++    wr32(sp - 4, 0xabcdef01);
++    check(!recomp_run_thunk(&c, code) && memcmp(&before, &c, sizeof c) == 0 &&
++              rd32(sp - 4) == 0xabcdef01 && vb_getter_refs == 2,
++          "changed getter template is refused before any reference or stack mutation");
++    heap_free(code);
++}
++
+ static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
+ static void thunk_probe(X86 *c) {
+     ++thunk_hits;
+@@ -6078,6 +6764,16 @@ static void test_host_mouse_routing() {
+     check(activations == 1, "release does not activate again");
+     uint32_t child = window(0, 0x50000000, 10, 12, top);
+     take(0x200, 2, 125, 150, child, 15, 18);
++    // Pure GDI presents the virtual desktop. Its input must not gain the
++    // first-created application window's origin before hit testing.
++    host_set_display_cursor_pos(125, 150);
++    host_post_display_mouse_message(0x200, 0, 125, 150);
++    check(call_import(&c, "USER32.dll", "PeekMessageW", {msg, 0, 0x200, 0x209, 1}) == 1 &&
++              rd32(msg) == child && rd32(msg + 20) == 125 && rd32(msg + 24) == 150,
++          "desktop frame input routes in screen space without an extra origin");
++    call_import(&c, "USER32.dll", "GetCursorPos", {s + 0x300});
++    check(rd32(s + 0x300) == 125 && rd32(s + 0x304) == 150,
++          "desktop frame cursor preserves its screen coordinates");
+     // The game's rendered frame supplies client points, unlike the virtual
+     // desktop events above. Pumping a message must not undo the cursor's
+     // conversion to screen pixels or offset the routed click a second time.
+@@ -6277,6 +6973,11 @@ static void test_user32_services() {
+              bits = rd32(s + 0x900);
+     uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
+     call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
++    check(call_import(&c, "GDI32.dll", "GetObjectA", {bmp, 84, s + 0xc00}) == 84 &&
++              rd32(s + 0xc14) == bits &&
++              call_import(&c, "GDI32.dll", "GetObjectW", {bmp, 24, s + 0xc00}) == 24 &&
++              rd32(s + 0xc14) == bits,
++          "DIB-section queries expose their caller-accessible pixels in both layouts");
+     wr32(s + 0xa00, 0);
+     wr32(s + 0xa04, 0);
+     wr32(s + 0xa08, 4);
+@@ -6305,6 +7006,12 @@ static void test_user32_services() {
+     call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
+     call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
+     call_import(&c, "USER32.dll", "DestroyIcon", {icon});
++    icon = call_import(&c, "USER32.dll", "CreateIcon",
++                       {0, 2, 2, 0x00200001, 0xabcdef20, s + 0xb00, s + 0xb20});
++    check(icon && call_import(&c, "USER32.dll", "DrawIcon", {dc, 0, 0, icon}) == 1 &&
++              (rd32(bits) & 0xffffff) == 0xff,
++          "CreateIcon consumes BYTE planes and depth from packed arguments");
++    call_import(&c, "USER32.dll", "DestroyIcon", {icon});
+     call_import(&c, "GDI32.dll", "DeleteDC", {dc});
+     call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
+ }
+@@ -6434,6 +7141,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -1416,37 +3348,322 @@ index 7016990..a389f47 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,6 +7041,12 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7409,39 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
 +        test_wide_string_comparison();
 +        test_task_allocator();
 +        test_module_string_resources();
++        test_module_icon_resources();
++        test_system_button();
++        test_host_mouse_routing();
++        test_point_in_rect();
++        test_legacy_file_reads();
 +        test_vb_startup_platform_apis();
 +        test_automation_storage();
 +        test_automation_interface_ownership();
++        test_vb_interface_thunks();
++        test_vb_object_getters();
          test_registry(loader_context());
          printf("\n%d startup checks, %d failures, %d skipped\n", g_checks, g_failures, g_skips);
          return g_failures ? 1 : 0;
-@@ -6695,6 +7055,12 @@ int main(int argc, char **argv) {
+     }
+     scratch = 0x0ee00000;
      test_startup_apis(loader_context());
++    test_vb_interface_thunks();
++    test_vb_object_getters();
      test_import_return_trace();
      test_modules_and_wide();
 +    test_wide_string_comparison();
 +    test_task_allocator();
 +    test_module_string_resources();
++    test_module_icon_resources();
++    test_system_button();
++    test_point_in_rect();
++    test_legacy_file_reads();
 +    test_vb_startup_platform_apis();
 +    test_automation_storage();
 +    test_automation_interface_ownership();
      test_preferred_ui_languages();
      test_session_notification_service_unavailable();
      test_buffered_paint_unavailable();
+diff --git a/runtime/thunks.cpp b/runtime/thunks.cpp
+index 7ab10c7..d1a2530 100644
+--- a/runtime/thunks.cpp
++++ b/runtime/thunks.cpp
+@@ -2,6 +2,7 @@
+ #include "imports.h"
+ #include "loader.h"
+ #include <stdio.h>
++#include <stdlib.h>
+ 
+ extern "C" __attribute__((weak)) int recomp_thunk_target_kind(uint32_t) {
+     return 0;
+@@ -20,11 +21,116 @@ bool thunk_bytes(uint32_t at, uint32_t size) {
+ struct StackWrite {
+     uint32_t at, old;
+ };
++
++// Native VB builds this fixed lazy-interface entry in the guest heap. Its
++// translated resolver replaces the caller's this pointer; success tail-calls
++// the selected vtable slot. On failure it converts the slot index into the
++// argument byte count used to return the HRESULT with stdcall cleanup.
++// Recognize the complete template before calling anything. This is an ABI
++// adapter for a generated callback, not an instruction-interpreter fallback.
++bool vb_interface_thunk(X86 *c, uint32_t target) {
++    static const uint8_t prefix[] = {0x8b, 0xc4, 0x50, 0x8d, 0x44, 0x24, 0x0c, 0x50, 0xb9};
++    static const uint8_t body[] = {0xff, 0xd1, 0x59, 0x0b, 0xc0, 0x78, 0x0c, 0x8b,
++                                   0x44, 0x24, 0x04, 0x8b, 0x00, 0xff, 0xa0};
++    static const uint8_t failure[] = {0x5a, 0x03, 0xe1, 0x52, 0xc3};
++    if (!thunk_bytes(target, 42) || rd8(target) != 0x68 ||
++        memcmp(g_mem + target + 5, prefix, sizeof prefix) ||
++        memcmp(g_mem + target + 18, body, sizeof body) ||
++        memcmp(g_mem + target + 37, failure, sizeof failure))
++        return false;
++    uint32_t index = rd32(target + 1), helper = rd32(target + 14), slot = rd32(target + 33);
++    bool known = recomp_thunk_target_kind(helper) == 1 ||
++                 (helper >= GUEST_SHIM_BASE && helper < GUEST_SHIM_END);
++    uint32_t sp = c->r[R_ESP];
++    if (!known || (slot & 3) || index != slot / 4 || sp < 16 || !thunk_bytes(sp - 16, 24))
++        return false;
++    wr32(sp - 4, index);
++    wr32(sp - 8, sp - 4);
++    wr32(sp - 12, sp + 4);
++    wr32(sp - 16, target + 20);
++    c->r[R_EAX] = sp + 4;
++    c->r[R_ECX] = helper;
++    c->r[R_ESP] = sp - 16;
++    c->eip = target + 18;
++    recomp_call(c, helper);
++    if (c->r[R_ESP] != sp - 4 || c->eip != target + 20) {
++        LOGW("generated interface resolver %08x returned outside its two-argument ABI", helper);
++        abort();
++    }
++    c->r[R_ECX] = rd32(sp - 4);
++    c->r[R_ESP] = sp;
++    uint32_t result = c->r[R_EAX];
++    c->eflags_cf = c->eflags_of = 0;
++    c->eflags_zf = result == 0;
++    c->eflags_sf = result >> 31;
++    c->eflags_pf = parity8(result);
++    if (c->eflags_sf) {
++        if (c->r[R_ECX] > 0x10000 || (c->r[R_ECX] & 3) || !thunk_bytes(sp, c->r[R_ECX] + 4)) {
++            LOGW("generated interface resolver returned invalid argument cleanup %u", c->r[R_ECX]);
++            abort();
++        }
++        c->r[R_EDX] = rd32(sp);
++        uint32_t before = sp + 4, after = before + c->r[R_ECX];
++        c->eflags_cf = after < before;
++        c->eflags_of = ((~(before ^ c->r[R_ECX]) & (before ^ after)) >> 31) & 1;
++        c->eflags_af = ((before ^ c->r[R_ECX] ^ after) >> 4) & 1;
++        c->eflags_zf = after == 0;
++        c->eflags_sf = after >> 31;
++        c->eflags_pf = parity8(after);
++        wr32(after - 4, c->r[R_EDX]);
++        c->r[R_ESP] = after;
++        c->eip = c->r[R_EDX];
++    } else {
++        c->r[R_EAX] = rd32(rd32(sp + 4));
++        c->eip = target + 31;
++        recomp_jump(c, rd32(c->r[R_EAX] + slot));
++    }
++    return true;
++}
++
++// VB's generated COM-object getter loads an instance field, adds one owned
++// reference, and returns the interface pointer. Its two offsets are filled
++// into this fixed template when the type's interface is constructed.
++bool vb_object_getter(X86 *c, uint32_t target) {
++    static const uint8_t prefix[] = {0x55, 0x8b, 0xec, 0x8b, 0x55, 0x08, 0x8b, 0x92};
++    static const uint8_t suffix[] = {0x50, 0x50, 0x8b, 0x10, 0xff, 0x52,
++                                     0x04, 0x58, 0xc9, 0xc2, 0x04, 0x00};
++    if (!thunk_bytes(target, 30) || memcmp(g_mem + target, prefix, sizeof prefix) ||
++        rd16(target + 12) != 0x828b || memcmp(g_mem + target + 18, suffix, sizeof suffix))
++        return false;
++    uint32_t sp = c->r[R_ESP];
++    if (sp < 16 || !thunk_bytes(sp - 16, 24))
++        return false;
++    wr32(sp - 4, c->r[R_EBP]);
++    c->r[R_EBP] = sp - 4;
++    c->r[R_EDX] = rd32(rd32(sp + 4) + rd32(target + 8));
++    c->r[R_EAX] = rd32(c->r[R_EDX] + rd32(target + 14));
++    wr32(sp - 8, c->r[R_EAX]);
++    wr32(sp - 12, c->r[R_EAX]);
++    c->r[R_EDX] = rd32(c->r[R_EAX]);
++    wr32(sp - 16, target + 25);
++    c->r[R_ESP] = sp - 16;
++    c->eip = target + 22;
++    recomp_call(c, rd32(c->r[R_EDX] + 4));
++    if (c->r[R_ESP] != sp - 8 || c->eip != target + 25) {
++        LOGW("generated interface getter AddRef returned outside its one-argument ABI");
++        abort();
++    }
++    c->r[R_EAX] = rd32(sp - 8);
++    c->r[R_EBP] = rd32(sp - 4);
++    c->r[R_ESP] = sp + 8;
++    c->eip = rd32(sp);
++    return true;
++}
+ } // namespace
+ 
+ extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
+     if (!thunk_bytes(target, 1))
+         return 0;
++    if (vb_interface_thunk(c, target))
++        return 1;
++    if (vb_object_getter(c, target))
++        return 1;
+     X86 trial = *c;
+     StackWrite writes[16];
+     unsigned nwrites = 0;
+@@ -102,5 +208,11 @@ extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
+     char key[80];
+     snprintf(key, sizeof key, "thunk:%s:%.23s", reason, bytes);
+     log_once(key, "guest thunk %08x stopped at %08x (%s), bytes: %s", target, pc, reason, bytes);
++    if (thunk_bytes(target, 42) && rd8(target) == 0x68 && rd16(target + 5) == 0xc48b) {
++        char entry[127] = {};
++        for (unsigned i = 0; i < 42; ++i)
++            snprintf(entry + i * 3, 4, "%02x ", rd8(target + i));
++        log_once("interface-thunk-template", "generated interface template: %s", entry);
++    }
+     return 0;
+ }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..a659238 100644
+index 2ef5486..37b4099 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
-@@ -1398,6 +1398,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -6,6 +6,7 @@
+ // them out through PeekMessageA/GetMessageA exactly as it would on Win32.
+ #include "user32_internal.h"
+ #include "gdi_image.h"
++#include "gdi32_internal.h"
+ #include "win32.h"
+ #include "../platform/os.h"
+ #include "memory.h"
+@@ -163,6 +164,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
+     host_set_cursor_pos(int32_t(uint32_t(x) + uint32_t(origin_x)),
+                         int32_t(uint32_t(y) + uint32_t(origin_y)));
+ }
++void host_set_display_cursor_pos(int32_t x, int32_t y) {
++    if (gdi_desktop_input())
++        host_set_cursor_pos(x, y);
++    else
++        host_set_client_cursor_pos(host_main_window(), x, y);
++}
++void host_post_display_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y) {
++    if (gdi_desktop_input())
++        host_post_mouse_message(msg, mk, x, y);
++    else
++        host_post_client_mouse_message(host_main_window(), msg, mk, x, y);
++}
+ void host_set_message_waiter(bool (*fn)()) {
+     g_message_waiter = fn;
+ }
+@@ -506,6 +519,21 @@ void u_SetWindowPos(X86 *c) {
+                        int32_t(arg(c, 5)), arg(c, 6));
+     set_eax(c, 1);
+ }
++void u_MoveWindow(X86 *c) {
++    Window *w = find_window(arg(c, 0));
++    if (!w) {
++        set_last_error(1400);
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t hwnd = w->hwnd;
++    bool repaint = arg(c, 5) != 0;
++    set_window_pos(c, w, 0, int32_t(arg(c, 1)), int32_t(arg(c, 2)), int32_t(arg(c, 3)),
++                   int32_t(arg(c, 4)), 0x14 | (repaint ? 0 : 8));
++    if (repaint)
++        guest_call(c, imports_resolve("USER32.dll", "UpdateWindow"), hwnd);
++    set_eax(c, 1);
++}
+ // The bounds a window had before a display took it over, by handle.
+ std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
+     static std::map<uint32_t, std::array<int32_t, 4>> m;
+@@ -969,6 +997,16 @@ void u_PostMessageA(X86 *c) {
+ void u_PeekMessageA(X86 *c) {
+     peek_message(c);
+ }
++void u_PostThreadMessageA(X86 *c) {
++    uint32_t id = arg(c, 0);
++    if (id != guest_current_thread_id()) {
++        set_last_error(120); // Cross-thread queues are not modeled by this backend.
++        set_eax(c, 0);
++        return;
++    }
++    host_post_message(0, arg(c, 1), arg(c, 2), arg(c, 3));
++    set_eax(c, 1);
++}
+ void u_DispatchMessageA(X86 *c) {
+     dispatch_message(c);
+ }
+@@ -1240,10 +1278,31 @@ void u_GetUpdateRect(X86 *c) {
+         wr32(rect + 8, pending ? (uint32_t)w->w : 0);
+         wr32(rect + 12, pending ? (uint32_t)w->h : 0);
+     }
+-    if (pending && arg(c, 2))
+-        w->update_pending = false; // bErase: the caller will paint it now
++    if (pending && arg(c, 2)) {
++        uint32_t dc = gdi_window_dc(w->hwnd);
++        uint32_t hwnd = w->hwnd;
++        host_dispatch_to_wndproc(c, hwnd, 0x14, dc, 0);
++        gdi_release_window_dc(hwnd, dc);
++    }
+     set_eax(c, pending);
+ }
++void u_GetUpdateRgn(X86 *c) {
++    Window *w = find_window(arg(c, 0));
++    auto region = gdi::objects().find(arg(c, 1));
++    if (!w || region == gdi::objects().end() || region->second.kind != gdi::Object::Region) {
++        set_eax(c, 0);
++        return;
++    }
++    bool pending = w->update_pending && w->w > 0 && w->h > 0;
++    region->second.rect = pending ? gdi::Rect{0, 0, w->w, w->h} : gdi::Rect{};
++    region->second.region_parts.clear();
++    if (pending && arg(c, 2)) {
++        uint32_t hwnd = w->hwnd, dc = gdi_window_dc(hwnd);
++        host_dispatch_to_wndproc(c, hwnd, 0x14, dc, 0);
++        gdi_release_window_dc(hwnd, dc);
++    }
++    set_eax(c, pending ? 2 : 1);
++}
+ void u_LoadCursorFromFileW(X86 *c) {
+     set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
+ }
+@@ -1268,13 +1327,28 @@ void u_DestroyIcon(X86 *c) {
+     set_eax(c, arg(c, 0) ? 1 : 0);
+ }
+ void u_LoadIconA(X86 *c) {
+-    set_eax(c, 0x00029001);
++    // ANSI resource names use the same image decoder as LoadImageA. The
++    // resulting handle owns pixels and supports GetIconInfo/DrawIcon.
++    if (arg(c, 0)) {
++        uint32_t args[] = {arg(c, 0), arg(c, 1), 1, 0, 0, 0x40};
++        set_eax(c, guest_call(c, imports_resolve("USER32.dll", "LoadImageA"), args, 6));
++        return;
++    }
++    // No system icon artwork is provided by the portable runtime.
++    set_last_error(1813);
++    set_eax(c, 0);
+ }
+ void u_SetCursor(X86 *c) {
+     uint32_t prev = g_cursor;
+     g_cursor = arg(c, 0);
+     set_eax(c, prev);
+ }
++void u_WinHelpA(X86 *c) {
++    // A .hlp viewer is not implemented. Preserve the four-argument ABI and
++    // report that limitation without starting a host application.
++    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
++    set_eax(c, 0);
++}
+ void u_SetCursorPos(X86 *c) {
+     g_cursor_x = (int32_t)arg(c, 0);
+     g_cursor_y = (int32_t)arg(c, 1);
+@@ -1398,6 +1472,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -1465,7 +3682,34 @@ index 2ef5486..a659238 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1741,6 +1753,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +1781,7 @@ const ImportShim g_user32_shims[] = {
+     {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
+     {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
+     {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
++    {"USER32.dll", "MoveWindow", 6, u_MoveWindow},
+     {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
+     {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
+     {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
+@@ -1716,15 +1803,18 @@ const ImportShim g_user32_shims[] = {
+     {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
+     {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
+     {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
++    {"USER32.dll", "PostThreadMessageA", 4, u_PostThreadMessageA},
+     {"USER32.dll", "DefWindowProcA", 4, u_DefWindowProcA},
+     {"USER32.dll", "GetDC", 1, u_GetDC},
+     {"USER32.dll", "ReleaseDC", 2, u_ReleaseDC},
+     {"USER32.dll", "BeginPaint", 2, u_BeginPaint},
+     {"USER32.dll", "EndPaint", 2, u_EndPaint},
+     {"USER32.dll", "LoadIconA", 2, u_LoadIconA},
++    {"USER32.dll", "WinHelpA", 4, u_WinHelpA},
+     {"USER32.dll", "LoadCursorA", 2, u_LoadCursorA},
+     {"USER32.dll", "ValidateRect", 2, u_ValidateRect},
+     {"USER32.dll", "GetUpdateRect", 3, u_GetUpdateRect},
++    {"USER32.dll", "GetUpdateRgn", 3, u_GetUpdateRgn},
+     {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
+     {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
+     {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
+@@ -1741,6 +1831,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -1473,11 +3717,431 @@ index 2ef5486..a659238 100644
      {"USER32.dll", "MessageBoxW", 4, u_MessageBoxW},
      {"USER32.dll", "wvsprintfA", 3, u_wvsprintfA},
      // Not imported by D3DPopTB.exe, but registered so GetProcAddress and the
+diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
+index ae4313f..b4198ae 100644
+--- a/runtime/user32_internal.h
++++ b/runtime/user32_internal.h
+@@ -40,6 +40,9 @@ struct Window {
+     uint32_t region = 0;
+     uint32_t show_cmd = 0;
+     uint32_t userdata = 0;
++    uint32_t context_help_id = 0;
++    uint32_t button_check = 0, button_image = 0;
++    bool button_pressed = false;
+     uint32_t font = 0; // WM_SETFONT, kept for the system control classes
+     uint32_t hinstance = 0;
+     std::vector<uint32_t> extra;
+diff --git a/runtime/user32_static.cpp b/runtime/user32_static.cpp
+index 4b3b30d..d40e864 100644
+--- a/runtime/user32_static.cpp
++++ b/runtime/user32_static.cpp
+@@ -114,18 +114,232 @@ void static_proc(X86 *c) {
+         def_window_proc(c, w && w->unicode);
+     }
+ }
++
++// System BUTTON procedures remain callable after framework subclassing.
++// State lives on the window; notifications go to the parent through guest_call.
++void button_click(X86 *c, uint32_t hwnd) {
++    Window *w = find_window(hwnd);
++    if (!w || !w->enabled)
++        return;
++    uint32_t type = w->style & 15, parent = w->parent, id = w->id;
++    if (type == 3)
++        w->button_check ^= 1; // BS_AUTOCHECKBOX
++    else if (type == 6)
++        w->button_check = (w->button_check + 1) % 3; // BS_AUTO3STATE
++    else if (type == 9) {
++        // Radio groups end/start at WS_GROUP sibling boundaries.
++        std::vector<uint32_t> siblings;
++        for (const auto &kv : windows())
++            if (kv.second.parent == parent)
++                siblings.push_back(kv.first);
++        auto current = std::find(siblings.begin(), siblings.end(), hwnd);
++        if (current != siblings.end()) {
++            auto first = current;
++            while (first != siblings.begin() && !(find_window(*first)->style & 0x20000))
++                --first;
++            auto last = current + 1;
++            while (last != siblings.end() && !(find_window(*last)->style & 0x20000))
++                ++last;
++            for (auto i = first; i != last; ++i)
++                if (Window *radio = find_window(*i); (radio->style & 15) == 9)
++                    radio->button_check = *i == hwnd;
++        }
++    }
++    w->button_pressed = false;
++    w->update_pending = true;
++    if (parent)
++        host_dispatch_to_wndproc(c, parent, 0x111, id & 0xffff, hwnd); // BN_CLICKED
++}
++void button_paint(X86 *c, uint32_t hwnd, uint32_t into) {
++    Window *w = find_window(hwnd);
++    if (!w)
++        return;
++    const auto saved = *w; // Parent callbacks can mutate/destroy the control.
++    uint32_t dc = into ? into : gdi_window_dc(hwnd);
++    auto *d = gdi::dc_of(dc);
++    if (!d)
++        return;
++    gdi::DcState old = *d;
++    if (saved.font)
++        d->font = saved.font;
++    uint32_t type = saved.style & 15;
++    if (type == 11 && saved.parent) { // BS_OWNERDRAW
++        uint32_t block = heap_alloc(48, true);
++        if (block) {
++            wr32(block, 4); // ODT_BUTTON
++            wr32(block + 4, saved.id);
++            wr32(block + 12, 1); // ODA_DRAWENTIRE
++            wr32(block + 16, (saved.button_pressed ? 1 : 0) | (saved.enabled ? 0 : 4));
++            wr32(block + 20, hwnd);
++            wr32(block + 24, dc);
++            wr32(block + 36, saved.w);
++            wr32(block + 40, saved.h);
++            host_dispatch_to_wndproc(c, saved.parent, 0x2b, saved.id, block);
++            heap_free(block);
++        }
++    } else {
++        uint32_t brush =
++            saved.parent ? host_dispatch_to_wndproc(c, saved.parent, 0x135, dc, hwnd) : 0;
++        uint32_t bg = 0xfff0f0f0;
++        if (brush)
++            gdi::brush_color(brush, &bg);
++        gdi::fill(dc, {0, 0, saved.w, saved.h}, bg);
++        auto edge = [&](int l, int t, int r, int b) {
++            uint32_t light = saved.button_pressed ? 0xff808080 : 0xffffffff;
++            uint32_t dark = saved.button_pressed ? 0xffffffff : 0xff808080;
++            gdi::fill(dc, {l, t, r, t + 1}, light);
++            gdi::fill(dc, {l, t, l + 1, b}, light);
++            gdi::fill(dc, {l, b - 1, r, b}, dark);
++            gdi::fill(dc, {r - 1, t, r, b}, dark);
++        };
++        int left = 3;
++        bool check = (type >= 2 && type <= 6) || type == 9;
++        if (check) {
++            int top = std::max(0, (saved.h - 13) / 2);
++            edge(1, top, 14, top + 13);
++            if (saved.button_check)
++                gdi::fill(dc, {4, top + 3, 11, top + 10}, 0xff000000);
++            left = 18;
++        } else
++            edge(0, type == 7 ? 6 : 0, saved.w, saved.h);
++        uint32_t units = wide_units(saved.title_utf8),
++                 block = heap_alloc(16 + (units + 1) * 2, true);
++        if (block) {
++            wr32(block, left);
++            wr32(block + 4, type == 7 ? 0 : 2);
++            wr32(block + 8, saved.w - 3);
++            wr32(block + 12, saved.h - 2);
++            gm_put_wstr(block + 16, saved.title_utf8, units + 1);
++            if (auto *after = gdi::dc_of(dc)) {
++                after->bk_mode = 1;
++                after->text_color = saved.enabled ? 0 : 0x808080;
++            }
++            gdi::draw_text(dc, block + 16, units, block, 0x20 | 4 | (check || type == 7 ? 0 : 1));
++            heap_free(block);
++        }
++    }
++    if (Window *after = find_window(hwnd))
++        after->update_pending = false;
++    if (auto *after = gdi::dc_of(dc))
++        static_cast<gdi::DcState &>(*after) = old;
++    if (!into)
++        gdi_release_window_dc(hwnd, dc);
++}
++void button_proc(X86 *c) {
++    uint32_t hwnd = arg(c, 0), msg = arg(c, 1), wp = arg(c, 2), lp = arg(c, 3);
++    LOGV("Button(%08x): msg=%04x wp=%08x lp=%08x", hwnd, msg, wp, lp);
++    Window *w = find_window(hwnd);
++    if (!w) {
++        set_eax(c, 0);
++        return;
++    }
++    switch (msg) {
++    case 0xf:
++    case 0x318:
++        button_paint(c, hwnd, wp);
++        break;
++    case 0x87: // WM_GETDLGCODE
++        set_eax(c, 0x2000 | ((w->style & 15) == 1 ? 0x10 : 0x20));
++        return;
++    case 0xf0: {
++        uint32_t type = w->style & 15;
++        set_eax(c, (type >= 2 && type <= 6) || type == 9 ? w->button_check : 0);
++        return;
++    }
++    case 0xf1: {
++        uint32_t type = w->style & 15;
++        if ((type >= 2 && type <= 6) || type == 9) {
++            w->button_check = std::min(wp, type == 5 || type == 6 ? 2u : 1u);
++            w->update_pending = true;
++        }
++        break;
++    }
++    case 0xf2:
++        set_eax(c, w->button_check | (w->button_pressed ? 4 : 0));
++        return;
++    case 0xf3:
++        w->button_pressed = wp != 0;
++        w->update_pending = true;
++        break;
++    case 0xf4:
++        w->style = (w->style & ~15u) | (wp & 15);
++        w->update_pending |= lp != 0;
++        break;
++    case 0xf5:
++        button_click(c, hwnd);
++        break;
++    case 0xf6:
++        set_eax(c, w->button_image);
++        return;
++    case 0xf7: {
++        uint32_t previous = w->button_image;
++        w->button_image = lp;
++        w->update_pending = true;
++        set_eax(c, previous);
++        return;
++    }
++    case 0x201:
++        if (w->enabled) {
++            w->button_pressed = true;
++            w->update_pending = true;
++            guest_call(c, imports_resolve("USER32.dll", "SetCapture"), hwnd);
++            guest_call(c, imports_resolve("USER32.dll", "SetFocus"), hwnd);
++        }
++        break;
++    case 0x202: {
++        bool pressed = w->button_pressed;
++        int x = int16_t(lp), y = int16_t(lp >> 16), width = w->w, height = w->h;
++        w->button_pressed = false;
++        w->update_pending = true;
++        guest_call(c, imports_resolve("USER32.dll", "ReleaseCapture"));
++        if (pressed && x >= 0 && y >= 0 && x < width && y < height)
++            button_click(c, hwnd);
++        break;
++    }
++    case 0x100:
++        if (wp == 0x20 && w->enabled) {
++            w->button_pressed = true;
++            w->update_pending = true;
++        }
++        break;
++    case 0x101:
++        if (wp == 0x20 && w->button_pressed)
++            button_click(c, hwnd);
++        break;
++    case 0x30:
++        w->font = wp;
++        w->update_pending |= lp != 0;
++        break;
++    case 0x31:
++        set_eax(c, w->font);
++        return;
++    case 0xc:
++        def_window_proc(c, w->unicode);
++        if (Window *after = find_window(hwnd))
++            after->update_pending = true;
++        return;
++    default:
++        def_window_proc(c, w->unicode);
++        return;
++    }
++    set_eax(c, 0);
++}
+ } // namespace
+ 
+ void ensure_system_classes() {
+-    if (classes().count("static"))
+-        return;
+-    WndClass wc;
+-    wc.style = 0x4088; // CS_GLOBALCLASS | CS_PARENTDC | CS_DBLCLKS
+-    wc.wndproc = imports_alloc_trampoline("USER32.dll", "STATIC window procedure", static_proc, 4);
+-    wc.name = "Static";
+-    wc.unicode = true;
+-    wc.atom = 0xc000 + uint32_t(classes().size());
+-    classes()["static"] = wc;
+-    classes()["#atom" + std::to_string(wc.atom)] = wc;
++    auto add = [](const char *key, const char *name, void (*proc)(X86 *)) {
++        if (classes().count(key))
++            return;
++        WndClass wc;
++        wc.style = 0x4088; // CS_GLOBALCLASS | CS_PARENTDC | CS_DBLCLKS
++        wc.wndproc = imports_alloc_trampoline("USER32.dll", name, proc, 4);
++        wc.name = name;
++        wc.unicode = true;
++        wc.atom = 0xc000 + uint32_t(classes().size());
++        classes()[key] = wc;
++        classes()["#atom" + std::to_string(wc.atom)] = wc;
++    };
++    add("static", "Static", static_proc);
++    add("button", "Button", button_proc);
+ }
+ } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
-index dea756d..6a8bc73 100644
+index dea756d..91ec797 100644
 --- a/runtime/user32_vcl.cpp
 +++ b/runtime/user32_vcl.cpp
-@@ -1039,8 +1039,8 @@ void insert_menu(X86 *c) {
+@@ -4,6 +4,7 @@
+ #include "memory.h"
+ #include "win32.h"
+ #include "gdi_image.h"
++#include "gdi32_internal.h"
+ #include <algorithm>
+ #include <set>
+ #include <vector>
+@@ -248,32 +249,82 @@ void set_timer(X86 *c) {
+ void kill_timer(X86 *c) {
+     set_eax(c, timers.erase({arg(c, 0), arg(c, 1)}) != 0);
+ }
+-std::string prop_key(uint32_t p) {
+-    return p < 0x10000 ? "#atom" + std::to_string(p) : gm_wstr(p);
++std::string prop_key(uint32_t p, bool wide) {
++    if (p < 0x10000)
++        return "#atom" + std::to_string(p);
++    if (wide)
++        return gm_wstr(p);
++    std::string key;
++    for (uint8_t byte : gm_str(p)) {
++        uint16_t unit = gdi::font_ansi_unit(byte);
++        if (unit < 0x80)
++            key += char(unit);
++        else if (unit < 0x800) {
++            key += char(0xc0 | (unit >> 6));
++            key += char(0x80 | (unit & 63));
++        } else {
++            key += char(0xe0 | (unit >> 12));
++            key += char(0x80 | ((unit >> 6) & 63));
++            key += char(0x80 | (unit & 63));
++        }
++    }
++    return key;
+ }
+-void get_prop(X86 *c) {
++void get_prop_encoded(X86 *c, bool wide) {
+     Window *w = find_window(arg(c, 0));
+-    auto key = prop_key(arg(c, 1));
++    auto key = prop_key(arg(c, 1), wide);
+     set_eax(c, w && w->props.count(key) ? w->props[key] : 0);
+ }
+-void set_prop(X86 *c) {
++void set_prop_encoded(X86 *c, bool wide) {
+     Window *w = find_window(arg(c, 0));
+     if (w)
+-        w->props[prop_key(arg(c, 1))] = arg(c, 2);
++        w->props[prop_key(arg(c, 1), wide)] = arg(c, 2);
+     set_eax(c, w != nullptr);
+ }
+-void remove_prop(X86 *c) {
++void remove_prop_encoded(X86 *c, bool wide) {
+     Window *w = find_window(arg(c, 0));
+-    auto key = prop_key(arg(c, 1));
++    auto key = prop_key(arg(c, 1), wide);
+     uint32_t old = w && w->props.count(key) ? w->props[key] : 0;
+     if (w)
+         w->props.erase(key);
+     set_eax(c, old);
+ }
++void get_prop(X86 *c) {
++    get_prop_encoded(c, true);
++}
++void set_prop(X86 *c) {
++    set_prop_encoded(c, true);
++}
++void remove_prop(X86 *c) {
++    remove_prop_encoded(c, true);
++}
++void get_prop_a(X86 *c) {
++    get_prop_encoded(c, false);
++}
++void set_prop_a(X86 *c) {
++    set_prop_encoded(c, false);
++}
++void remove_prop_a(X86 *c) {
++    remove_prop_encoded(c, false);
++}
+ void get_parent(X86 *c) {
+     Window *w = find_window(arg(c, 0));
+     set_eax(c, w ? (w->parent ? w->parent : w->owner) : 0);
+ }
++void set_context_help_id(X86 *c) {
++    Window *w = find_window(arg(c, 0));
++    if (w)
++        w->context_help_id = arg(c, 1);
++    else
++        set_last_error(1400);
++    set_eax(c, w != nullptr);
++}
++void get_context_help_id(X86 *c) {
++    Window *w = find_window(arg(c, 0));
++    if (!w)
++        set_last_error(1400);
++    set_eax(c, w ? w->context_help_id : 0);
++}
+ void set_parent(X86 *c) {
+     Window *w = find_window(arg(c, 0));
+     uint32_t parent = arg(c, 1);
+@@ -484,6 +535,59 @@ void map_points(X86 *c) {
+     }
+     set_eax(c, (uint32_t(uint16_t(dy)) << 16) | uint16_t(dx));
+ }
++void union_rect(X86 *c) {
++    uint32_t out = arg(c, 0), first = arg(c, 1), second = arg(c, 2);
++    if (!out || !first || !second || !gm_valid(out, 16) || !gm_valid(first, 16) ||
++        !gm_valid(second, 16)) {
++        set_eax(c, 0);
++        return;
++    }
++    int32_t a[4], b[4], result[4] = {};
++    for (int i = 0; i < 4; ++i) {
++        a[i] = int32_t(rd32(first + i * 4));
++        b[i] = int32_t(rd32(second + i * 4));
++    }
++    bool av = a[0] < a[2] && a[1] < a[3], bv = b[0] < b[2] && b[1] < b[3];
++    for (int i = 0; i < 4; ++i)
++        result[i] = av && bv ? (i < 2 ? std::min(a[i], b[i]) : std::max(a[i], b[i]))
++                    : av     ? a[i]
++                    : bv     ? b[i]
++                             : 0;
++    for (int i = 0; i < 4; ++i)
++        wr32(out + i * 4, result[i]);
++    set_eax(c, av || bv);
++}
++void copy_rect(X86 *c) {
++    uint32_t dst = arg(c, 0), src = arg(c, 1);
++    bool valid = dst && src && gm_valid(dst, 16) && gm_valid(src, 16);
++    if (valid)
++        memmove(g_mem + dst, g_mem + src, 16);
++    set_eax(c, valid);
++}
++void equal_rect(X86 *c) {
++    uint32_t a = arg(c, 0), b = arg(c, 1);
++    set_eax(c, a && b && gm_valid(a, 16) && gm_valid(b, 16) && !memcmp(g_mem + a, g_mem + b, 16));
++}
++// POINT is passed by value: its two signed coordinates occupy separate
++// stack slots. The right and bottom edges are excluded, as in GDI regions.
++void point_in_rect(X86 *c) {
++    uint32_t p = arg(c, 0);
++    int32_t x = int32_t(arg(c, 1)), y = int32_t(arg(c, 2));
++    set_eax(c, p && gm_valid(p, 16) && x >= int32_t(rd32(p)) && y >= int32_t(rd32(p + 4)) &&
++                   x < int32_t(rd32(p + 8)) && y < int32_t(rd32(p + 12)));
++}
++void inflate_rect(X86 *c) {
++    uint32_t p = arg(c, 0), dx = arg(c, 1), dy = arg(c, 2);
++    if (!p || !gm_valid(p, 16)) {
++        set_eax(c, 0);
++        return;
++    }
++    wr32(p, rd32(p) - dx);
++    wr32(p + 4, rd32(p + 4) - dy);
++    wr32(p + 8, rd32(p + 8) + dx);
++    wr32(p + 12, rd32(p + 12) + dy);
++    set_eax(c, 1);
++}
+ void intersect_rect(X86 *c) {
+     uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
+     if (!out || !a || !b || !gm_valid(out, 16) || !gm_valid(a, 16) || !gm_valid(b, 16)) {
+@@ -1039,8 +1143,8 @@ void insert_menu(X86 *c) {
  bool clipboard_open = false;
  std::map<uint32_t, uint32_t> clipboard;
  std::map<std::string, uint32_t> clipboard_formats, window_messages;
@@ -1488,7 +4152,7 @@ index dea756d..6a8bc73 100644
      if (name.empty())
          return 0;
      for (char &ch : name)
-@@ -1057,6 +1057,9 @@ uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
+@@ -1057,6 +1161,9 @@ uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
  void register_clipboard(X86 *c) {
      set_eax(c, register_name(clipboard_formats, arg(c, 0)));
  }
@@ -1498,7 +4162,44 @@ index dea756d..6a8bc73 100644
  void register_message(X86 *c) {
      set_eax(c, register_name(window_messages, arg(c, 0)));
  }
-@@ -1458,8 +1461,10 @@ const ImportShim shims[] = {
+@@ -1234,8 +1341,10 @@ void draw_focus(X86 *c) {
+                                   int32_t(rd32(p + 8)), int32_t(rd32(p + 12))));
+ }
+ void create_icon(X86 *c) {
+-    uint32_t w = arg(c, 1), h = arg(c, 2), planes = arg(c, 3), bpp = arg(c, 4), mask = arg(c, 5),
+-             bits = arg(c, 6);
++    // cPlanes/cBitsPixel are BYTE parameters despite occupying DWORD stack
++    // slots. Legacy callers push packed BITMAP fields with nonzero high bits.
++    uint32_t w = arg(c, 1), h = arg(c, 2), planes = uint8_t(arg(c, 3)), bpp = uint8_t(arg(c, 4)),
++             mask = arg(c, 5), bits = arg(c, 6);
+     if (!w || !h || w > 4096 || h > 4096 || planes != 1 || (bpp != 1 && bpp != 24 && bpp != 32)) {
+         set_eax(c, 0);
+         return;
+@@ -1366,6 +1475,11 @@ const ImportShim shims[] = {
+     U("GetPropW", 2, get_prop),
+     U("SetPropW", 3, set_prop),
+     U("RemovePropW", 2, remove_prop),
++    U("GetPropA", 2, get_prop_a),
++    U("SetWindowContextHelpId", 2, set_context_help_id),
++    U("GetWindowContextHelpId", 1, get_context_help_id),
++    U("SetPropA", 3, set_prop_a),
++    U("RemovePropA", 2, remove_prop_a),
+     U("SetParent", 2, set_parent),
+     U("GetParent", 1, get_parent),
+     U("IsChild", 2, child_of),
+@@ -1405,6 +1519,11 @@ const ImportShim shims[] = {
+     U("ScrollWindow", 5, scroll_window),
+     U("MapWindowPoints", 4, map_points),
+     U("IntersectRect", 3, intersect_rect),
++    U("UnionRect", 3, union_rect),
++    U("CopyRect", 2, copy_rect),
++    U("EqualRect", 2, equal_rect),
++    U("PtInRect", 3, point_in_rect),
++    U("InflateRect", 3, inflate_rect),
+     U("GetCursor", 0, get_cursor),
+     U("GetMessageExtraInfo", 0, zero),
+     U("GetKeyboardState", 1, keyboard_state),
+@@ -1458,8 +1577,10 @@ const ImportShim shims[] = {
      U("EmptyClipboard", 0, empty_clipboard),
      U("SetClipboardData", 2, set_clipboard),
      U("RegisterClipboardFormatW", 1, register_clipboard),
@@ -1510,10 +4211,10 @@ index dea756d..6a8bc73 100644
      U("CallNextHookEx", 4, zero),
      U("CreateAcceleratorTableW", 2, create_accelerator),
 diff --git a/runtime/user32_wide.cpp b/runtime/user32_wide.cpp
-index ff9b21d..efff03f 100644
+index ff9b21d..a92baa6 100644
 --- a/runtime/user32_wide.cpp
 +++ b/runtime/user32_wide.cpp
-@@ -122,21 +122,40 @@ void unregister_w(X86 *c) {
+@@ -122,21 +122,44 @@ void unregister_w(X86 *c) {
              ++i;
      set_eax(c, 1);
  }
@@ -1521,11 +4222,15 @@ index ff9b21d..efff03f 100644
 +void class_info_encoded(X86 *c, bool wide, bool extended) {
      ensure_system_classes();
 -    auto it = classes().find(class_key(arg(c, 1), true));
-+    auto it = classes().find(class_key(arg(c, 1), wide));
++    std::string key = class_key(arg(c, 1), wide);
++    auto it = classes().find(key);
      uint32_t p = arg(c, 2);
 -    if (it == classes().end() || !p || !gm_valid(p, 40)) {
 +    uint32_t bytes = extended ? 48 : 40;
 +    if (it == classes().end() || !p || !gm_valid(p, bytes)) {
++        LOGV("GetClassInfo%s%s(\"%s\", instance=%08x): unavailable", extended ? "Ex" : "",
++             wide ? "W" : "A", key.c_str(), arg(c, 0));
++        set_last_error(it == classes().end() ? 1411 : 87);
          set_eax(c, 0);
          return;
      }
@@ -1557,7 +4262,7 @@ index ff9b21d..efff03f 100644
  void class_long(X86 *c, bool set) {
      Window *w = find_window(arg(c, 0));
      auto it = w ? classes().find(w->cls) : classes().end();
-@@ -234,9 +253,10 @@ void find_ex_w(X86 *c) {
+@@ -234,9 +257,10 @@ void find_ex_w(X86 *c) {
      find_named(c, true);
  }
  // RT_STRING blocks contain sixteen WORD-length-prefixed UTF-16 strings.
@@ -1570,7 +4275,7 @@ index ff9b21d..efff03f 100644
      for (uint32_t i = 0; p && i < 16; ++i) {
          if (end - p < 2)
              break;
-@@ -248,12 +268,37 @@ void load_string(X86 *c) {
+@@ -248,12 +272,37 @@ void load_string(X86 *c) {
              if (!out)
                  break;
              if (!cap) {
@@ -1608,7 +4313,7 @@ index ff9b21d..efff03f 100644
              n = std::min(n, cap - 1);
              if (!gm_valid(out, (n + 1) * 2))
                  break;
-@@ -266,8 +311,14 @@ void load_string(X86 *c) {
+@@ -266,8 +315,14 @@ void load_string(X86 *c) {
      }
      set_eax(c, 0);
  }
@@ -1624,7 +4329,7 @@ index ff9b21d..efff03f 100644
      GdiImage image;
      set_eax(c, p && gdi_decode_image(p, bytes, &image) ? gdi_image_bitmap(image) : 0);
  }
-@@ -276,12 +327,12 @@ void load_icon(X86 *c) {
+@@ -276,12 +331,12 @@ void load_icon(X86 *c) {
          alias_ansi(c, "LoadIconA");
          return;
      }
@@ -1639,7 +4344,30 @@ index ff9b21d..efff03f 100644
      GdiImage image;
      // Icon DIB heights include the AND mask. Decode the XOR plane at half height.
      if (!p || bytes < 40 || rd32(p) < 40) {
-@@ -299,6 +350,70 @@ void load_icon(X86 *c) {
+@@ -296,9 +351,93 @@ void load_icon(X86 *c) {
+     memcpy(g_mem + copy, g_mem + p, bytes);
+     wr32(copy + 8, rd32(copy + 8) / 2);
+     bool ok = gdi_decode_image(copy, bytes, &image);
++    if (ok) {
++        // DIB icons carry a separate DWORD-aligned one-bit AND plane after
++        // the XOR color rows. Its set bits make legacy color pixels clear.
++        uint64_t offset = rd32(p), bpp = rd16(p + 14);
++        if (rd32(p + 16) == 3 && offset < 52)
++            offset += 12;
++        if (bpp <= 8)
++            offset += uint64_t(rd32(p + 32) ? rd32(p + 32) : 1u << bpp) * 4;
++        offset += ((uint64_t(image.width) * bpp + 31) / 32) * 4 * image.height;
++        uint64_t stride = ((uint64_t(image.width) + 31) / 32) * 4;
++        if (offset + stride * image.height > bytes)
++            ok = false;
++        else
++            for (int32_t y = 0; y < image.height; ++y)
++                for (int32_t x = 0; x < image.width; ++x) {
++                    uint32_t row = rd32(p + 8) & 0x80000000u ? y : image.height - 1 - y;
++                    if (rd8(p + uint32_t(offset + stride * row) + x / 8) & (0x80 >> (x % 8)))
++                        image.pixels[size_t(y) * image.width + x] = 0;
++                }
++    }
      heap_free(copy);
      set_eax(c, ok ? gdi_create_icon(image) : 0);
  }
@@ -1710,7 +4438,7 @@ index ff9b21d..efff03f 100644
  void draw_text(X86 *c) {
      set_eax(c, gdi::draw_text(arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4)));
  }
-@@ -370,6 +485,11 @@ void next_char(X86 *c) {
+@@ -370,6 +509,11 @@ void next_char(X86 *c) {
      uint32_t p = arg(c, 0);
      set_eax(c, p && rd16(p) ? p + 2 : p);
  }
@@ -1722,7 +4450,7 @@ index ff9b21d..efff03f 100644
  void map_key(X86 *c) {
      // Set 1 scan codes for the US layout used by the host input gate.
      static const uint8_t letters[26] = {30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
-@@ -506,6 +626,9 @@ const ImportShim shims[] = {
+@@ -506,11 +650,15 @@ const ImportShim shims[] = {
      W("RegisterClassW", 1, register_w),
      W("UnregisterClassW", 2, unregister_w),
      W("GetClassInfoW", 3, class_info),
@@ -1732,7 +4460,13 @@ index ff9b21d..efff03f 100644
      W("CreateWindowExW", 12, create_w),
      W("DefWindowProcW", 4, def_w),
      W("DefFrameProcW", 5, def_frame),
-@@ -524,7 +647,10 @@ const ImportShim shims[] = {
+     W("DefMDIChildProcW", 4, def_w),
+     W("CallWindowProcW", 5, call_proc),
++    W("CallWindowProcA", 5, call_proc),
+     W("PeekMessageW", 5, peek_message),
+     W("DispatchMessageW", 1, dispatch_message),
+     W("SendMessageW", 4, send_w),
+@@ -524,7 +672,10 @@ const ImportShim shims[] = {
      W("FindWindowExW", 4, find_ex_w),
      W("LoadBitmapW", 2, load_bitmap),
      W("LoadIconW", 2, load_icon),
@@ -1743,7 +4477,7 @@ index ff9b21d..efff03f 100644
      W("DrawTextW", 5, draw_text),
      W("DrawTextExW", 6, draw_text_ex),
      W("CharUpperW", 1, upper),
-@@ -534,6 +660,7 @@ const ImportShim shims[] = {
+@@ -534,6 +685,7 @@ const ImportShim shims[] = {
      W("CharUpperBuffA", 2, upper_buff_a),
      W("CharLowerBuffA", 2, lower_buff_a),
      W("CharNextW", 1, next_char),
@@ -1752,7 +4486,7 @@ index ff9b21d..efff03f 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index b59ecac..d1d5e0e 100644
+index b59ecac..edb7686 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,10 @@
@@ -1776,6 +4510,17 @@ index b59ecac..d1d5e0e 100644
  const std::string &win32_game_dir();
  // Guest spelling shared by shell folder APIs; creation uses the write overlay.
  std::string shell_folder_guest_path(uint32_t csidl, bool create);
+@@ -348,6 +355,10 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
+ void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
+ // The same routed event, starting in a specific window's client pixels.
+ void host_post_client_mouse_message(uint32_t hwnd, uint32_t msg, uint32_t mk, int32_t x, int32_t y);
++// Host frame coordinates: screen pixels for the GDI desktop, client pixels
++// for a graphics surface. Keep the explicit screen/client APIs above intact.
++void host_post_display_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
++void host_set_display_cursor_pos(int32_t x, int32_t y);
+ // Post a keyboard message to the window that has the focus, which is where
+ // Windows sends one. Not the same as host_main_window: in a VCL application
+ // that is the invisible application window.
 diff --git a/tests/test_game_config.py b/tests/test_game_config.py
 index 4f45372..e9d41f1 100644
 --- a/tests/test_game_config.py
@@ -1839,10 +4584,32 @@ index e9d2983..7ccaf4b 100644
      # Auxiliary modules the loader maps beside the image: {name, developer path, sha256, base, size}.
      lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
 diff --git a/tools/recomp/tests/test_translate_driver.py b/tools/recomp/tests/test_translate_driver.py
-index 71465b7..797d899 100644
+index 71465b7..4a7003b 100644
 --- a/tools/recomp/tests/test_translate_driver.py
 +++ b/tools/recomp/tests/test_translate_driver.py
-@@ -101,6 +101,39 @@ def _walker_image(slots):
+@@ -73,6 +73,21 @@ def synthetic_image(code_at, base=0x00400000, size=0x2000):
+     return img
+ 
+ 
++def test_branch_successors_preserve_debug_breakpoints_without_sweeping_padding():
++    base = 0x00401000
++    # JNE past an intentional breakpoint; the unrelated padding after RET
++    # must remain outside the recovered function.
++    img = synthetic_image({base: b"\x75\x01\xcc\xc3\xcc\xcc"})
++    insns = img.recover(base, set())
++    assert [(i.addr, i.mnem) for i in insns] == [
++        (base, "JNE"), (base + 2, "INT3"), (base + 3, "RET")]
++    assert img.recover(base + 4, set()) == []
++    # An unconditional branch can explicitly target the trap, too.
++    img = synthetic_image({base: b"\xeb\x01\x90\xcc\xc3"})
++    assert [(i.addr, i.mnem) for i in img.recover(base, set())] == [
++        (base, "JMP"), (base + 3, "INT3")]
++
++
+ def _walker_image(slots):
+     """A __initterm-shaped walker, a caller naming a range, and that range."""
+     import struct
+@@ -101,6 +116,39 @@ def _walker_image(slots):
      return img, fns
  
  
@@ -1882,7 +4649,7 @@ index 71465b7..797d899 100644
  def test_initterm_takes_a_table_of_function_pointers():
      """The walker is found by its shape, whatever registers it happens to use."""
      img, fns = _walker_image([0x00401000, 0, 0x00401005])
-@@ -1672,3 +1705,34 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
+@@ -1672,3 +1720,59 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
      import re
      placed = set(re.findall(r"^(L_[0-9a-f]{8}): ;", text, re.M))
      assert set(re.findall(r"goto (L_[0-9a-f]{8});", text)) <= placed
@@ -1917,6 +4684,31 @@ index 71465b7..797d899 100644
 +    assert "void fn_%08x(" % adjustor in text
 +    assert "void fn_%08x(" % shared in text
 +    assert "SUB dword ptr [ESP + 0x4],0x8" in text
++
++
++def test_indexed_interface_call_returns_after_dispatcher_consumes_return(tmp_path, monkeypatch):
++    import struct
++    first, handler = 0x00601000, 0x0060100d
++    stub = b"\xe8" + struct.pack("<i", handler - first - 5)
++    body = b"\x58\x2d" + struct.pack("<I", first + 5) + bytes.fromhex(
++        "d1e88b5424048b5210895424048b12ff2410")
++    img = synthetic_image({first: stub + b"\x2e\x8b\xc0", handler: body}, base=0x00600000)
++    img.code_pointers = lambda *a, **kw: (set(), set())
++    fn = T.Function(handler, "dispatcher", len(body), img.recover(handler, set()))
++    assert T.return_address_dispatcher(fn)
++    assert handler in T.noreturn_callees_from([fn], {})
++    img.noreturn_callees.add(handler)
++    assert [i.mnem for i in img.recover(first, set())] == ["CALL"]
++    text = translate_entry_fixture(tmp_path, monkeypatch, img, {first: stub, handler: body})
++    assert "CALL_FN(0060100d);" in text
++    assert "return; /* callee consumed this CALL's return address */" in text
++    assert "recomp_unknown_call(c, 0x601005u)" not in text
++    table = (tmp_path / "gen/table.c").read_text()
++    assert '#include "game_config.h"' in table
++    assert "if (RECOMP_ALLOW_RUNTIME_INTERPRETER && interp_call(c, target)) return;" in table
++    # A similar ordinary tail dispatcher must not acquire this convention.
++    fn.insns[2] = T.parse_listing_text("00601013  SHR EAX,0x2\n")[0]
++    assert not T.return_address_dispatcher(fn)
 diff --git a/tools/recomp/tests/test_translate_noreturn.py b/tools/recomp/tests/test_translate_noreturn.py
 index f569db1..2d0d44d 100644
 --- a/tools/recomp/tests/test_translate_noreturn.py
@@ -1975,7 +4767,7 @@ index f569db1..2d0d44d 100644
 +    text = translate(listing)
 +    assert "00401105" not in text and "goto L_00401120" not in text
 diff --git a/tools/recomp/translate.py b/tools/recomp/translate.py
-index 944f2ca..c7a8bbb 100644
+index 944f2ca..bdef214 100644
 --- a/tools/recomp/translate.py
 +++ b/tools/recomp/translate.py
 @@ -1336,11 +1336,17 @@ class Image(object):
@@ -2005,10 +4797,84 @@ index 944f2ca..c7a8bbb 100644
          raise TranslateError("unknown capstone operand type %d" % op.type)
  
      def to_insn(self, ci):
-@@ -1679,6 +1685,19 @@ def noreturn_callees_from(parsed, iat_names, image=None):
+@@ -1433,6 +1439,7 @@ class Image(object):
+         self.md.detail = True
+         seen = {}
+         pending = [start]
++        trap_targets = set()
+         truncated = False
+         while pending and len(seen) < limit:
+             va = pending.pop()
+@@ -1452,6 +1459,11 @@ class Image(object):
+                 if index < len(boundaries) and ci.address + ci.size > boundaries[index]:
+                     break  # Do not consume another candidate's first opcode byte.
+                 if ci.mnemonic in ("int3", "hlt", "(bad)"):
++                    # An explicit branch successor can be a deliberate debug
++                    # breakpoint. Preserve that trap, without sweeping INT3
++                    # padding or the bytes beyond it as another function.
++                    if ci.mnemonic == "int3" and va in trap_targets and bounds is None:
++                        seen[va] = self.to_insn(ci)
+                     if bounds is not None:
+                         self.md.detail = False
+                         return []
+@@ -1467,6 +1479,9 @@ class Image(object):
+                 if ci.op_str.startswith("0x") and (
+                         ci.mnemonic == "jmp" or ci.mnemonic.startswith("j")):
+                     t = int(ci.op_str, 16)
++                    trap_targets.add(t)
++                    if ci.mnemonic != "jmp":
++                        trap_targets.add(nxt)
+                     if (abs(t - start) <= self.RECOVER_WINDOW and t not in listed
+                             and lo <= t < hi and self.is_exec(t)):
+                         pending.append(t)
+@@ -1656,6 +1671,42 @@ NORETURN_IMPORTS = frozenset(("RaiseException", "ExitProcess", "TerminateProcess
+                               "ExitThread", "FatalAppExitA", "FatalExit"))
+ 
+ 
++def return_address_dispatcher(fn):
++    """A VB interface dispatcher consumes CALL's return to index its vtable.
++
++    It replaces this on the original frame and jumps to the selected method.
++    That method returns to the original caller, never to bytes after CALL.
++    Require the full eight-instruction shape, rather than treating every POP
++    helper or indirect tail jump as this calling convention.
++    """
++    if len(fn.insns) != 8 or [i.mnem for i in fn.insns] != [
++            "POP", "SUB", "SHR", "MOV", "MOV", "MOV", "MOV", "JMP"]:
++        return False
++    try:
++        ops = [[parse_operand(o) for o in i.ops] for i in fn.insns]
++        index = ops[0][0]
++        obj = ops[3][0]
++        stack = ops[3][1]
++        jump = ops[7][0]
++        def reg(o, r): return o.kind == "reg" and o.size == 32 and o.reg == r
++        def mem(o, base, disp):
++            return (o.kind == "mem" and o.size == 32 and o.base == base and
++                    o.index is None and o.disp == disp and o.seg is None)
++        return (index.kind == "reg" and index.size == 32 and index.reg != 4 and
++                obj.kind == "reg" and obj.size == 32 and obj.reg not in (4, index.reg) and
++                reg(ops[1][0], index.reg) and ops[1][1].kind == "imm" and ops[1][1].imm != 0 and
++                reg(ops[2][0], index.reg) and ops[2][1].kind == "imm" and ops[2][1].imm == 1 and
++                mem(stack, 4, 4) and reg(ops[4][0], obj.reg) and
++                mem(ops[4][1], obj.reg, ops[4][1].disp) and ops[4][1].disp > 0 and
++                mem(ops[5][0], 4, 4) and reg(ops[5][1], obj.reg) and
++                reg(ops[6][0], obj.reg) and mem(ops[6][1], obj.reg, 0) and
++                jump.kind == "mem" and jump.size == 32 and jump.seg is None and
++                jump.disp == 0 and jump.scale == 1 and
++                {jump.base, jump.index} == {index.reg, obj.reg})
++    except (TranslateError, IndexError):
++        return False
++
++
+ def noreturn_callees_from(parsed, iat_names, image=None):
+     """Callees that never return, as the listings show them.
+ 
+@@ -1679,7 +1730,20 @@ def noreturn_callees_from(parsed, iat_names, image=None):
  
      returns = {fn.addr for fn in parsed
                 if any(i.mnem == "RET" for i in fn.insns) and not ends_process(fn)}
+-    out = set()
 +    # A listing can split a returning routine at an epilogue or a cold arm.
 +    # Lack of a local RET is not a no-return proof when a literal tail branch
 +    # reaches another listed block that returns.
@@ -2022,10 +4888,19 @@ index 944f2ca..c7a8bbb 100644
 +                   and Translator.branch_target(i) in returns for i in fn.insns):
 +                returns.add(fn.addr)
 +                changed = True
-     out = set()
++    out = {fn.addr for fn in parsed if return_address_dispatcher(fn)}
      for fn in parsed:
          # A loop that cannot fall out of itself never returns either.
-@@ -2050,9 +2069,9 @@ class Translator(object):
+         if Translator.closed_noreturn_loop(fn):
+@@ -1734,6 +1798,7 @@ class Translator(object):
+         #: A CALL to one ends its block: the emitter leaves a trap in place of
+         #: the fall-through instead of a jump onto the padding that follows.
+         self.noreturn_callees = set()
++        self.return_dispatchers = set()
+         self.seh_helpers = set()
+         #: Does a pointer to this address name data rather than code? The
+         #: driver installs its judgement before the first translation pass
+@@ -2050,9 +2115,9 @@ class Translator(object):
          through the bytes behind the call, and Delphi keeps string literals
          there: Siege of Avalon's single-instance check ends CALL _Halt0 and is
          followed by L"DigitalTomeSiegeOfAvalon", whose 16-bit addressing the
@@ -2038,7 +4913,7 @@ index 944f2ca..c7a8bbb 100644
          (RTL fill routines compute addresses into unrolled code), so a body
          holding one keeps everything. POP reg; JMP reg goes where a
          continuation was pushed, or out of the function.
-@@ -2060,13 +2079,11 @@ class Translator(object):
+@@ -2060,13 +2125,11 @@ class Translator(object):
          if not any(self.never_returns(ins) for ins in fn.insns):
              return set()
          live = self.reached(fn, {fn.addr} | set(entries))
@@ -2057,7 +4932,7 @@ index 944f2ca..c7a8bbb 100644
  
      def reached(self, fn, roots):
          """Indices control flow reaches from `roots` and the pushed
-@@ -2094,6 +2111,9 @@ class Translator(object):
+@@ -2094,6 +2157,9 @@ class Translator(object):
                  t = fn.fallthrough[i]
                  if t in fn.index:
                      work.append(fn.index[t])
@@ -2067,7 +4942,7 @@ index 944f2ca..c7a8bbb 100644
                  continue
              work.extend(j for j in self.successors(fn, i) if j is not None)
          return live
-@@ -2465,11 +2485,9 @@ class Translator(object):
+@@ -2465,11 +2531,9 @@ class Translator(object):
              if target is not None and self.image.is_exec(target):
                  self.unlisted_targets.add(target)
              return
@@ -2082,7 +4957,7 @@ index 944f2ca..c7a8bbb 100644
              self.unlisted_targets.add(target)
              return
          raise TranslateError(
-@@ -2730,6 +2748,11 @@ class Translator(object):
+@@ -2730,6 +2794,11 @@ class Translator(object):
              for e in entries:
                  out.append("void fn_%08x(X86 *c) { body_%08x(c, %s); }"
                             % (e, fn.addr, hexlit(e)))
@@ -2094,7 +4969,25 @@ index 944f2ca..c7a8bbb 100644
          return out
  
      # ---- helpers used by emit -------------------------------------------
-@@ -4426,8 +4449,8 @@ def main():
+@@ -3202,6 +3271,9 @@ class Translator(object):
+                     L.append("{ jmp_buf *b_ = recomp_seh_frame_adopt(c); "
+                              "if (b_) { if (setjmp(*b_)) { recomp_seh_land(c); return; } } }")
+                 if t in self.noreturn_callees:
++                    if t in self.return_dispatchers:
++                        L.append("return; /* callee consumed this CALL's return address */")
++                        return L
+                     # The callee throws or exits; what follows is padding and
+                     # tables, never code.  Reaching this line means it came
+                     # back after all, which the runtime then reports by address.
+@@ -4186,6 +4258,7 @@ def main():
+     rejected = set()
+     tr = Translator(image, all_addrs, args)
+     tr.noreturn_callees = image.noreturn_callees
++    tr.return_dispatchers = {fn.addr for fn in parsed if return_address_dispatcher(fn)}
+ 
+     if args.check_flags:
+         for fn in parsed:
+@@ -4426,8 +4499,8 @@ def main():
          own_interior = home is not None and t in home.addrs
          independent = why != "branch" or protected_source(home)
          if (t in scan_aliases and t in owner
@@ -2105,7 +4998,7 @@ index 944f2ca..c7a8bbb 100644
          if not own_interior and independent:
              remember_candidate(t)
          entry_strength[t] = strength
-@@ -4968,7 +4991,10 @@ def main():
+@@ -4968,7 +5041,10 @@ def main():
                              dst = parse_operand(ins.ops[0])
                          except TranslateError:
                              continue
@@ -2117,7 +5010,7 @@ index 944f2ca..c7a8bbb 100644
                              continue
                      immediates.add(src.imm)
              # Collect all scan candidates against the settled protected code
-@@ -5020,6 +5046,20 @@ def main():
+@@ -5020,6 +5096,20 @@ def main():
                  # boundary. In particular, a bare pointer to its RET must not
                  # withdraw the method by stopping it one instruction early.
                  scan_aliases.update(fn.addrs & guesses)
@@ -2138,6 +5031,23 @@ index 944f2ca..c7a8bbb 100644
                  for i, ins in enumerate(probe):
                      end = fn.fallthrough[i] or ins.addr + 1
                      weaker_interiors.update(a for a in range(ins.addr + 1, end) if a in guesses)
+@@ -5792,6 +5882,7 @@ def main():
+         fh.write('#include <stdio.h>\n#include <stdlib.h>\n#include "funcs.h"\n#include "thunks.h"\n'
+                  '#include "discovery.h"\n#include "interp.h"\n\n')
+         if AUX_MODULE is None:
++            fh.write('#include "game_config.h"\n\n')
+             fh.write("/* Baseline and differential hosts retain exact guest timing. */\n"
+                      "__attribute__((weak)) uint32_t recomp_visual_animation_tick(uint32_t tick) { return tick; }\n\n")
+         fh.write("const uint32_t %sfunc_addrs[] = {\n" % P)
+@@ -5988,7 +6079,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
+      * --discovered, then let the interpreter carry the run past the gap so
+      * one run can report every gap it reaches rather than the first. */
+     discovery_note("jump", target, c->eip);
+-    if (interp_call(c, target)) return;
++    if (RECOMP_ALLOW_RUNTIME_INTERPRETER && interp_call(c, target)) return;
+     discovery_write();
+     fprintf(stderr, "recomp: no block entry for indirect jump to 0x%08x from 0x%08x\\n",
+             target, c->eip);
 diff --git a/tools/test.py b/tools/test.py
 index 0aea3f4..a0adf75 100644
 --- a/tools/test.py

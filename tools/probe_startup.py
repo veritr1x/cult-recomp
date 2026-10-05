@@ -15,8 +15,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
     parser.add_argument("--verbose", action="store_true", help="Record guest import arguments and returns")
+    parser.add_argument("--capture-frames", action="store_true", help="Save presented frames for visual inspection")
+    parser.add_argument("--max-frames", type=int, default=10)
+    parser.add_argument("--max-seconds", type=float, default=5)
+    parser.add_argument("--frame-every", type=int, default=1, help="Capture every Nth presented frame")
     parser.add_argument("--toolchain", type=Path, default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64")
     args = parser.parse_args()
+    if args.max_frames < 1 or args.max_seconds <= 0 or args.frame_every < 1:
+        parser.error("Probe bounds and capture interval must be positive")
     failed = False
     for game_id in GAMES if args.game == "all" else [args.game]:
         game = ROOT / "games" / game_id
@@ -24,7 +30,8 @@ def main():
         directory.mkdir(parents=True, exist_ok=True)
         env = {key: value for key, value in os.environ.items() if not key.startswith("RECOMP_")}
         env.update(RECOMP_PROFILE_DIR=str(directory / "profile"), RECOMP_IMPORT_STATS="1",
-                   RECOMP_MAX_SECONDS="5", RECOMP_MAX_FRAMES="10", RECOMP_FRAME_EVERY="0",
+                   RECOMP_MAX_SECONDS=str(args.max_seconds), RECOMP_MAX_FRAMES=str(args.max_frames),
+                   RECOMP_FRAME_EVERY=str(args.frame_every) if args.capture_frames else "0",
                    RECOMP_NO_MODS="1", RECOMP_FRAMES=str(directory / "frames"))
         env["RECOMP_DISCOVERY"] = str(directory / "discovered.txt")
         env["RECOMP_LOG"] = "2" if args.verbose else "1"
@@ -33,7 +40,7 @@ def main():
         timed_out = False
         try:
             result = subprocess.run([str(executable)], cwd=game, env=env, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, timeout=15)
+                                    stderr=subprocess.STDOUT, timeout=args.max_seconds + 10)
             output, returncode = result.stdout, result.returncode
         except subprocess.TimeoutExpired as error:
             output, returncode, timed_out = error.stdout or b"", None, True
@@ -41,7 +48,7 @@ def main():
         log = output.decode("utf-8", errors="replace")
         frames = re.search(r"presented frames:\s+(\d+)", log)
         missing = re.findall(r"unimplemented import ([^:]+):", log)
-        unknown = re.findall(r"(?:call to unknown target|unknown (?:call|jump)(?: target)?|no translated function)[^\n]*", log)
+        unknown = re.findall(r"(?:call to unknown target|unknown (?:call|jump)(?: target)?|no translated function|no block entry for indirect jump)[^\n]*", log)
         record = {"returncode": returncode, "timed_out": timed_out, "platform": "Windows x64",
                   "presented_frames": int(frames.group(1)) if frames else None,
                   "missing_imports_called": missing, "unknown_transfers": unknown,

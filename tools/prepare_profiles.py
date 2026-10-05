@@ -1,6 +1,7 @@
 """Create exact-image RecompKit profiles from the locally inspected game binaries."""
 
 import json
+import tomllib
 from import_archives import GAMES, ROOT
 
 NAMES = {"cult": ("Cult", "CultRecomp", "Cult"),
@@ -12,7 +13,14 @@ def main():
         game = ROOT / "games" / game_id
         report = json.loads((game / "analysis/pe-report.json").read_text())
         name, app, directory = NAMES[game_id]
-        entries = ", ".join(f"0x{a:08x}" for a in report["vb"]["structural_entry_points"])
+        target = game / "game.toml"
+        seeds = set(report["vb"]["structural_entry_points"])
+        if target.exists():
+            current_config = tomllib.loads(target.read_text())
+            if current_config["game"]["sha256"] != report["sha256"]:
+                raise ValueError(f"Preserving a profile for a different image: {target}")
+            seeds.update(current_config["translate"].get("entry_points", []))
+        entries = ", ".join(f"0x{a:08x}" for a in sorted(seeds))
         text = f'''# Exact supplied image. Native code translation remains experimental.
 [game]
 id = "{game_id}"

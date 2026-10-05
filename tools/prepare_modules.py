@@ -1,10 +1,12 @@
 """Pin and export the supplied DLLs without executing or registering them."""
 
 import hashlib
+import argparse
 import importlib.util
 import json
 import sys
 import re
+import struct
 import shutil
 import tomllib
 from pathlib import Path
@@ -14,21 +16,57 @@ import pefile
 
 from import_archives import GAMES, ROOT
 
+MODULES = {"vb5": "MSVBVM50.DLL", "pictureclip": "PICCLP32.OCX", "automation": "OLEAUT32.DLL",
+           "imagefilter": "ASYCFILT.DLL"}
+
+
+def interface_thunks(image):
+    """Prove VB's indexed interface CALL table from its complete dispatcher.
+
+    Each CALL pushes a table index encoded in its return address. Padding is
+    never executed: the dispatcher replaces this and jumps to the method.
+    """
+    entries, dispatchers = {}, set()
+    prefix, suffix = b"\x58\x2d", bytes.fromhex("d1e88b5424048b5210895424048b12ff2410")
+    for lo, hi, _ in image.exec_ranges:
+        at = lo
+        while True:
+            offset = image.data.find(prefix, at - image.base, hi - image.base)
+            if offset < 0: break
+            handler = image.base + offset
+            at = handler + 1
+            if image.data[offset + 6:offset + 24] != suffix: continue
+            first = struct.unpack_from("<I", image.data, offset + 2)[0] - 5
+            if first < lo or first >= handler or (handler - first + 3) % 8: continue
+            candidates = list(range(first, handler, 8))
+            if len(candidates) < 2: continue
+            if not all(image.data[s - image.base] == 0xe8 and
+                       s + 5 + struct.unpack_from("<i", image.data, s - image.base + 1)[0] == handler
+                       for s in candidates): continue
+            entries.update({s: handler for s in candidates})
+            dispatchers.add(handler)
+    return entries, dispatchers
+
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
+    parser.add_argument("--module", choices=[*MODULES, "all"], default="all")
+    args = parser.parse_args()
     kit = ROOT / "kit"
     sys.path.insert(0, str(kit / "tools"))
     spec = importlib.util.spec_from_file_location("kit_translate", kit / "tools/recomp/translate.py")
     translator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(translator)
-    for game_id in GAMES:
+    for game_id in GAMES if args.game == "all" else [args.game]:
         game = ROOT / "games" / game_id
         profile = game / "game.toml"
         text = profile.read_text()
         config = tomllib.loads(text)
         if "guest_size =" not in text:
             text = text.replace('[game]\n', '[game]\nguest_size = 0x74200000\n')
-        for key, filename in (("vb5", "MSVBVM50.DLL"), ("pictureclip", "PICCLP32.OCX")):
+        for key in MODULES if args.module == "all" else [args.module]:
+            filename = MODULES[key]
             path = game / "original/dependencies" / filename
             # Archives preserve their original filename capitalization.
             path = next(p for p in path.parent.iterdir() if p.name.lower() == filename.lower())
@@ -55,6 +93,12 @@ def main():
                 shutil.copy2(path, bundled)
             seeds.update(a for a in configured.get("entry_points", []) if a not in data_exports)
             provenance = {a: "pe_export_or_entry" if a in exported_seeds else "audited_config_seed" for a in seeds}
+            thunks, dispatchers = interface_thunks(image)
+            seeds.update(thunks)
+            seeds.update(dispatchers)
+            provenance.update({a: f"interface_return_dispatcher:{handler:08x}" for a, handler in thunks.items()})
+            provenance.update({a: "interface_return_dispatcher" for a in dispatchers})
+            image.noreturn_callees.update(dispatchers)
             initial_seeds = set(seeds)
             pending, decoded, rejected = sorted(seeds, reverse=True), {}, {}
             decoder = translator.Translator(image, seeds, SimpleNamespace(eager_flags=False))

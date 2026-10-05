@@ -14,29 +14,35 @@ executables have compiled and been probed. No other platform has been tested.
   generated source, binaries and logs remain ignored.
 - Export native listings using actual VB event/method pointers and direct x86
   control-flow edges: 420 initial entries for Cult, 444 for Cult II.
-- RecompKit emits 548 native C functions / 605 dispatch entries for Cult and
+- RecompKit emits 549 native C functions / 606 dispatch entries for Cult and
   586 functions / 654 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
-- Twelve focused input/profile/report checks pass. Complete gameplay coverage
+- Thirteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
-- Both LLVM-MinGW headless native builds link with statically translated VB5
-  and PictureClip libraries on the locally patched kit. Probes enter the actual
-  VB startup routine, but neither game has presented a frame yet.
+- Both LLVM-MinGW headless native builds link with four statically translated
+  supplied libraries on the locally patched kit. Probes enter the actual
+  VB startup routine. Both complete 150-frame offscreen captures with no called
+  missing imports or unknown transfers; this is not a gameplay test.
 
 ## Runtime blockers
 
-The ongoing second pass adds both supplied dependencies as statically translated
+The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult II image passes 226 loader/startup contract checks (zero failures,
+The real Cult image passes 328 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
-231 focused translator/profile/build checks and 12 private-input checks.
-The VB5 pass emits over 21,000 discovered routines and PictureClip 580.
+254 focused translator/profile/build/private-input checks in the latest run.
+The VB5 pass emits 22,379 discovered routines and PictureClip 580.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
-has a separate vtable entry. The native GDI suite passes 142 checks.
-The broader portable suite records 352 passes, 76 skips and three failures:
+has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
+dispatcher consumes the return address. Unknown indirect jumps now honor the
+interpreter-disable setting. Fixed generated heap callback templates dispatch
+the native interface resolver and reference-owning object getter through ABI
+adapters. The native GDI suite passes 169 checks, including region subtraction,
+clipping that retains holes, anisotropic picture mapping and plain ANSI text.
+The broader portable suite records 354 passes, 76 skips and three failures:
 this Windows process lacks the privilege to create the symlinks in the setup
 and Linux package fixtures. That complete suite has not passed on this host.
 Neither game has reached verified gameplay.
@@ -46,8 +52,30 @@ then execute `ThunRTMain`. Implemented startup services include a guest COM task
 allocator, mapped-module string resources, wide string comparison, and OLE
 Automation's named/ordinal bindings, binary BSTRs, and caller-created SAFEARRAY
 storage. Probes create VB's main, component-manager and focus windows and reach
-native object dispatch. The remaining work includes covering verified callback
-addresses, further Windows/COM behavior, rendering and input.
+native object dispatch. Both execute the supplied OLE Automation library's
+font construction. Cult creates its language-selection form, radio buttons and
+frame after fixing ANSI icon loading and adding the system Button procedure.
+Its picture construction uses ASYCFILT, now translated as a fourth module.
+Automation's seven image-filter vtable methods have been audited and seeded.
+Both language forms are created, and Cult reaches translated game initialization.
+Both latest native probes carry the complete interface table and finish 150
+presented frames with no called missing imports or unknown transfers. Captures
+show language-selection forms, titles, flags, character artwork and the Play
+label. Anisotropic GDI mapping now renders the supplied OLE pictures.
+Dynamic sound exports now bind and report unavailable playback rather than
+throwing a missing-entry-point exception.
+MIDI and WAV assets use `.dat` filenames; actual media playback remains unfinished.
+Offscreen frames have been inspected. Scripted desktop coordinates now route
+through the same native input bridge as host mouse events. English-selection
+and Play clicks advance both games into intro processing. Legacy file/path
+APIs and two additional audited callbacks are translated or implemented.
+Both latest input probes fail at `ole32.dll!StgCreateDocfile`, followed by an
+access violation and an unsupported exception-unwind disposition. The script
+does not complete; gameplay remains unverified. Input evidence is recorded
+under each profile's private `build/input-probe/` directory.
+Shutdown previously reached an uncovered VB callback at
+`0x7403b4ae`, which still needs a static entry. The remaining work includes
+structured storage, callback coverage, physical input, audio and gameplay.
 
 Both games have the same object structure: `GameForm`, `Module1`, `LanSet`,
 and `Intro`. Cult's forms describe 62 controls; Cult II's describe 63.

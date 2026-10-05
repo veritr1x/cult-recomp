@@ -76,5 +76,28 @@ class ProfileTests(unittest.TestCase):
                     self.assertEqual(report[key], [])
 
 
+class InterfaceThunkTests(unittest.TestCase):
+    def test_complete_table_and_corrupt_call(self):
+        from prepare_modules import interface_thunks
+        from types import SimpleNamespace
+        first, count = 0x1000, 3
+        handler = first + count * 8 - 3
+        data = bytearray()
+        for i in range(count):
+            addr = first + i * 8
+            data.extend(b"\xe8" + struct.pack("<i", handler - addr - 5))
+            if i != count - 1:
+                data.extend(b"\x2e\x8b\xc0")
+        data.extend(b"\x58\x2d" + struct.pack("<I", first + 5) + bytes.fromhex(
+            "d1e88b5424048b5210895424048b12ff2410"))
+        image = SimpleNamespace(base=first, data=bytes(data),
+                                exec_ranges=[(first, first + len(data), ".text")])
+        self.assertEqual(interface_thunks(image),
+                         ({first + i * 8: handler for i in range(count)}, {handler}))
+        data[9] ^= 1
+        image.data = bytes(data)
+        self.assertEqual(interface_thunks(image), ({}, set()))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,9 +5,12 @@ Both supplied games contain native x86 code compiled with Visual Basic 5.
 Their game code has been translated to C with RecompKit. Native gameplay,
 save compatibility, audio, input and other platforms are not yet verified.
 Both Windows x64 headless executables link with the statically translated VB5
-runtime and PictureClip control. Probes now execute VB5's real DLL initialization
-and enter the game startup routine. Work continues on callback coverage and
-Windows/COM services before forms can run. Runtime x86 interpretation is disabled
+runtime, PictureClip control, OLE Automation library and ASYCFILT image decoder.
+Both reach their language-selection forms, radio buttons and frames.
+Both have completed bounded 150-frame native captures without called missing
+imports or unknown transfers. Captures show the language labels, but flags and
+other artwork remain blank. Work continues on image mapping, input and audio.
+Runtime x86 interpretation is disabled
 for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
 by that date cannot be promised from the current state.
@@ -21,7 +24,7 @@ changes without fetching an unpublished submodule commit.
 
 | Profile | Original executable | Emitted native functions | Dispatch entries |
 | --- | --- | ---: | ---: |
-| `games/cult` | `Cult.exe` | 548 | 605 |
+| `games/cult` | `Cult.exe` | 549 | 606 |
 | `games/cult2` | `Cult2FC.exe` | 586 | 654 |
 
 Both translation reports contain zero reported instruction failures,
@@ -67,7 +70,7 @@ entry and VB method/event tables. It is a bootstrap alternative to Ghidra
 listings, with provenance in `functions.tsv`; it does not export decompiler
 pseudocode. Additional dynamically discovered callbacks still need auditing.
 `prepare_modules.py` exports DLL entries, direct edges and switch arms and pins
-their hashes in each profile. It copies only the two mapped module images beside
+their hashes in each profile. It copies the four mapped module images beside
 each executable so portable bundles can find their guest data. These remain
 private inputs and are never registered with Windows.
 
@@ -92,6 +95,18 @@ preset disables FFmpeg. Native builds use `kit/tools/build.py` exclusively.
 Generated C and binaries remain private under `games/<id>/build/`.
 An emitted library or headless executable does not establish playability.
 See [status and remaining work](docs/status.md) for verification and blockers.
+
+The smoke host also checks input through the native window-message path:
+
+```powershell
+.venv\Scripts\python.exe tools\build.py --game all --preset cult-windows-llvm --target smoke
+.venv\Scripts\python.exe tools\probe_input.py --game all --verbose
+```
+
+Both games render their language screens, including artwork and the Play label,
+and the scripted clicks advance into the intro. The latest input probes fail
+at the shared missing `StgCreateDocfile` service. These are diagnostic builds;
+gameplay, audio, save/load and other platforms remain unverified.
 
 ## Other targets
 

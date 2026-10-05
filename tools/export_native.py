@@ -8,6 +8,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 from import_archives import GAMES, ROOT
@@ -25,6 +26,15 @@ def export_game(kit, game_id):
     seeds = set(report["vb"]["structural_entry_points"])
     provenance = {a: "vb_event_table" for a in seeds}
     provenance[report["entry_point"]] = "pe_entry_point"
+    configured = tomllib.loads((game / "game.toml").read_text())
+    if configured["game"]["sha256"] != report["sha256"]:
+        raise ValueError("Preserving audited entries for a different game image")
+    for entry in configured["translate"].get("entry_points", []):
+        if not image.is_exec(entry):
+            raise ValueError(f"Audited entry outside executable section: {entry:08x}")
+        if entry not in seeds:
+            provenance[entry] = "audited_config_seed"
+            seeds.add(entry)
     # ThunRTMain never returns: stop the tiny process entry after its CALL.
     first = image.instruction_at(report["entry_point"] + 5)
     if first and first.mnem == "CALL":
