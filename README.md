@@ -27,12 +27,12 @@ changes without fetching an unpublished submodule commit.
 
 | Profile | Original executable | Emitted native functions | Dispatch entries |
 | --- | --- | ---: | ---: |
-| `games/cult` | `Cult.exe` | 562 | 6,816 |
-| `games/cult2` | `Cult2FC.exe` | 598 | 8,214 |
+| `games/cult` | `Cult.exe` | 563 | 6,817 |
+| `games/cult2` | `Cult2FC.exe` | 599 | 8,215 |
 
 Both profiles enable RecompKit's resumable guest continuations. Native calls
 propagate a changed guest return address to the dispatch driver, and the
-exporter recovers verified VB cleanup epilogues after PUSH/JMP calls.
+exporter recovers verified VB frame epilogues named by nearby pushed returns.
 
 Both translation reports contain zero reported instruction failures,
 zero unmodelled instructions and zero unresolved jump-table sites. These

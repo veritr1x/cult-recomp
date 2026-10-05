@@ -58,14 +58,15 @@ class NativeExportTests(unittest.TestCase):
         from types import SimpleNamespace as NS
         from export_native import cleanup_continuations
         translator = NS(parse_operand=lambda text: NS(kind="imm", imm=int(text, 0)))
-        body = [NS(mnem="MOV"), NS(mnem="POP"), NS(mnem="RET")]
+        body = [NS(mnem="MOV", ops=["ESP", "EBP"]),
+                NS(mnem="POP", ops=["EBP"]), NS(mnem="RET")]
         image = NS(is_exec=lambda at: 0x400000 <= at < 0x401000,
                    recover=lambda at, boundaries: body)
         push = NS(addr=0x400010, mnem="PUSH", ops=["0x400080"])
         jump = NS(addr=0x400015, mnem="JMP", ops=["0x400040"])
         self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])),
                          [(0x400080, 0x400010)])
-        for target in ("0x20", "0x400030", "0x401500"):
+        for target in ("0x20", "0x400008", "0x401500"):
             push.ops = [target]
             self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])), [])
         push.ops = ["0x400080"]

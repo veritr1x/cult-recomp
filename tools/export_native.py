@@ -16,24 +16,25 @@ from import_archives import GAMES, ROOT
 
 
 def cleanup_continuations(translator, image, instructions):
-    """Recover VB's PUSH-return/JMP-cleanup calls with a returning epilogue.
+    """Recover nearby pushed VB return addresses with verified frame epilogues.
 
-    Ordinary PUSH data is excluded: both destinations must be executable and
-    ordered in the nearby forward cleanup region, and the return target must
-    decode as a straight-line register/frame epilogue ending in RET.
+    A cleanup call can have argument preparation between PUSH-return and JMP.
+    Ordinary pushed data is excluded: the nearby forward target must decode as
+    a short, straight-line epilogue that restores ESP/EBP and ends in RET.
     """
-    for push, jump in zip(instructions, instructions[1:]):
-        if push.mnem != "PUSH" or jump.mnem != "JMP" or not push.ops or not jump.ops:
+    for push in instructions:
+        if push.mnem != "PUSH" or not push.ops:
             continue
-        ret, cleanup = translator.parse_operand(push.ops[0]), translator.parse_operand(jump.ops[0])
-        if ret.kind != "imm" or cleanup.kind != "imm":
+        ret = translator.parse_operand(push.ops[0])
+        if ret.kind != "imm" or not (push.addr + 5 <= ret.imm < push.addr + 4096):
             continue
-        if jump.addr != push.addr + 5 or not (jump.addr + 5 <= cleanup.imm < ret.imm < push.addr + 4096):
-            continue
-        if not image.is_exec(ret.imm) or not image.is_exec(cleanup.imm):
+        if not image.is_exec(ret.imm):
             continue
         epilogue = image.recover(ret.imm, set())
-        if (epilogue and epilogue[-1].mnem == "RET" and len(epilogue) <= 16
+        if (len(epilogue) >= 3 and len(epilogue) <= 16
+                and epilogue[-1].mnem == "RET"
+                and epilogue[-2].mnem == "POP" and epilogue[-2].ops == ["EBP"]
+                and epilogue[-3].mnem == "MOV" and epilogue[-3].ops == ["ESP", "EBP"]
                 and all(i.mnem in {"MOV", "POP", "XOR", "ADD", "RET"} for i in epilogue)):
             yield ret.imm, push.addr
 

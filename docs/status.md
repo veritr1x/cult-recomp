@@ -14,8 +14,8 @@ executables have compiled and been probed. No other platform has been tested.
   generated source, binaries and logs remain ignored.
 - Export native listings using actual VB event/method pointers and direct x86
   control-flow edges: 421 initial entries for Cult, 446 for Cult II.
-- RecompKit emits 562 native C functions / 6,816 dispatch entries for Cult and
-  598 functions / 8,214 dispatch entries for Cult II. It reports no instruction
+- RecompKit emits 563 native C functions / 6,817 dispatch entries for Cult and
+  599 functions / 8,215 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
 - Eighteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
@@ -111,8 +111,9 @@ movement probes expose missing VB cleanup returns and corrupted call targets.
 The opt-in resumable-stack mode is enabled for both games and all four
 translated libraries. Its startup contract passes, and generated heap callback
 adapters now finish helper continuations locally before resuming their template.
-The exporter recognizes nearby PUSH-return/JMP-cleanup calls only when their
-return targets decode as straight-line returning epilogues. The latest main
+The exporter recognizes nearby pushed return addresses only when their
+targets decode as short, straight-line epilogues restoring ESP/EBP and
+ending in RET. Argument preparation between the push and jump is permitted. The latest main
 translations include those entries; gameplay probes remain required.
 Cult's ListBox column-width
 message is implemented with column painting, item rectangles, pointer selection
