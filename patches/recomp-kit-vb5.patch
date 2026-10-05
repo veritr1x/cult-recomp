@@ -1,11 +1,16 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..6d2d720 100644
+index 20fdc15..82a7e7b 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,50 @@
+@@ -2,6 +2,55 @@
  
  ## Unreleased
  
++- Supply transient OLE storage and owned streams with reads, writes, 64-bit
++  seeks, cloning, CopyTo and parent-lifetime invalidation. Reject persistent
++  compound files and unsupported transactions without returning false success.
++- Measure ANSI text through the same selected-font backend as UTF-16 text.
++
 +- Render plain ANSI text and anisotropic OLE picture blits. Route pure GDI
 +  desktop input in screen coordinates, and clamp Boolean button check states.
 +- Support legacy file reads/seeks/closes and guest-overlay path searches.
@@ -176,6 +181,19 @@ index 9525259..d036a70 100644
          return;
      }
      uint32_t hwnd = host_main_window();
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index 10a5e39..2aedc29 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -2,7 +2,7 @@
+ # consumer exactly as the shell scripts linked every object.
+ set(POP_RUNTIME_SOURCES
+   memory.cpp loader.cpp imports.cpp cpu.cpp thunks.cpp seh.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
+-  resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
++  resources.cpp oleaut32.cpp structured_storage.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
+   misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
+   media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
+ 
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
 index 06d5e2b..0c84a00 100644
 --- a/runtime/cpu.cpp
@@ -190,7 +208,7 @@ index 06d5e2b..0c84a00 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..615265b 100644
+index 13ba56f..f59864d 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
 @@ -6,6 +6,7 @@
@@ -345,7 +363,7 @@ index 13ba56f..615265b 100644
      } else
          set_eax(c, prev);
  }
-@@ -689,11 +755,7 @@ void g_GetDeviceCaps(X86 *c) {
+@@ -689,43 +755,6 @@ void g_GetDeviceCaps(X86 *c) {
      set_eax(c, value);
  }
  
@@ -354,11 +372,42 @@ index 13ba56f..615265b 100644
 -    log_once("gdi.textout", "gdi: TextOutA is accepted and not drawn in this runtime");
 -    set_eax(c, 1);
 -}
-+// Legacy ANSI measurement entries are refined by the shared font backend.
- void g_GetTextMetricsA(X86 *c) {
-     uint32_t tm = arg(c, 1);
-     if (!tm || !gm_valid(tm, 56)) {
-@@ -765,13 +827,14 @@ const ImportShim g_gdi32_shims[] = {
+-void g_GetTextMetricsA(X86 *c) {
+-    uint32_t tm = arg(c, 1);
+-    if (!tm || !gm_valid(tm, 56)) {
+-        set_eax(c, 0);
+-        return;
+-    }
+-    memset(g_mem + tm, 0, 56);
+-    wr32(tm + 0, TEXT_HEIGHT);              // tmHeight
+-    wr32(tm + 4, 13);                       // tmAscent
+-    wr32(tm + 8, 3);                        // tmDescent
+-    wr32(tm + 12, 3);                       // tmInternalLeading
+-    wr32(tm + 16, 1);                       // tmExternalLeading
+-    wr32(tm + 20, TEXT_AVERAGE_CHAR_WIDTH); // tmAveCharWidth
+-    wr32(tm + 24, 14);                      // tmMaxCharWidth
+-    wr32(tm + 28, 400);                     // tmWeight
+-    g_mem[tm + 44] = 0x20;                  // tmFirstChar
+-    g_mem[tm + 45] = 0xff;                  // tmLastChar
+-    g_mem[tm + 46] = 0x3f;                  // tmDefaultChar
+-    g_mem[tm + 47] = 0x20;                  // tmBreakChar
+-    g_mem[tm + 52] = 0x02;                  // tmPitchAndFamily: variable pitch
+-    set_eax(c, 1);
+-}
+-void g_GetTextExtentPointA(X86 *c) {
+-    uint32_t size = arg(c, 3);
+-    if (!size || !gm_valid(size, 8)) {
+-        set_eax(c, 0);
+-        return;
+-    }
+-    wr32(size, arg(c, 2) * TEXT_AVERAGE_CHAR_WIDTH);
+-    wr32(size + 4, TEXT_HEIGHT);
+-    set_eax(c, 1);
+-}
+ void g_SetTextColor(X86 *c) {
+     auto *found = dc_of(arg(c, 0));
+     if (!found) {
+@@ -765,13 +794,14 @@ const ImportShim g_gdi32_shims[] = {
      {"GDI32.dll", "ExtTextOutA", 8, nullptr},
      {"GDI32.dll", "CreateCompatibleBitmap", 3, g_CreateCompatibleBitmap},
      // Named for its argument count; the result is ERROR, which is honest.
@@ -375,15 +424,17 @@ index 13ba56f..615265b 100644
      {"GDI32.dll", "SetDIBColorTable", 4, g_SetDIBColorTable},
      {"GDI32.dll", "CreatePalette", 1, g_CreatePalette},
      {"GDI32.dll", "SelectPalette", 3, g_SelectPalette},
-@@ -781,7 +844,6 @@ const ImportShim g_gdi32_shims[] = {
+@@ -781,9 +811,6 @@ const ImportShim g_gdi32_shims[] = {
      {"GDI32.dll", "SetSystemPaletteUse", 2, g_SetSystemPaletteUse},
      {"GDI32.dll", "GetDIBits", 7, g_GetDIBits},
      {"GDI32.dll", "GetDeviceCaps", 2, g_GetDeviceCaps},
 -    {"GDI32.dll", "TextOutA", 5, g_TextOutA},
-     {"GDI32.dll", "GetTextMetricsA", 2, g_GetTextMetricsA},
-     {"GDI32.dll", "GetTextExtentPointA", 4, g_GetTextExtentPointA},
+-    {"GDI32.dll", "GetTextMetricsA", 2, g_GetTextMetricsA},
+-    {"GDI32.dll", "GetTextExtentPointA", 4, g_GetTextExtentPointA},
      {"GDI32.dll", "SetTextColor", 2, g_SetTextColor},
-@@ -861,8 +923,13 @@ Surface *surface_of(DeviceContext &dc) {
+     {"GDI32.dll", "SetBkColor", 2, g_SetBkColor},
+     {"GDI32.dll", "SetBkMode", 2, g_SetBkMode},
+@@ -861,8 +888,13 @@ Surface *surface_of(DeviceContext &dc) {
      return &s;
  }
  void offset(DeviceContext &dc, int64_t *x, int64_t *y) {
@@ -399,7 +450,7 @@ index 13ba56f..615265b 100644
      if (dc.window && dc.window != dc.surface) {
          int32_t wx = 0, wy = 0, sx = 0, sy = 0;
          user32::client_origin(dc.window, &wx, &wy);
-@@ -1058,6 +1125,31 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
+@@ -1058,6 +1090,31 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
  bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p, bool blend) {
      return pixel(dc, x, y, &p, true, blend);
  }
@@ -431,7 +482,7 @@ index 13ba56f..615265b 100644
  bool drawable(uint32_t dc, int64_t x, int64_t y) {
      uint32_t p;
      return read_pixel(dc, x, y, &p);
-@@ -1099,10 +1191,29 @@ Rect clip_box(uint32_t hdc) {
+@@ -1099,10 +1156,29 @@ Rect clip_box(uint32_t hdc) {
      }
      int64_t x = 0, y = 0;
      offset(dc, &x, &y);
@@ -463,7 +514,7 @@ index 13ba56f..615265b 100644
      Rect clip = clip_box(dc);
      for (int64_t y = std::max(r.t, clip.t); y < std::min(r.b, clip.b); ++y)
          for (int64_t x = std::max(r.l, clip.l); x < std::min(r.r, clip.r); ++x)
-@@ -1293,6 +1404,9 @@ bool presented_pixels(PresentedSurface &s) {
+@@ -1293,6 +1369,9 @@ bool presented_pixels(PresentedSurface &s) {
  }
  } // namespace
  
@@ -473,7 +524,7 @@ index 13ba56f..615265b 100644
  void gdi_present_windows(bool refresh) {
      auto surfaces = visible_surfaces();
      auto &presented = presented_surface();
-@@ -1480,6 +1594,21 @@ void brush_indirect(X86 *c) {
+@@ -1480,6 +1559,21 @@ void brush_indirect(X86 *c) {
  void pen_indirect(X86 *c) {
      indirect_object(c, true);
  }
@@ -495,7 +546,7 @@ index 13ba56f..615265b 100644
  void stock_object(X86 *c) {
      uint32_t i = arg(c, 0);
      set_eax(c, i <= 19 ? 0x4f100 + i : 0);
-@@ -1579,6 +1708,61 @@ void get_stretch_mode(X86 *c) {
+@@ -1579,6 +1673,61 @@ void get_stretch_mode(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      set_eax(c, dc ? dc->stretch_mode : 0);
  }
@@ -557,7 +608,7 @@ index 13ba56f..615265b 100644
  void rop2(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      int v = int(arg(c, 1));
-@@ -1589,6 +1773,10 @@ void rop2(X86 *c) {
+@@ -1589,6 +1738,10 @@ void rop2(X86 *c) {
      set_eax(c, dc->rop2);
      dc->rop2 = v;
  }
@@ -568,7 +619,7 @@ index 13ba56f..615265b 100644
  void flush(X86 *c) {
      set_eax(c, 1);
  }
-@@ -1642,12 +1830,19 @@ void gdi_model_register() {
+@@ -1642,12 +1795,19 @@ void gdi_model_register() {
      static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                         G("CreateBrushIndirect", 1, brush_indirect),
                                         G("CreatePenIndirect", 1, pen_indirect),
@@ -588,7 +639,7 @@ index 13ba56f..615265b 100644
                                         G("GetWindowOrgEx", 2, get_window_org),
                                         G("SetViewportOrgEx", 4, viewport_org),
                                         G("SetBrushOrgEx", 4, brush_org),
-@@ -1657,6 +1852,7 @@ void gdi_model_register() {
+@@ -1657,6 +1817,7 @@ void gdi_model_register() {
                                         G("SetStretchBltMode", 2, stretch_mode),
                                         G("GetStretchBltMode", 1, get_stretch_mode),
                                         G("SetROP2", 2, rop2),
@@ -596,7 +647,7 @@ index 13ba56f..615265b 100644
                                         G("GdiFlush", 0, flush),
                                         G("UnrealizeObject", 1, unrealize),
                                         G("ResizePalette", 2, resize_palette),
-@@ -1671,10 +1867,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+@@ -1671,10 +1832,12 @@ Rect to_device(uint32_t hdc, Rect r) {
      auto *dc = dc_of(hdc);
      if (!dc)
          return {};
@@ -611,7 +662,7 @@ index 13ba56f..615265b 100644
  }
  } // namespace gdi
  namespace {
-@@ -1741,6 +1939,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+@@ -1741,6 +1904,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
  }
  void create_section(X86 *c) {
      Dib d;
@@ -619,7 +670,7 @@ index 13ba56f..615265b 100644
      uint32_t out = arg(c, 3);
      if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
          !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
-@@ -1864,6 +2063,12 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1864,6 +2028,12 @@ void dib_to_device(X86 *c, bool stretch) {
          set_eax(c, 0);
          return;
      }
@@ -632,7 +683,7 @@ index 13ba56f..615265b 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1927,17 +2132,48 @@ void stretch_dibits(X86 *c) {
+@@ -1927,17 +2097,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -901,10 +952,10 @@ index d70b9d1..da27538 100644
 +bool gdi_desktop_input();
  void gdi_composite_windows(uint32_t *argb, int w, int h);
 diff --git a/runtime/gdi32_text.cpp b/runtime/gdi32_text.cpp
-index a6dd8fa..a7cf2c7 100644
+index a6dd8fa..d62f5d6 100644
 --- a/runtime/gdi32_text.cpp
 +++ b/runtime/gdi32_text.cpp
-@@ -25,17 +25,81 @@ int32_t font_scale(uint32_t dc) {
+@@ -25,21 +25,85 @@ int32_t font_scale(uint32_t dc) {
      int64_t height = it == objects().end() ? 16 : int32_t(font_word(it->second, 0));
      return int32_t(std::max<int64_t>(1, std::abs(height) / 16));
  }
@@ -988,14 +1039,98 @@ index a6dd8fa..a7cf2c7 100644
 +}
  // TEXTMETRICW is 60 bytes on x86: eleven DWORDs, four UTF-16
  // characters, five BYTE fields and three bytes of trailing padding.
- void metrics(uint32_t out, int32_t scale, uint32_t weight) {
-@@ -191,14 +255,16 @@ void extent(X86 *c) {
+-void metrics(uint32_t out, int32_t scale, uint32_t weight) {
+-    memset(g_mem + out, 0, 60);
++void metrics(uint32_t out, int32_t scale, uint32_t weight, bool wide = true) {
++    memset(g_mem + out, 0, wide ? 60 : 56);
+     wr32(out, 16u * scale);
+     wr32(out + 4, 13u * scale);
+     wr32(out + 8, 3u * scale);
+@@ -48,12 +112,14 @@ void metrics(uint32_t out, int32_t scale, uint32_t weight) {
+     wr32(out + 28, weight);
+     wr32(out + 36, 96);
+     wr32(out + 40, 96);
+-    wr16(out + 44, 32);
+-    wr16(out + 46, 127);
+-    wr16(out + 48, '?');
+-    wr16(out + 50, ' ');
+-    wr8(out + 55, 0x30);
+-    wr8(out + 56, 0);
++    const uint16_t characters[] = {32, 127, '?', ' '};
++    for (uint32_t i = 0; i < 4; ++i)
++        if (wide)
++            wr16(out + 44 + i * 2, characters[i]);
++        else
++            wr8(out + 44 + i, font_ansi_byte(characters[i]));
++    wr8(out + (wide ? 55 : 51), 0x30);
++    wr8(out + (wide ? 56 : 52), 0);
+ }
+ // All wide text entry points share these bitmap glyphs and DC colour/clip rules.
+ void glyph(uint32_t hdc, int64_t x, int64_t y, uint32_t ch, bool underline = false) {
+@@ -149,10 +215,10 @@ Pen pen_of(uint32_t hdc) {
+     pen.metrics = truetype_metrics(pen.face, pen.scale);
+     return pen;
+ }
+-void get_metrics(X86 *c) {
++void get_metrics_common(X86 *c, bool wide) {
+     auto *dc = dc_of(arg(c, 0));
+     uint32_t out = arg(c, 1);
+-    if (!dc || !out || !gm_valid(out, 60)) {
++    if (!dc || !out || !gm_valid(out, wide ? 60 : 56)) {
+         set_eax(c, 0);
+         return;
+     }
+@@ -160,7 +226,7 @@ void get_metrics(X86 *c) {
+     uint32_t weight = font == objects().end() ? 400 : font_word(font->second, 16);
+     if (!weight)
+         weight = 400;
+-    metrics(out, font_scale(arg(c, 0)), weight);
++    metrics(out, font_scale(arg(c, 0)), weight, wide);
+     const Pen pen = pen_of(arg(c, 0));
+     if (pen.face) {
+         wr32(out, uint32_t(pen.metrics.height));
+@@ -172,17 +238,24 @@ void get_metrics(X86 *c) {
+     }
+     set_eax(c, 1);
+ }
+-void extent(X86 *c) {
++void get_metrics(X86 *c) {
++    get_metrics_common(c, true);
++}
++void get_metrics_ansi(X86 *c) {
++    get_metrics_common(c, false);
++}
++void extent_common(X86 *c, bool wide) {
+     uint32_t dc = arg(c, 0), text = arg(c, 1), n = arg(c, 2), out = arg(c, 3);
+-    if (!dc_of(dc) || !out || !gm_valid(out, 8) || n > GUEST_SIZE / 2 ||
+-        (n && (!text || !gm_valid(text, n * 2)))) {
++    uint32_t stride = wide ? 2 : 1;
++    if (!dc_of(dc) || !out || !gm_valid(out, 8) || n > GUEST_SIZE / stride ||
++        (n && (!text || !gm_valid(text, n * stride)))) {
+         set_eax(c, 0);
+         return;
+     }
+     const Pen pen = pen_of(dc);
+     uint64_t width = 0;
+     for (uint32_t i = 0; i < n; ++i)
+-        width += uint64_t(pen.advance(rd16(text + 2 * i)));
++        width += uint64_t(pen.advance(wide ? rd16(text + 2 * i) : font_ansi_unit(rd8(text + i))));
+     if (width > INT_MAX) {
+         set_eax(c, 0);
+         return;
+@@ -191,14 +264,22 @@ void extent(X86 *c) {
      wr32(out + 4, uint32_t(pen.height()));
      set_eax(c, 1);
  }
 -void text_out(X86 *c) {
 -    uint32_t hdc = arg(c, 0), flags = arg(c, 3), rp = arg(c, 4), text = arg(c, 5), n = arg(c, 6),
 -             dx = arg(c, 7);
++void extent(X86 *c) {
++    extent_common(c, true);
++}
++void extent_ansi(X86 *c) {
++    extent_common(c, false);
++}
 +void text_out(X86 *c, bool wide, bool extended = true) {
 +    uint32_t hdc = arg(c, 0), flags = extended ? arg(c, 3) : 0, rp = extended ? arg(c, 4) : 0,
 +             text = arg(c, extended ? 5 : 3), n = arg(c, extended ? 6 : 4),
@@ -1012,7 +1147,7 @@ index a6dd8fa..a7cf2c7 100644
          set_eax(c, 0);
          return;
      }
-@@ -226,14 +292,28 @@ void text_out(X86 *c) {
+@@ -226,14 +307,28 @@ void text_out(X86 *c) {
      const Pen pen = pen_of(hdc);
      int64_t x = int32_t(arg(c, 1)), y = int32_t(arg(c, 2));
      for (uint32_t i = 0; i < n; ++i) {
@@ -1043,7 +1178,7 @@ index a6dd8fa..a7cf2c7 100644
  // The fonts are kept, so a DC whose font names one of them draws with it. Data
  // the rasterizer cannot read still gets a handle, as it always has here.
  void memory_font(X86 *c) {
-@@ -423,7 +503,13 @@ void register_text() {
+@@ -423,10 +518,19 @@ void register_text() {
          "GDI32.dll", n, a, f                                                                       \
      }
      static const ImportShim shims[] = {G("CreateFontIndirectW", 1, create_font),
@@ -1058,32 +1193,53 @@ index a6dd8fa..a7cf2c7 100644
                                         G("GetTextExtentPoint32W", 4, extent),
                                         G("GetTextExtentPointW", 4, extent),
                                         G("GetTextMetricsW", 2, get_metrics),
++                                       G("GetTextExtentPoint32A", 4, extent_ansi),
++                                       G("GetTextExtentPointA", 4, extent_ansi),
++                                       G("GetTextMetricsA", 2, get_metrics_ansi),
+                                        G("AddFontMemResourceEx", 4, memory_font),
+                                        G("EnumFontsW", 4, enumerate),
+                                        G("EnumFontFamiliesExW", 5, enumerate),
+diff --git a/runtime/imports.cpp b/runtime/imports.cpp
+index ec1d2b1..da96891 100644
+--- a/runtime/imports.cpp
++++ b/runtime/imports.cpp
+@@ -582,6 +582,7 @@ void imports_init() {
+     imports_register(g_kernel32_shims, g_kernel32_shim_count);
+     kernel32_wide_register();
+     oleaut32_register();
++    structured_storage_register();
+     misc_dlls_register();
+     comctl32_register();
+     media_foundation_register();
 diff --git a/runtime/imports.h b/runtime/imports.h
-index d01eb0a..262790b 100644
+index d01eb0a..960cfd9 100644
 --- a/runtime/imports.h
 +++ b/runtime/imports.h
-@@ -70,6 +70,7 @@ ImportCallObserver imports_set_call_observer_get(void);
+@@ -70,6 +70,9 @@ ImportCallObserver imports_set_call_observer_get(void);
  // WINMM tables owned by this runtime. Idempotent; called by loader_load().
  void imports_init();
  void oleaut32_register();
 +void oleaut32_reset();
++void structured_storage_register();
++void structured_storage_reset();
  void misc_dlls_register();
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..fb40e63 100644
+index 529d27d..cc05daf 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
-@@ -533,6 +533,8 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
+@@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
  
  void win32_init(const std::string &game_dir) {
      kernel32_wide_reset();
 +    win32_reset_task_allocator();
 +    oleaut32_reset();
++    structured_storage_reset();
      g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
      g_cur_dir = RECOMP_GUEST_ROOT;
      g_last_error = 0;
-@@ -664,6 +666,15 @@ void k_GlobalReAlloc(X86 *c) {
+@@ -664,6 +667,15 @@ void k_GlobalReAlloc(X86 *c) {
  void k_GlobalFree(X86 *c) {
      set_eax(c, heap_free(arg(c, 0)) ? 0 : arg(c, 0));
  }
@@ -1099,7 +1255,7 @@ index 529d27d..fb40e63 100644
  void k_GlobalLock(X86 *c) {
      set_eax(c, arg(c, 0));
  }
-@@ -935,6 +946,119 @@ void k_CloseHandle(X86 *c) {
+@@ -935,6 +947,119 @@ void k_CloseHandle(X86 *c) {
      set_eax(c, 1);
  }
  
@@ -1219,7 +1375,7 @@ index 529d27d..fb40e63 100644
  void k_FlushFileBuffers(X86 *c) {
      HObj *o = handle_get(arg(c, 0), H_FILE);
      if (o)
-@@ -1059,6 +1183,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
+@@ -1059,6 +1184,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
  std::string module_file_name(uint32_t hmod) {
      std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
      if (hmod && hmod != IMAGE_BASE) {
@@ -1229,7 +1385,7 @@ index 529d27d..fb40e63 100644
          for (const auto &kv : modules())
              if (kv.second == hmod) {
                  path = RECOMP_GUEST_ROOT "\\" + kv.first;
-@@ -1163,7 +1290,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1163,7 +1291,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
              memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
              m->attached = true;
              m->load_refs = 1;
@@ -1239,7 +1395,7 @@ index 529d27d..fb40e63 100644
                  call_dll_entry(c, *m, 0);    // failed attach still receives detach
                  m->attached = false;
                  m->load_refs = 0;
-@@ -1306,6 +1434,43 @@ void win32_reset_command_line_for_test() {
+@@ -1306,6 +1435,43 @@ void win32_reset_command_line_for_test() {
      kernel32_wide_reset_command_line();
      g_cmdline_addr = 0;
  }
@@ -1283,7 +1439,7 @@ index 529d27d..fb40e63 100644
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1483,6 +1648,19 @@ void k_GetSystemDirectoryA(X86 *c) {
+@@ -1483,6 +1649,19 @@ void k_GetSystemDirectoryA(X86 *c) {
      memcpy(g_mem + buf, dir, len + 1);
      set_eax(c, len);
  }
@@ -1303,7 +1459,7 @@ index 529d27d..fb40e63 100644
  
  void k_GetLogicalDriveStringsA(X86 *c) {
      logical_drive_strings(c, false);
-@@ -1753,6 +1931,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1753,6 +1932,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -1311,7 +1467,7 @@ index 529d27d..fb40e63 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -4742,6 +4921,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4742,6 +4922,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -1320,7 +1476,7 @@ index 529d27d..fb40e63 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +4939,12 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4758,6 +4940,12 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
@@ -1333,7 +1489,7 @@ index 529d27d..fb40e63 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +4964,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4777,6 +4965,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
@@ -1342,7 +1498,7 @@ index 529d27d..fb40e63 100644
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4935,6 +5124,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4935,6 +5125,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -2309,8 +2465,674 @@ index d746097..3dc3b0d 100644
  bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names,
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
+diff --git a/runtime/structured_storage.cpp b/runtime/structured_storage.cpp
+new file mode 100644
+index 0000000..23e84ed
+--- /dev/null
++++ b/runtime/structured_storage.cpp
+@@ -0,0 +1,660 @@
++// Transient OLE storage. All interfaces are 32-bit guest objects; host state
++// holds stream bytes and reference ownership under the guest scheduler baton.
++// Named compound files and transactions are deliberately rejected: this is
++// temporary DELETEONRELEASE storage, not a persistent compound-file writer.
++#include "imports.h"
++#include "memory.h"
++#include "win32.h"
++#include <algorithm>
++#include <array>
++#include <limits>
++#include <map>
++#include <memory>
++#include <vector>
++
++namespace {
++constexpr uint32_t INVALID = 0x80030057u, POINTER = 0x80030009u;
++constexpr uint32_t INVALIDFUNCTION = 0x80030001u, NOTFOUND = 0x80030002u;
++constexpr uint32_t DENIED = 0x80030005u, EXISTS = 0x80030050u;
++constexpr uint32_t OOM = 0x80030008u, INVALIDNAME = 0x800300fcu;
++constexpr uint32_t MAX_STREAM = 64u * 1024 * 1024;
++struct Bytes {
++    std::vector<uint8_t> data;
++    std::u16string name;
++    bool live = true;
++};
++struct Storage {
++    uint32_t refs = 1, mode = 0, state = 0;
++    std::array<uint8_t, 16> clsid{};
++    std::map<std::u16string, std::shared_ptr<Bytes>> streams;
++};
++struct Stream {
++    uint32_t refs = 1, mode = 0;
++    uint64_t position = 0;
++    std::shared_ptr<Bytes> bytes;
++};
++std::map<uint32_t, Storage> storages;
++std::map<uint32_t, Stream> streams;
++uint32_t storage_vtable = 0, stream_vtable = 0;
++bool valid(uint32_t p, uint32_t n) {
++    return p && gm_valid(p, n);
++}
++bool optional(uint32_t p, uint32_t n) {
++    return !p || valid(p, n);
++}
++bool output(uint32_t p) {
++    if (!valid(p, 4))
++        return false;
++    wr32(p, 0);
++    return true;
++}
++uint64_t u64(uint32_t low, uint32_t high) {
++    return low | (uint64_t(high) << 32);
++}
++void put64(uint32_t p, uint64_t value) {
++    wr32(p, uint32_t(value));
++    wr32(p + 4, uint32_t(value >> 32));
++}
++bool name_at(uint32_t p, std::u16string &name) {
++    name.clear();
++    for (uint32_t i = 0; i <= 31; ++i) {
++        if (!valid(p, 2))
++            return false;
++        uint16_t ch = rd16(p);
++        if (!ch)
++            return !name.empty();
++        name.push_back(char16_t(ch));
++        p += 2;
++    }
++    return false;
++}
++std::u16string key(std::u16string name) {
++    for (auto &ch : name)
++        if (ch >= u'a' && ch <= u'z')
++            ch -= u'a' - u'A';
++    return name;
++}
++bool supported_mode(uint32_t mode) {
++    // Direct, exclusive streams with READ/WRITE/READWRITE and optional CREATE.
++    return !(mode & ~0x1013u) && (mode & 3) <= 2 && (mode & 0x10);
++}
++Storage *storage(X86 *c) {
++    auto it = storages.find(arg(c, 0));
++    return it == storages.end() ? nullptr : &it->second;
++}
++Stream *stream(X86 *c) {
++    auto it = streams.find(arg(c, 0));
++    return it == streams.end() ? nullptr : &it->second;
++}
++void addref(X86 *c) {
++    if (auto *s = storage(c))
++        set_eax(c, ++s->refs);
++    else if (auto *s = stream(c))
++        set_eax(c, ++s->refs);
++    else
++        set_eax(c, 0);
++}
++void release(X86 *c) {
++    uint32_t obj = arg(c, 0), refs = 0;
++    if (auto *s = storage(c)) {
++        refs = --s->refs;
++        if (!refs) {
++            for (auto &entry : s->streams)
++                entry.second->live = false;
++            storages.erase(obj);
++            heap_free(obj);
++        }
++    } else if (auto *s = stream(c)) {
++        refs = --s->refs;
++        if (!refs) {
++            streams.erase(obj);
++            heap_free(obj);
++        }
++    }
++    set_eax(c, refs);
++}
++void query(X86 *c) {
++    uint32_t iid = arg(c, 1), out = arg(c, 2);
++    if (!output(out)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    static const uint8_t tail[] = {0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46};
++    bool common = valid(iid, 16) && !memcmp(g_mem + iid + 4, tail, sizeof tail);
++    bool supported = common && (rd32(iid) == 0 || (storage(c) && rd32(iid) == 0xbu) ||
++                                (stream(c) && rd32(iid) == 0xcu));
++    static const uint8_t sequential[] = {0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11,
++                                         0xad, 0xe5, 0,    0xaa, 0,    0x44, 0x77, 0x3d};
++    if (stream(c) && valid(iid, 16) && !memcmp(g_mem + iid, sequential, 16))
++        supported = true;
++    if (!supported || (!storage(c) && !stream(c))) {
++        set_eax(c, 0x80004002u);
++        return;
++    }
++    wr32(out, arg(c, 0));
++    addref(c);
++    set_eax(c, 0);
++}
++void unsupported(X86 *c) {
++    set_eax(c, INVALIDFUNCTION);
++}
++void unsupported_storage(X86 *c) {
++    // CreateStorage has the out interface at argument five.
++    uint32_t out = arg(c, 5);
++    set_eax(c, output(out) ? INVALIDFUNCTION : POINTER);
++}
++void unsupported_open_storage(X86 *c) {
++    set_eax(c, output(arg(c, 6)) ? INVALIDFUNCTION : POINTER);
++}
++void enum_elements(X86 *c) {
++    set_eax(c, output(arg(c, 4)) ? INVALIDFUNCTION : POINTER);
++}
++void read(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    uint32_t p = arg(c, 1), count = arg(c, 2), out = arg(c, 3);
++    if (!optional(out, 4) || (count && !valid(p, count))) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (out)
++        wr32(out, 0);
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if ((s->mode & 3) == 1) {
++        set_eax(c, DENIED);
++        return;
++    }
++    size_t n = s->position >= s->bytes->data.size()
++                   ? 0
++                   : size_t(std::min<uint64_t>(count, s->bytes->data.size() - s->position));
++    if (n)
++        memcpy(g_mem + p, s->bytes->data.data() + size_t(s->position), n);
++    s->position += n;
++    if (out)
++        wr32(out, uint32_t(n));
++    set_eax(c, n == count ? 0 : 1); // S_FALSE denotes a short read, including EOF.
++}
++bool resize(Bytes &bytes, uint64_t n) {
++    if (n > MAX_STREAM)
++        return false;
++    try {
++        bytes.data.resize(size_t(n), 0);
++    } catch (const std::bad_alloc &) {
++        return false;
++    }
++    return true;
++}
++void write(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    uint32_t p = arg(c, 1), count = arg(c, 2), out = arg(c, 3);
++    if (!optional(out, 4) || (count && !valid(p, count))) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (out)
++        wr32(out, 0);
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    if (count && (s->position > MAX_STREAM || count > MAX_STREAM - s->position ||
++                  (s->position + count > s->bytes->data.size() &&
++                   !resize(*s->bytes, s->position + count)))) {
++        set_eax(c, OOM);
++        return;
++    }
++    if (count)
++        memcpy(s->bytes->data.data() + size_t(s->position), g_mem + p, count);
++    s->position += count;
++    if (out)
++        wr32(out, count);
++    set_eax(c, 0);
++}
++void seek(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    uint64_t move = u64(arg(c, 1), arg(c, 2)), base = 0, result = 0;
++    uint32_t origin = arg(c, 3), out = arg(c, 4);
++    if (!optional(out, 8)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (!s || origin > 2) {
++        set_eax(c, INVALIDFUNCTION);
++        return;
++    }
++    if (origin == 1)
++        base = s->position;
++    else if (origin == 2)
++        base = s->bytes->data.size();
++    if (move & (uint64_t(1) << 63)) {
++        uint64_t magnitude = ~move + 1;
++        if (magnitude > base) {
++            set_eax(c, INVALIDFUNCTION);
++            return;
++        }
++        result = base - magnitude;
++    } else {
++        if (move > std::numeric_limits<uint64_t>::max() - base) {
++            set_eax(c, INVALIDFUNCTION);
++            return;
++        }
++        result = base + move;
++    }
++    s->position = result;
++    if (out)
++        put64(out, result);
++    set_eax(c, 0);
++}
++void set_size(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    set_eax(c, resize(*s->bytes, u64(arg(c, 1), arg(c, 2))) ? 0 : OOM);
++}
++uint32_t new_stream(const std::shared_ptr<Bytes> &bytes, uint32_t mode, uint64_t position = 0) {
++    uint32_t obj = heap_alloc(4);
++    if (!obj)
++        return 0;
++    wr32(obj, stream_vtable);
++    streams.emplace(obj, Stream{1, mode, position, bytes});
++    return obj;
++}
++void clone(X86 *c) {
++    uint32_t out = arg(c, 1);
++    if (!output(out)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    uint32_t obj = new_stream(s->bytes, s->mode, s->position);
++    wr32(out, obj);
++    set_eax(c, obj ? 0 : OOM);
++}
++void create_open_stream(X86 *c, bool create) {
++    uint32_t out = arg(c, 5), mode = arg(c, create ? 2 : 3);
++    if (!output(out)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    auto *s = storage(c);
++    std::u16string name;
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!name_at(arg(c, 1), name)) {
++        set_eax(c, INVALIDNAME);
++        return;
++    }
++    if (arg(c, create ? 3 : 2) || arg(c, 4) || !supported_mode(mode)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    auto access = [](uint32_t m) { return (m & 3) == 0 ? 1u : (m & 3) == 1 ? 2u : 3u; };
++    if ((create && !(s->mode & 3)) || (access(mode) & ~access(s->mode))) {
++        set_eax(c, DENIED);
++        return;
++    }
++    auto k = key(name);
++    auto it = s->streams.find(k);
++    if (!create && it == s->streams.end()) {
++        set_eax(c, NOTFOUND);
++        return;
++    }
++    if (create && it != s->streams.end() && !(mode & 0x1000)) {
++        set_eax(c, EXISTS);
++        return;
++    }
++    if (it != s->streams.end()) {
++        for (const auto &entry : streams)
++            if (entry.second.bytes == it->second) {
++                set_eax(c, 0x80030020u); // STG_E_SHAREVIOLATION
++                return;
++            }
++    }
++    std::shared_ptr<Bytes> bytes;
++    if (create) {
++        try {
++            bytes = std::make_shared<Bytes>();
++            bytes->name = name;
++        } catch (const std::bad_alloc &) {
++            set_eax(c, OOM);
++            return;
++        }
++    } else
++        bytes = it->second;
++    uint32_t obj = new_stream(bytes, mode & ~0x1000u);
++    if (!obj) {
++        set_eax(c, OOM);
++        return;
++    }
++    if (create)
++        s->streams[k] = bytes;
++    wr32(out, obj);
++    set_eax(c, 0);
++}
++void create_stream(X86 *c) {
++    create_open_stream(c, true);
++}
++void open_stream(X86 *c) {
++    create_open_stream(c, false);
++}
++void destroy_element(X86 *c) {
++    auto *s = storage(c);
++    std::u16string name;
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!name_at(arg(c, 1), name)) {
++        set_eax(c, INVALIDNAME);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    auto it = s->streams.find(key(name));
++    if (it == s->streams.end()) {
++        set_eax(c, NOTFOUND);
++        return;
++    }
++    it->second->live = false;
++    s->streams.erase(it);
++    set_eax(c, 0);
++}
++void rename_element(X86 *c) {
++    auto *s = storage(c);
++    std::u16string from, to;
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!name_at(arg(c, 1), from) || !name_at(arg(c, 2), to)) {
++        set_eax(c, INVALIDNAME);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    auto it = s->streams.find(key(from));
++    if (it == s->streams.end()) {
++        set_eax(c, NOTFOUND);
++        return;
++    }
++    if (s->streams.count(key(to))) {
++        set_eax(c, EXISTS);
++        return;
++    }
++    auto bytes = it->second;
++    bytes->name = to;
++    s->streams.erase(it);
++    s->streams.emplace(key(to), bytes);
++    set_eax(c, 0);
++}
++void commit(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    set_eax(c, (storage(c) || stream(c)) && !(arg(c, 1) & ~0x1fu) ? 0 : INVALID);
++}
++void set_class(X86 *c) {
++    auto *s = storage(c);
++    if (!s || !valid(arg(c, 1), 16)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    memcpy(s->clsid.data(), g_mem + arg(c, 1), 16);
++    set_eax(c, 0);
++}
++void set_state(X86 *c) {
++    auto *s = storage(c);
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if (!(s->mode & 3)) {
++        set_eax(c, DENIED);
++        return;
++    }
++    s->state = (s->state & ~arg(c, 2)) | (arg(c, 1) & arg(c, 2));
++    set_eax(c, 0);
++}
++void stat(X86 *c) {
++    uint32_t out = arg(c, 1), flags = arg(c, 2);
++    if (!valid(out, 72)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (flags > 1) {
++        set_eax(c, INVALID);
++        return;
++    }
++    auto *s = stream(c);
++    auto *root = storage(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    if (!s && !root) {
++        set_eax(c, INVALID);
++        return;
++    }
++    memset(g_mem + out, 0, 72);
++    wr32(out + 4, root ? 1 : 2);
++    wr32(out + 40, root ? root->mode : s->mode);
++    if (root) {
++        memcpy(g_mem + out + 48, root->clsid.data(), 16);
++        wr32(out + 64, root->state);
++    } else {
++        put64(out + 8, s->bytes->data.size());
++        if (!flags) {
++            uint32_t bytes = uint32_t(s->bytes->name.size() + 1) * 2;
++            uint32_t p = win32_task_alloc(bytes, true);
++            if (!p) {
++                set_eax(c, OOM);
++                return;
++            }
++            for (size_t i = 0; i < s->bytes->name.size(); ++i)
++                wr16(p + uint32_t(i) * 2, s->bytes->name[i]);
++            wr32(out, p);
++        }
++    }
++    set_eax(c, 0);
++}
++void copy_to(X86 *c) {
++    auto *s = stream(c);
++    if (s && !s->bytes->live) {
++        set_eax(c, 0x80030102u);
++        return;
++    }
++    uint32_t dest = arg(c, 1), read_out = arg(c, 4), write_out = arg(c, 5);
++    if (!optional(read_out, 8) || !optional(write_out, 8) || !valid(dest, 4) ||
++        !valid(rd32(dest), 5 * 4)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (read_out)
++        put64(read_out, 0);
++    if (write_out)
++        put64(write_out, 0);
++    if (!s) {
++        set_eax(c, INVALID);
++        return;
++    }
++    if ((s->mode & 3) == 1) {
++        set_eax(c, DENIED);
++        return;
++    }
++    uint64_t requested = u64(arg(c, 2), arg(c, 3));
++    uint64_t available =
++        s->position >= s->bytes->data.size() ? 0 : s->bytes->data.size() - s->position;
++    uint64_t remaining = std::min(requested, available), nr = 0, nw = 0;
++    uint32_t buffer = heap_alloc(4096 + 4), result = 0;
++    if (!buffer) {
++        set_eax(c, OOM);
++        return;
++    }
++    // Never hold a vector data pointer across a guest Write callback: it may
++    // write to a clone of this stream and reallocate the shared backing bytes.
++    while (remaining) {
++        uint32_t n = uint32_t(std::min<uint64_t>(remaining, 4096));
++        memcpy(g_mem + buffer, s->bytes->data.data() + size_t(s->position), n);
++        s->position += n;
++        nr += n;
++        remaining -= n;
++        wr32(buffer + 4096, 0);
++        uint32_t args[] = {dest, buffer, n, buffer + 4096};
++        result = guest_call(c, rd32(rd32(dest) + 4 * 4), args, 4);
++        uint32_t written = std::min(rd32(buffer + 4096), n);
++        nw += written;
++        if ((result & 0x80000000u) || written != n) {
++            if (!(result & 0x80000000u))
++                result = 0x8003001du;
++            break;
++        }
++    }
++    heap_free(buffer);
++    if (read_out)
++        put64(read_out, nr);
++    if (write_out)
++        put64(write_out, nw);
++    set_eax(c, result);
++}
++template <size_t N> uint32_t make_vtable(const ImportShim (&methods)[N]) {
++    uint32_t p = heap_alloc(N * 4);
++    if (p)
++        for (uint32_t i = 0; i < N; ++i)
++            wr32(p + i * 4, imports_alloc_trampoline(methods[i].dll, methods[i].name, methods[i].fn,
++                                                     methods[i].argc_stdcall));
++    return p;
++}
++bool ensure_vtables() {
++    static const ImportShim storage_methods[] = {
++        {"ole32.dll", "IStorage::QueryInterface", 3, query},
++        {"ole32.dll", "IStorage::AddRef", 1, addref},
++        {"ole32.dll", "IStorage::Release", 1, release},
++        {"ole32.dll", "IStorage::CreateStream", 6, create_stream},
++        {"ole32.dll", "IStorage::OpenStream", 6, open_stream},
++        {"ole32.dll", "IStorage::CreateStorage", 6, unsupported_storage},
++        {"ole32.dll", "IStorage::OpenStorage", 7, unsupported_open_storage},
++        {"ole32.dll", "IStorage::CopyTo", 5, unsupported},
++        {"ole32.dll", "IStorage::MoveElementTo", 5, unsupported},
++        {"ole32.dll", "IStorage::Commit", 2, commit},
++        {"ole32.dll", "IStorage::Revert", 1, unsupported},
++        {"ole32.dll", "IStorage::EnumElements", 5, enum_elements},
++        {"ole32.dll", "IStorage::DestroyElement", 2, destroy_element},
++        {"ole32.dll", "IStorage::RenameElement", 3, rename_element},
++        {"ole32.dll", "IStorage::SetElementTimes", 5, unsupported},
++        {"ole32.dll", "IStorage::SetClass", 2, set_class},
++        {"ole32.dll", "IStorage::SetStateBits", 3, set_state},
++        {"ole32.dll", "IStorage::Stat", 3, stat}};
++    static const ImportShim stream_methods[] = {
++        {"ole32.dll", "IStream::QueryInterface", 3, query},
++        {"ole32.dll", "IStream::AddRef", 1, addref},
++        {"ole32.dll", "IStream::Release", 1, release},
++        {"ole32.dll", "IStream::Read", 4, read},
++        {"ole32.dll", "IStream::Write", 4, write},
++        {"ole32.dll", "IStream::Seek", 5, seek},
++        {"ole32.dll", "IStream::SetSize", 3, set_size},
++        {"ole32.dll", "IStream::CopyTo", 6, copy_to},
++        {"ole32.dll", "IStream::Commit", 2, commit},
++        {"ole32.dll", "IStream::Revert", 1, unsupported},
++        {"ole32.dll", "IStream::LockRegion", 6, unsupported},
++        {"ole32.dll", "IStream::UnlockRegion", 6, unsupported},
++        {"ole32.dll", "IStream::Stat", 3, stat},
++        {"ole32.dll", "IStream::Clone", 2, clone}};
++    if (!storage_vtable)
++        storage_vtable = make_vtable(storage_methods);
++    if (!stream_vtable)
++        stream_vtable = make_vtable(stream_methods);
++    return storage_vtable && stream_vtable;
++}
++void create_docfile(X86 *c) {
++    uint32_t name = arg(c, 0), mode = arg(c, 1), reserved = arg(c, 2), out = arg(c, 3);
++    if (!output(out)) {
++        set_eax(c, POINTER);
++        return;
++    }
++    if (reserved) {
++        set_eax(c, INVALID);
++        return;
++    }
++    // OLE requests NULL, READWRITE|SHARE_EXCLUSIVE|DELETEONRELEASE.
++    // Reject modes that would promise persistence, transactions or aliases.
++    if (name || !(mode & 0x04000000) || !supported_mode(mode & ~0x04000000u)) {
++        set_eax(c, INVALIDFUNCTION);
++        return;
++    }
++    if (!ensure_vtables()) {
++        set_eax(c, OOM);
++        return;
++    }
++    uint32_t obj = heap_alloc(4);
++    if (!obj) {
++        set_eax(c, OOM);
++        return;
++    }
++    wr32(obj, storage_vtable);
++    Storage root;
++    root.mode = mode;
++    storages.emplace(obj, std::move(root));
++    wr32(out, obj);
++    set_eax(c, 0);
++}
++} // namespace
++
++void structured_storage_register() {
++    static const ImportShim shims[] = {{"ole32.dll", "StgCreateDocfile", 4, create_docfile}};
++    imports_register(shims, sizeof shims / sizeof *shims);
++}
++void structured_storage_reset() {
++    // win32_init follows arena reset; clear host ownership without freeing
++    // addresses that may already have been reused by the fresh guest heap.
++    storages.clear();
++    streams.clear();
++    storage_vtable = stream_vtable = 0;
++}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..9339f77 100644
+index cf0d171..e5a5a4e 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
 @@ -237,6 +237,13 @@ static void test_drawing() {
@@ -2422,7 +3244,39 @@ index cf0d171..9339f77 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -1124,12 +1204,100 @@ static void test_windows_face_substitute() {
+@@ -1070,11 +1150,31 @@ static void test_memory_truetype_font() {
+     check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
+           "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
+           rd32(s + 0x224));
++    memcpy(g_mem + s + 0x210, "AB", 2);
++    check(call_import(&c, "GDI32.dll", "GetTextExtentPointA", {dc, s + 0x210, 2, s + 0x228}) == 1 &&
++              rd32(s + 0x228) == 160 && rd32(s + 0x22c) == 100,
++          "ANSI text extent uses the selected font's proportional advances");
+     memset(g_mem + s + 0x240, 0, 60);
+     call_import(&c, "GDI32.dll", "GetTextMetricsW", {dc, s + 0x240});
+     check(rd32(s + 0x240) == 100 && rd32(s + 0x244) == 80 && rd32(s + 0x248) == 20,
+           "TEXTMETRIC height, ascent and descent come from the font (%u, %u, %u)", rd32(s + 0x240),
+           rd32(s + 0x244), rd32(s + 0x248));
++    memset(g_mem + s + 0x300, 0xcc, 64);
++    check(call_import(&c, "GDI32.dll", "GetTextMetricsA", {dc, s + 0x300}) == 1 &&
++              !memcmp(g_mem + s + 0x240, g_mem + s + 0x300, 44) && rd8(s + 0x300 + 56) == 0xcc &&
++              rd8(s + 0x300 + 51) == rd8(s + 0x240 + 55),
++          "ANSI metrics share font measurements and respect the 56-byte layout");
++    check(call_import(&c, "GDI32.dll", "GetTextExtentPoint32A",
++                      {dc, GUEST_SIZE - 1, 2, s + 0x228}) == 0,
++          "ANSI extent rejects a byte range crossing the guest boundary");
++    wr8(s + 0x210, 0x80);
++    wr16(s + 0x200, 0x20ac);
++    call_import(&c, "GDI32.dll", "GetTextExtentPoint32W", {dc, s + 0x200, 1, s + 0x220});
++    check(call_import(&c, "GDI32.dll", "GetTextExtentPoint32A", {dc, s + 0x210, 1, s + 0x228}) ==
++                  1 &&
++              rd32(s + 0x228) == rd32(s + 0x220),
++          "ANSI extent decodes Windows-1252 characters before measuring");
++    gm_put_wstr(s + 0x200, "AB", 8);
+     call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
+     call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
+     // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
+@@ -1124,12 +1224,100 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -2529,7 +3383,7 @@ index cf0d171..9339f77 100644
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
-@@ -1147,6 +1315,9 @@ int main(int argc, char **argv) {
+@@ -1147,6 +1335,9 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -2540,7 +3394,7 @@ index cf0d171..9339f77 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..e256e45 100644
+index 7016990..d2804f3 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -2565,7 +3419,7 @@ index 7016990..e256e45 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,588 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,717 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -2650,6 +3504,135 @@ index 7016990..e256e45 100644
 +    check(call_import(&c, "OLEAUT32.dll", "OaBuildVersion", {}) ==
 +              call_import(&c, "OLEAUT32.dll", "ord170", {}),
 +          "OLE Automation version resolves by name and ordinal");
++}
++
++static void test_transient_storage() {
++    section("transient OLE storage and streams");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t out = scratch, name = scratch + 64, other = scratch + 160;
++    uint32_t data = scratch + 256, readback = scratch + 320, count = scratch + 384;
++    uint32_t offset = scratch + 400, info = scratch + 432, iid = scratch + 528;
++    gm_put_wstr(name, "Image", 32);
++    gm_put_wstr(other, "Renamed", 32);
++    check(call_import(&c, "ole32.dll", "StgCreateDocfile", {0, 0x04000012, 1, out}) ==
++                  0x80030057u &&
++              rd32(out) == 0,
++          "reserved storage arguments fail and clear the output");
++    check(call_import(&c, "ole32.dll", "StgCreateDocfile", {name, 0x04000012, 0, out}) ==
++                  0x80030001u &&
++              rd32(out) == 0,
++          "named persistent compound files are explicitly unsupported");
++    check(call_import(&c, "ole32.dll", "StgCreateDocfile", {0, 0x04000012, 0, out}) == 0,
++          "temporary DELETEONRELEASE storage supplies a real interface");
++    uint32_t root = rd32(out);
++    if (!root)
++        return;
++    auto method = [&](uint32_t object, uint32_t slot, const std::vector<uint32_t> &args) {
++        uint32_t before = c.r[R_ESP];
++        for (size_t i = args.size(); i-- > 0;) {
++            c.r[R_ESP] -= 4;
++            wr32(c.r[R_ESP], args[i]);
++        }
++        c.r[R_ESP] -= 4;
++        wr32(c.r[R_ESP], g_fake_ret);
++        imports_dispatch(&c, rd32(rd32(object) + slot * 4));
++        check(c.r[R_ESP] == before, "storage/stream slot %u preserves the caller stack", slot);
++        c.r[R_ESP] = before;
++        return c.r[R_EAX];
++    };
++    check(method(root, 3, {root, name, 0x12, 0, 0, out}) == 0,
++          "CreateStream opens a named read/write stream");
++    uint32_t stm = rd32(out);
++    if (!stm) {
++        method(root, 2, {root});
++        return;
++    }
++    memcpy(g_mem + data, "ABCDE", 5);
++    check(method(stm, 4, {stm, data, 5, count}) == 0 && rd32(count) == 5,
++          "Write stores all bytes and reports the count");
++    check(method(stm, 5, {stm, 0xfffffffeu, 0xffffffffu, 2, offset}) == 0 && rd32(offset) == 3 &&
++              rd32(offset + 4) == 0,
++          "Seek accepts a signed 64-bit displacement from the end");
++    memset(g_mem + readback, 0xcc, 8);
++    check(method(stm, 3, {stm, readback, 8, count}) == 1 && rd32(count) == 2 &&
++              !memcmp(g_mem + readback, "DE", 2) && rd8(readback + 2) == 0xcc,
++          "short Read returns S_FALSE without writing beyond available bytes");
++    check(method(stm, 5, {stm, 0xffffffffu, 0xffffffffu, 0, offset}) == 0x80030001u,
++          "Seek refuses a negative absolute position");
++    check(method(stm, 5, {stm, 8, 0, 0, offset}) == 0 && method(stm, 4, {stm, data, 1, count}) == 0,
++          "writing beyond EOF grows the backing stream");
++    check(method(stm, 5, {stm, 5, 0, 0, offset}) == 0 &&
++              method(stm, 3, {stm, readback, 4, count}) == 0 && rd32(readback) == 0x41000000u,
++          "stream growth zero-fills the gap");
++    check(method(stm, 13, {stm, out}) == 0, "Clone creates a separate stream identity");
++    uint32_t cloned = rd32(out);
++    check(cloned != stm && method(cloned, 5, {cloned, 0, 0, 0, offset}) == 0 &&
++              method(cloned, 4, {cloned, data + 1, 1, count}) == 0,
++          "clone writes share data while keeping an independent seek pointer");
++    check(method(stm, 5, {stm, 0, 0, 1, offset}) == 0 && rd32(offset) == 9,
++          "clone seeking does not move the original stream");
++    check(method(stm, 12, {stm, info, 0}) == 0 && rd32(info + 4) == 2 && rd32(info + 8) == 9 &&
++              rd32(info + 40) == 0x12 && gm_wstr(rd32(info)) == "Image",
++          "STATSTG reports x86 offsets and a task-owned stream name");
++    call_import(&c, "ole32.dll", "CoTaskMemFree", {rd32(info)});
++    memset(g_mem + iid, 0, 16);
++    wr32(iid, 0x0c);
++    wr8(iid + 8, 0xc0);
++    wr8(iid + 15, 0x46);
++    check(method(stm, 0, {stm, iid, out}) == 0 && rd32(out) == stm && method(stm, 2, {stm}) == 1,
++          "IStream QueryInterface preserves identity and reference ownership");
++    check(method(stm, 6, {stm, 3, 0}) == 0 && method(stm, 12, {stm, info, 1}) == 0 &&
++              rd32(info + 8) == 3,
++          "SetSize truncates data and STATFLAG_NONAME returns no allocation");
++    check(method(stm, 6, {stm, 0, 1}) == 0x80030008u && method(stm, 12, {stm, info, 1}) == 0 &&
++              rd32(info + 8) == 3,
++          "oversized storage requests fail without changing the data");
++    check(method(root, 4, {root, name, 0, 0x10, 0, out}) == 0x80030020u && rd32(out) == 0,
++          "exclusive stream opens reject a second open identity");
++    check(method(root, 3, {root, other, 0x12, 0, 0, out}) == 0,
++          "create a separate CopyTo destination");
++    uint32_t dest = rd32(out);
++    check(method(stm, 5, {stm, 0, 0, 0, offset}) == 0 &&
++              method(stm, 7, {stm, dest, 10, 0, offset, offset + 8}) == 0 && rd32(offset) == 3 &&
++              rd32(offset + 8) == 3,
++          "CopyTo invokes guest Write and reports actual 64-bit byte counts");
++    check(method(dest, 5, {dest, 0, 0, 0, offset}) == 0 &&
++              method(dest, 3, {dest, readback, 3, count}) == 0 &&
++              !memcmp(g_mem + readback, "BBC", 3),
++          "copied destination contains the original stream bytes");
++    method(dest, 2, {dest});
++    method(root, 12, {root, other});
++    method(cloned, 2, {cloned});
++    method(stm, 2, {stm});
++    check(method(root, 13, {root, name, other}) == 0 &&
++              method(root, 4, {root, other, 0, 0x10, 0, out}) == 0,
++          "RenameElement retains data under the new name");
++    uint32_t reopened = rd32(out);
++    check(method(reopened, 3, {reopened, readback, 3, count}) == 0 &&
++              !memcmp(g_mem + readback, "BBC", 3),
++          "reopened stream starts at zero and sees clone writes");
++    check(method(reopened, 4, {reopened, data, 1, count}) == 0x80030005u,
++          "read-only streams reject writes");
++    check(method(root, 12, {root, other}) == 0 &&
++              method(root, 4, {root, other, 0, 0x10, 0, out}) == 0x80030002u && rd32(out) == 0,
++          "DestroyElement removes the named stream and failed open clears output");
++    check(method(reopened, 3, {reopened, readback, 1, count}) == 0x80030102u,
++          "DestroyElement invalidates existing stream interfaces");
++    check(method(reopened, 2, {reopened}) == 0 && !heap_owns(reopened),
++          "final stream Release frees its guest object");
++    check(method(root, 2, {root}) == 0 && !heap_owns(root),
++          "temporary storage is released with its final reference");
++    call_import(&c, "ole32.dll", "StgCreateDocfile", {0, 0x04000012, 0, out});
++    root = rd32(out);
++    check(method(root, 3, {root, name, 0x12, 0, 0, out}) == 0,
++          "open a stream whose parent lifetime ends first");
++    stm = rd32(out);
++    method(root, 2, {root});
++    check(method(stm, 3, {stm, readback, 1, count}) == 0x80030102u,
++          "final parent Release invalidates its remaining streams, matching Windows");
++    check(method(stm, 2, {stm}) == 0 && !heap_owns(stm),
++          "invalidated streams retain their Release contract");
 +}
 +
 +static void test_module_string_resources() {
@@ -3154,7 +4137,7 @@ index 7016990..e256e45 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1340,27 @@ static void test_loader() {
+@@ -755,18 +1469,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -3185,7 +4168,7 @@ index 7016990..e256e45 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +3838,98 @@ static void test_scheduling(X86 *c) {
+@@ -3244,6 +3967,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -3284,7 +4267,7 @@ index 7016990..e256e45 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -6078,6 +6764,16 @@ static void test_host_mouse_routing() {
+@@ -6078,6 +6893,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -3301,7 +4284,7 @@ index 7016990..e256e45 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +6973,11 @@ static void test_user32_services() {
+@@ -6277,6 +7102,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -3313,7 +4296,7 @@ index 7016990..e256e45 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7006,12 @@ static void test_user32_services() {
+@@ -6305,6 +7135,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -3326,7 +4309,7 @@ index 7016990..e256e45 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7141,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7270,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -3348,12 +4331,13 @@ index 7016990..e256e45 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7409,39 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7538,41 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
 +        test_wide_string_comparison();
 +        test_task_allocator();
++        test_transient_storage();
 +        test_module_string_resources();
 +        test_module_icon_resources();
 +        test_system_button();
@@ -3377,6 +4361,7 @@ index 7016990..e256e45 100644
      test_modules_and_wide();
 +    test_wide_string_comparison();
 +    test_task_allocator();
++    test_transient_storage();
 +    test_module_string_resources();
 +    test_module_icon_resources();
 +    test_system_button();

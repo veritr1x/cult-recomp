@@ -25,7 +25,7 @@ changes without fetching an unpublished submodule commit.
 | Profile | Original executable | Emitted native functions | Dispatch entries |
 | --- | --- | ---: | ---: |
 | `games/cult` | `Cult.exe` | 549 | 606 |
-| `games/cult2` | `Cult2FC.exe` | 586 | 654 |
+| `games/cult2` | `Cult2FC.exe` | 587 | 655 |
 
 Both translation reports contain zero reported instruction failures,
 zero unmodelled instructions and zero unresolved jump-table sites. These
@@ -104,8 +104,10 @@ The smoke host also checks input through the native window-message path:
 ```
 
 Both games render their language screens, including artwork and the Play label,
-and the scripted clicks advance into the intro. The latest input probes fail
-at the shared missing `StgCreateDocfile` service. These are diagnostic builds;
+and the scripted clicks advance into the intro. Temporary OLE storage is now
+implemented. The last completed input probes expose two uncovered VB callbacks
+and a Cult II exception-cleanup entry; these have been audited and translated,
+and the updated executables are being checked. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
 ## Other targets

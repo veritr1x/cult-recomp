@@ -45,7 +45,7 @@ def main():
                                cwd=ROOT, env=env, check=True)
             continue
         else:
-            print(f"{game_id}: experimental build; forms, input, and gameplay are unverified.", flush=True)
+            print(f"{game_id}: experimental build; gameplay and other platforms are unverified.", flush=True)
             command = [sys.executable, str(kit / "tools/build.py"), "--game-dir", str(game),
                        "--target", args.target, "--jobs", str(args.jobs)]
             if args.preset:

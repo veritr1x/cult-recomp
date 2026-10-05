@@ -15,7 +15,7 @@ executables have compiled and been probed. No other platform has been tested.
 - Export native listings using actual VB event/method pointers and direct x86
   control-flow edges: 420 initial entries for Cult, 444 for Cult II.
 - RecompKit emits 549 native C functions / 606 dispatch entries for Cult and
-  586 functions / 654 dispatch entries for Cult II. It reports no instruction
+  587 functions / 655 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
 - Thirteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
@@ -30,18 +30,19 @@ The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult image passes 328 loader/startup contract checks (zero failures,
+The real Cult image passes 402 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
 254 focused translator/profile/build/private-input checks in the latest run.
-The VB5 pass emits 22,379 discovered routines and PictureClip 580.
+The VB5 pass emits 23,039 discovered routines and PictureClip 580.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
 has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
 dispatcher consumes the return address. Unknown indirect jumps now honor the
 interpreter-disable setting. Fixed generated heap callback templates dispatch
 the native interface resolver and reference-owning object getter through ABI
-adapters. The native GDI suite passes 169 checks, including region subtraction,
-clipping that retains holes, anisotropic picture mapping and plain ANSI text.
+adapters. The native GDI suite passes 173 checks, including region subtraction,
+clipping that retains holes, anisotropic picture mapping, plain ANSI text and
+matching ANSI/UTF-16 measurements from the selected font.
 The broader portable suite records 354 passes, 76 skips and three failures:
 this Windows process lacks the privilege to create the symlinks in the setup
 and Linux package fixtures. That complete suite has not passed on this host.
@@ -69,13 +70,18 @@ Offscreen frames have been inspected. Scripted desktop coordinates now route
 through the same native input bridge as host mouse events. English-selection
 and Play clicks advance both games into intro processing. Legacy file/path
 APIs and two additional audited callbacks are translated or implemented.
-Both latest input probes fail at `ole32.dll!StgCreateDocfile`, followed by an
-access violation and an unsupported exception-unwind disposition. The script
-does not complete; gameplay remains unverified. Input evidence is recorded
+The temporary OLE storage service is now implemented with named streams,
+read/write/seek, cloning, copying and ownership. Native Windows conformance
+probes confirm stream invalidation after element deletion and parent release.
+Persistent compound files, transactions and substorages remain unsupported.
+Both last completed input probes successfully use that service, then fail at
+an uncovered VB callback (`0x7402e6a7`) and shutdown callback (`0x7403b4ae`).
+Cult II also exposes exception cleanup at `0x00467a71`. All three entries have
+been audited and translated; updated executable checks are ongoing. The last
+script does not complete; gameplay remains unverified. Input evidence is recorded
 under each profile's private `build/input-probe/` directory.
-Shutdown previously reached an uncovered VB callback at
-`0x7403b4ae`, which still needs a static entry. The remaining work includes
-structured storage, callback coverage, physical input, audio and gameplay.
+The remaining work includes callback coverage, physical input, audio,
+save/load and gameplay verification.
 
 Both games have the same object structure: `GameForm`, `Module1`, `LanSet`,
 and `Intro`. Cult's forms describe 62 controls; Cult II's describe 63.
