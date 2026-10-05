@@ -4004,7 +4004,7 @@ index cf0d171..e5a5a4e 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..0d3d816 100644
+index 7016990..bf760e3 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -4029,7 +4029,7 @@ index 7016990..0d3d816 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,969 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,989 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -4600,6 +4600,26 @@ index 7016990..0d3d816 100644
 +          "multi-selection enumerates the selected item indices");
 +    check(msg(0x185, 0, 0) == 0 && msg(0x187, 0) == 0 && msg(0x187, 1) == 1,
 +          "multi-selection changes an individual item without clearing the others");
++    call_import(&c, "USER32.dll", "DestroyWindow", {list});
++    list = call_import(&c, "USER32.dll", "CreateWindowExA",
++                       {0, s, 0, 0x40000200, 0, 0, 120, 32, parent, 44, 0, 0});
++    for (int i = 0; i < 6; ++i)
++        msg(0x180, 0, s + 256);
++    check(msg(0x195, 40) == 0 && msg(0x198, 3, s + 384) == 0 && rd32(s + 384) == 40 &&
++              rd32(s + 388) == 16 && rd32(s + 392) == 80 && rd32(s + 396) == 32,
++          "multi-column item rectangles follow the requested column width");
++    msg(0x201, 1, (4 << 16) | 85);
++    check(msg(0x188) == 4, "a pointer in the third column selects its first row");
++    msg(0x100, 0x25);
++    check(msg(0x188) == 2, "left arrow moves by one list column");
++    msg(0x100, 0x27);
++    check(msg(0x188) == 4, "right arrow moves by one list column");
++    msg(0xf);
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {list});
++    check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 110, 10}) == 0xd77800 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 30, 10}) == 0xffffff,
++          "column painting highlights only the selected column and row");
++    call_import(&c, "USER32.dll", "ReleaseDC", {list, dc});
 +    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
 +    call_import(&c, "USER32.dll", "UnregisterClassA", {s + 64, 0});
 +}
@@ -4999,7 +5019,7 @@ index 7016990..0d3d816 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1721,27 @@ static void test_loader() {
+@@ -755,18 +1741,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -5030,7 +5050,7 @@ index 7016990..0d3d816 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +4219,98 @@ static void test_scheduling(X86 *c) {
+@@ -3244,6 +4239,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -5129,7 +5149,7 @@ index 7016990..0d3d816 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -6078,6 +7145,16 @@ static void test_host_mouse_routing() {
+@@ -6078,6 +7165,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -5146,7 +5166,7 @@ index 7016990..0d3d816 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7354,11 @@ static void test_user32_services() {
+@@ -6277,6 +7374,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -5158,7 +5178,7 @@ index 7016990..0d3d816 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7387,12 @@ static void test_user32_services() {
+@@ -6305,6 +7407,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -5171,7 +5191,7 @@ index 7016990..0d3d816 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7522,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7542,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -5193,7 +5213,7 @@ index 7016990..0d3d816 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7790,49 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7810,49 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
@@ -5880,7 +5900,7 @@ index 0000000..22e2204
 +}
 +} // namespace user32
 diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
-index ae4313f..dc2c74f 100644
+index ae4313f..3c046fd 100644
 --- a/runtime/user32_internal.h
 +++ b/runtime/user32_internal.h
 @@ -24,6 +24,11 @@ struct WndClass {
@@ -5905,7 +5925,7 @@ index ae4313f..dc2c74f 100644
      uint32_t font = 0; // WM_SETFONT, kept for the system control classes
 +    std::vector<ListItem> list_items;
 +    int32_t list_selection = -1, list_caret = 0, list_top = 0;
-+    uint32_t list_item_height = 16, list_extent = 0;
++    uint32_t list_item_height = 16, list_extent = 0, list_column_width = 150;
 +    uint32_t edit_start = 0, edit_end = 0, edit_limit = 32767, edit_password = 0;
 +    uint16_t edit_margin_left = 2, edit_margin_right = 2;
 +    bool edit_modified = false, edit_readonly = false;
@@ -5928,10 +5948,10 @@ index ae4313f..dc2c74f 100644
  
 diff --git a/runtime/user32_listbox.cpp b/runtime/user32_listbox.cpp
 new file mode 100644
-index 0000000..2f9a7ad
+index 0000000..baf4f68
 --- /dev/null
 +++ b/runtime/user32_listbox.cpp
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,438 @@
 +// The system LISTBOX procedure remains callable through framework subclasses.
 +// Item strings and selection belong to the window, so destruction releases
 +// them. Parent notifications may destroy the control: copy state first and
@@ -5975,6 +5995,9 @@ index 0000000..2f9a7ad
 +        w.list_items[i].selected = int32_t(i) == n;
 +    w.update_pending = true;
 +}
++int32_t column_rows(const Window &w) {
++    return std::max(1, w.h / int32_t(std::max(1u, w.list_item_height)));
++}
 +void paint(X86 *c, uint32_t hwnd, uint32_t into) {
 +    Window *w = find_window(hwnd);
 +    if (!w)
@@ -5984,11 +6007,17 @@ index 0000000..2f9a7ad
 +    const uint32_t font = w->font, parent = w->parent;
 +    const int32_t width = w->w, height = w->h, top = w->list_top;
 +    const uint32_t row_height = std::max(1u, w->list_item_height);
++    const bool columns = (w->style & 0x200) != 0;
++    const int32_t column_width = columns ? int32_t(std::max(1u, w->list_column_width)) : width;
++    const int32_t rows = column_rows(*w);
++    const uint64_t capacity =
++        columns
++            ? uint64_t(rows) * ((uint64_t(std::max(0, width)) + column_width - 1) / column_width)
++            : (uint64_t(std::max(0, height)) + row_height - 1) / row_height;
 +    // Snapshot text and highlight state before WM_CTLCOLORLISTBOX.
 +    std::vector<ListItem> visible;
-+    for (int32_t n = top; n >= 0 && size_t(n) < w->list_items.size() &&
-+                          uint64_t(n - top) * row_height < uint64_t(std::max(0, height));
-+         ++n)
++    for (int32_t n = top;
++         n >= 0 && size_t(n) < w->list_items.size() && uint64_t(n - top) < capacity; ++n)
 +        visible.push_back(w->list_items[size_t(n)]);
 +    uint32_t dc = into ? into : gdi_window_dc(hwnd);
 +    auto *state = gdi::dc_of(dc);
@@ -6007,18 +6036,19 @@ index 0000000..2f9a7ad
 +    uint32_t old_text = state->text_color, old_background = state->bk_color;
 +    gdi::fill(dc, {0, 0, width, height}, background);
 +    for (size_t i = 0; i < visible.size(); ++i) {
-+        int32_t y = int32_t(i * row_height);
++        int32_t x = columns ? int32_t(i / rows) * column_width : 0;
++        int32_t y = int32_t((columns ? i % rows : i) * row_height);
 +        if (visible[i].selected) {
-+            gdi::fill(dc, {0, y, width, int32_t(y + row_height)}, 0xff0078d7u);
++            gdi::fill(dc, {x, y, x + column_width, int32_t(y + row_height)}, 0xff0078d7u);
 +            state->text_color = 0xffffff;
 +        } else
 +            state->text_color = old_text;
 +        uint32_t units = wide_units(visible[i].text);
 +        uint32_t block = heap_alloc(16 + (units + 1) * 2, true);
 +        if (block) {
-+            wr32(block, 2);
++            wr32(block, uint32_t(x + 2));
 +            wr32(block + 4, uint32_t(y));
-+            wr32(block + 8, uint32_t(width));
++            wr32(block + 8, uint32_t(x + column_width));
 +            wr32(block + 12, uint32_t(y + row_height));
 +            gm_put_wstr(block + 16, visible[i].text, units + 1);
 +            gdi::draw_text(dc, block + 16, units, block, 0x820); // SINGLELINE | NOPREFIX
@@ -6218,6 +6248,14 @@ index 0000000..2f9a7ad
 +    case 0x194:
 +        w->list_extent = wp;
 +        break;
++    case 0x195: // LB_SETCOLUMNWIDTH, geometry for LBS_MULTICOLUMN
++        if (!wp || wp > INT32_MAX) {
++            result = ERROR;
++            break;
++        }
++        w->list_column_width = wp;
++        w->update_pending = true;
++        break;
 +    case 0x197:
 +        if (!index(*w, wp)) {
 +            result = ERROR;
@@ -6231,10 +6269,18 @@ index 0000000..2f9a7ad
 +            result = ERROR;
 +            break;
 +        }
-+        int64_t y = (int64_t(wp) - w->list_top) * w->list_item_height;
-+        wr32(lp, 0);
++        int64_t n = int64_t(wp) - w->list_top, x = 0, y = n * w->list_item_height;
++        uint32_t width = uint32_t(w->w);
++        if (w->style & 0x200) {
++            int32_t rows = column_rows(*w);
++            int64_t column = n >= 0 ? n / rows : (n - rows + 1) / rows;
++            x = column * w->list_column_width;
++            y = (n - column * rows) * w->list_item_height;
++            width = w->list_column_width;
++        }
++        wr32(lp, uint32_t(x));
 +        wr32(lp + 4, uint32_t(y));
-+        wr32(lp + 8, uint32_t(w->w));
++        wr32(lp + 8, uint32_t(x + width));
 +        wr32(lp + 12, uint32_t(y + w->list_item_height));
 +        break;
 +    }
@@ -6289,6 +6335,10 @@ index 0000000..2f9a7ad
 +            --n;
 +        else if (wp == 0x28)
 +            ++n;
++        else if (wp == 0x25 && (w->style & 0x200))
++            n -= column_rows(*w);
++        else if (wp == 0x27 && (w->style & 0x200))
++            n += column_rows(*w);
 +        else if (wp == 0x24)
 +            n = 0;
 +        else if (wp == 0x23)
@@ -6309,6 +6359,8 @@ index 0000000..2f9a7ad
 +        if (x < 0 || x >= w->w || y < 0 || y >= w->h)
 +            break;
 +        uint32_t n = uint32_t(w->list_top + y / int32_t(std::max(1u, w->list_item_height)));
++        if (w->style & 0x200)
++            n += uint32_t(x) / std::max(1u, w->list_column_width) * column_rows(*w);
 +        if (!index(*w, n))
 +            break;
 +        bool changed = w->list_selection != int32_t(n);

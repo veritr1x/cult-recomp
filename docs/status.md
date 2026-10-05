@@ -30,10 +30,10 @@ The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult image passes 458 loader/startup contract checks (zero failures,
+The real Cult image passes 463 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
 257 focused translator/profile/build/private-input checks in the latest run.
-Both latest VB5 passes emit 23,154 discovered routines and 25,175 dispatch
+Both latest VB5 passes emit 23,270 discovered routines and 25,280 dispatch
 entries. PictureClip emits 580 routines.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
@@ -94,9 +94,11 @@ PictureClip returns an owned class factory, and OLE memory streams successfully
 read its picture data. GUID strings use the guest task allocator. RPC proxy
 factories and executable/remote activation remain explicitly unavailable.
 Both latest scripts complete, but fail validation at two uncovered VB callbacks
-(`0x74058f3a` and `0x7402edac`) followed by a guest access violation. Cult also
-reports ListBox message `0x0195` as unsupported. The callbacks are audited and
-seeded; regeneration is ongoing. Gameplay remains unverified. Input evidence is recorded
+(`0x74058f3a` and `0x7402edac`) followed by a guest access violation. Both callbacks
+are now translated and native rebuilds are ongoing. Cult's ListBox column-width
+message is implemented with column painting, item rectangles, pointer selection
+and left/right navigation; those control checks pass. Gameplay remains unverified.
+Input evidence is recorded
 under each profile's private `build/input-probe/` directory.
 The remaining work includes callback coverage, physical input, audio,
 save/load and gameplay verification.
