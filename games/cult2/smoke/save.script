@@ -322,4 +322,13 @@ wait 100
 key RETURN up
 wait 3000
 dump restored_save
+key P down
+wait 100
+key P up
+wait 1000
+key RIGHT down
+wait 300
+key RIGHT up
+wait 1000
+dump moved_after_load
 quit

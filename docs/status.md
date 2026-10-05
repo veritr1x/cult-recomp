@@ -2,28 +2,37 @@
 
 The requested playable ports are **not complete**. Both games and four supplied
 libraries have been statically translated with RecompKit and compiled for
-Windows x64. Runtime x86 interpretation is disabled. No other platform has been
-built or tested, and a completed translation does not prove gameplay coverage.
+Windows x64. Both Linux x86_64 diagnostic executables also build and pass
+the bounded movement/save/load path under Ubuntu in WSL. Runtime x86
+interpretation is disabled; a completed translation does not prove gameplay coverage.
 
 ## Current execution evidence
 
 Both diagnostic hosts reach the language selector, intro, main menu and New
 Game. Their opening conversations advance through the native keyboard message
 bridge. Cult's upward movement visibly changes the player position and triggers
-a guard conversation. Cult II's street, cars and NPCs render, but its player
-is not visibly drawn despite verified changes to its saved position.
+a guard conversation. Cult II's street, cars, NPCs and player now render. The
+player visibly moves and appears again after loading a saved game.
 
 Both games write their own save formats (.zsg and .fcg) and return to their
 game scenes through Load without missing imports, unknown transfers, VB errors
 or native faults. The latest completed save/load runs presented 2,055 frames
-for Cult and 2,461 for Cult II. These are bounded tests of particular paths,
+for Cult and 2,510 for Cult II. These are bounded tests of particular paths,
 not complete gameplay verification or original-save compatibility tests.
 Cult's stronger test now verifies movement from (267,60) to (267,90), then
 restoration to (267,60), with fresh saves before and after loading matching
 byte for byte. Cult II's test likewise verifies movement from (407,160) to
 (437,160), then restoration to (407,160), with fresh saves matching byte for
-byte. Its inventory icon disappears visually after loading even though the
-serialized inventory is preserved. These rendering issues remain under investigation.
+byte. Both repeat this test successfully on Linux x86_64 through the desktop
+keyboard gate, with 2,055 frames for Cult and 2,510 for Cult II.
+Cult II's inventory icon is blank immediately after loading and returns
+on the next movement input; the serialized inventory is preserved throughout.
+
+StretchDIBits now converts positive-height source crops from a bottom-up DIB's
+lower-left origin to the bitmap DC's top-left coordinates. Previously Cult II
+selected an empty part of its correctly decoded sprite sheet. Three owned
+bitmap fixtures against Windows confirm the tested crop coordinates. Negative
+source-height crops have not received equivalent conformance verification.
 
 GetDIBits previously copied internal 32-bit rows into a requested 24-bit buffer,
 overwriting a live COM interface in Cult II. The shim now converts the requested
@@ -66,22 +75,50 @@ when the target is a bounded, straight-line ESP/EBP-restoring epilogue ending in
 RET. Argument preparation between a pushed return and jump is permitted.
 
 Windows diagnostic executables and SDL desktop packages build with the verified
-LLVM-MinGW toolchain. Desktop packages still need actual screen/input/audio
-testing. macOS, iOS, Linux, Android and web builds have not been produced.
+LLVM-MinGW toolchain. Both Linux SDL packages also build. Both games complete
+20-second desktop runs on each system with clean exits, Vulkan presentation,
+nonzero 48 kHz stereo device PCM and no presenter faults. Cult presents 21 frames
+and Cult II presents five while waiting at their startup screens. Windows Cult
+II uses DirectSound because the default audio backend found no playback device.
+The tested WSL configuration uses X11, PULSE_LATENCY_MSEC=100 and
+RECOMP_AUDIO_AHEAD=8192. Cult captures 945,429 PCM frames and Cult II 929,104;
+both report zero late or starved audio pulls. These bounded runs do not establish
+audibility, physical input or full desktop gameplay.
+
+Default WSL backends previously hung during startup or audio cleanup. A debugger
+found one cleanup waiting in SDL's PulseAudio thread. A fetched-source patch now
+holds the PulseAudio mainloop lock while updating write accounting; it fixes a
+data race, but its relationship to the hangs is unproven. The launcher therefore
+uses the tested WSL settings. Vulkan acquisition also rebuilds and retries once
+after a recoverable out-of-date swapchain. macOS, iOS, Android and web binaries
+have not been produced; the browser toolchain is being prepared.
+Windows packages now include LLVM-MinGW's shared C++ runtimes and their notices.
+Both packaged executables reach command-line argument handling with a PATH
+containing only Windows system directories. This checks loading dependencies;
+it does not verify SDL display or audio devices.
 
 ## Runtime verification
 
 The latest selected native contracts pass:
 
-- Graphics: **198 checks, zero failures**, including requested-depth bitmap
+- Graphics: **202 checks, zero failures**, including requested-depth bitmap
   downloads with guard bytes, orientation, scan ranges, background erasure,
-  partial update clipping and hidden child DCs.
+  partial update clipping, hidden child DCs and cropped DIB orientation.
 - Loader/startup: **487 checks, zero failures, one resource-related skip**.
 - Audio/DirectX shims: **141,275 checks, zero failures, one explicit skip** for a
   cursor-learning fixture whose required game globals are absent from these profiles.
 - Root input/profile checks: **19 tests pass**, including stale-file rejection
   and serialized-state round-trip verification.
 - Latest selected decoder/translator/configuration/build/root suite: **242 pass**.
+- Desktop keyboard gate: **66 checks, zero failures**, including suppression of
+  duplicate character messages when the guest calls TranslateMessage.
+- Actual MIDI score rendering: **6,272 checks, zero failures** across all 49 SMF
+  assets from both archives, with 12 seconds per score and nonzero mixer output.
+- Selected Windows packaging tests: **7 pass**, including bundled compiler
+  runtimes and exclusion of unrelated files.
+- All desktop packaging tests on Linux: **21 pass**.
+- Windows developer/saved game-path contracts: **11 checks, zero failures**,
+  including recognition of the actual drive-rooted developer executable.
 
 The broader portable suite previously recorded 354 passes, 76 skips and three
 failures because this Windows process lacked symlink-creation privilege in setup
@@ -97,8 +134,10 @@ unavailable. Unsupported operations are not evidence of compatibility.
 PCM WAV effects submit nonzero samples through the shared host audio service.
 Basic MCI sequencer strings decode SMF and use the shared synth, with aliases,
 play/stop/close and millisecond status queries covered by native contracts. The
-smoke host opens no audio device; audible output and the actual game scores are
-unverified.
+smoke host opens no audio device. All 49 original SMF scores now produce notes
+and nonzero PCM through the production MCI scheduler, TinySoundFont synth and
+offline mixer. This verifies the tested first 12 seconds of each asset;
+audible device output and the guest's music triggers remain unverified.
 
 ## Reproduction and remaining work
 
@@ -113,12 +152,29 @@ checkout is untouched. Original assets, generated source, binaries, profiles and
 logs remain ignored.
 
 After building smoke targets, run tools/probe_input.py --game <id> --scenario save
---max-seconds 210 for the current bounded save/load path. Use --trace-windows
+--max-seconds 210 --host-keyboard for the current bounded save/load path through
+the desktop keyboard gate. Use --trace-windows
 to record the window model at frame captures. Evidence is saved under each
 profile's build/<scenario>-probe/. A completed input script does not by itself
 verify movement, rendered pixels, original parity or playability.
 
-Remaining work: fix Cult II's player and inventory rendering,
+Build host_tests with kit/tools/test.py --native-target host_tests --compile-only
+and the appropriate --game-dir and --preset, then run tools/probe_audio.py to
+repeat the actual-score offline render. Logs go under build/audio-probe/.
+
+After building the SDL app, tools/probe_desktop.py --game <id> --seconds 20
+exercises the real desktop presenter and audio initialization with a bounded
+guest close. It records presenter faults and PCM captures separately from
+physical input or audible-output verification. tools/package_player.py assembles
+private local player folders, including the supplied inputs and a launcher,
+under ignored build/player/<platform>/. Windows and Linux folders now exist for
+both games. Windows launchers default to DirectSound and WSL launchers use the
+tested display/audio settings, preserving explicit overrides. Desktop evidence
+is kept under games/<id>/build/desktop-probe/<platform>/. For the WSL probe, set
+SDL_VIDEODRIVER=x11 and PULSE_LATENCY_MSEC=100 and add --audio-ahead 8192.
+These are experimental builds.
+
+Remaining work: investigate Cult II's inventory redraw immediately after loading,
 exercise further interactions/transitions, verify original-save
 compatibility, test physical and touch input plus audible music/effects, and
 build/test each requested platform with its required toolchain and SDK. Full

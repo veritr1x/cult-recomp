@@ -1,26 +1,30 @@
 # Cult / Cult II RecompKit bring-up
 
-**Incomplete: these are experimental static recompilation projects, not playable ports.**
-Both supplied games contain native x86 code compiled with Visual Basic 5.
-Their game code has been translated to C with RecompKit. Native gameplay,
-save compatibility, audio, input and other platforms are not yet verified.
-Both Windows x64 headless executables link with the statically translated VB5
-runtime, PictureClip control, OLE Automation library and ASYCFILT image decoder.
-Both reach their language-selection forms, radio buttons and frames.
-Both have completed bounded language-screen captures without called missing
-imports or unknown transfers. Titles, flags, character artwork and the Play
-label render, and native mouse clicks advance into intro processing.
-Longer probes now reach and render both main menus.
-Both enter their opening scenes and clear their opening conversations. Cult's
-arrow-key input moves the player and triggers a guard conversation. Both write
-save files and return to game scenes through Load. Both tests also verify
-that loading restores the complete serialized state after movement. Audible
-device output, physical input, complete gameplay and other platforms still
-require verification; Cult II's player and inventory still have rendering issues.
-Runtime x86 interpretation is disabled
-for both profiles. A playable run is still outstanding.
-The deadline requested was 6 October 2026; an all-platform playable release
-by that date cannot be promised from the current state.
+**Experimental ports: full gameplay and an all-platform release remain incomplete.**
+Both games contain native x86 code compiled with Visual Basic 5. Their code and
+four supporting libraries are statically translated to C with RecompKit;
+runtime x86 interpretation is disabled.
+
+Windows x64 and Linux x86_64 diagnostic builds reach the language selector,
+intro, main menu and opening scenes. Both games pass fresh movement/save/load
+checks on both systems, including byte-for-byte restoration of serialized state.
+Cult II's player now renders; its inventory icon is temporarily blank after
+loading and returns on the next movement input.
+
+SDL desktop packages build for Windows and Linux. Both games completed bounded
+20-second startups with Vulkan presentation, nonzero device PCM and clean exits.
+Windows Cult II required DirectSound for its audio device. WSL runs use X11,
+100 ms PulseAudio latency and an 8,192-frame audio backlog; both reported zero
+late or starved audio pulls. Default WSL backends previously exposed intermittent
+startup/cleanup hangs, so these results apply to the tested settings. All 49 original
+MIDI scores produce nonzero audio through the offline MCI mixer. Physical input,
+audible output and later desktop gameplay remain unverified.
+
+Private local player folders include the supplied data and Play.cmd or Play.sh.
+Windows launchers select DirectSound unless overridden; Linux launchers apply
+the tested settings under WSL while preserving explicit overrides.
+The deadline requested was 6 October 2026; an all-platform playable release by
+that date cannot be promised from the current state.
 
 RecompKit is pinned as the `kit/` submodule to
 `eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.
@@ -130,8 +134,42 @@ retained menu pixels. Paints clip to accumulated update rectangles, preserving
 the HUD when dialogs close. Hidden helper controls no longer draw into visible
 parent surfaces. Save/load probes use a writable private profile even with
 plugins disabled, and reject stale files or an unchanged test position.
-Both probes submit three WAV effects with nonzero audio samples. These are diagnostic builds;
-gameplay, audio, save/load and other platforms remain unverified.
+Both probes submit three WAV effects with nonzero audio samples. Bounded
+movement and save/load paths pass; full gameplay and audible device output
+remain unverified.
+
+## Linux builds
+
+Both Linux x86_64 movement/save/load probes pass under Ubuntu in WSL.
+Both SDL packages also build; desktop startup and cleanup remain under validation.
+Use a separate Linux virtual environment; a Windows virtual environment cannot
+run the Linux build tools. Install clang, lld, Python venv, pkg-config and SDL's
+development dependencies as listed in `kit/.github/workflows/checks.yml`.
+After importing and translating the inputs above:
+
+```sh
+python3 -m venv build/linux-venv
+build/linux-venv/bin/python -m pip install -r kit/requirements-dev.txt
+export PATH="$PWD/build/linux-venv/bin:$PATH"
+for game in cult cult2; do
+  build/linux-venv/bin/cmake --preset linux -S kit -B "games/$game/build/cmake/linux" \
+    -DRECOMP_GAME_DIR="$PWD/games/$game" -DPOP_BUILD_ROOT="$PWD/games/$game/build" \
+    -DRECOMP_VIDEO=OFF
+  build/linux-venv/bin/python tools/build.py --game "$game" --preset linux --target smoke
+  build/linux-venv/bin/python tools/probe_input.py --game "$game" --scenario save \
+    --max-seconds 210 --host-keyboard
+  build/linux-venv/bin/python tools/build.py --game "$game" --preset linux --target app
+done
+```
+
+Video is disabled in these builds. Diagnostic output goes under each game's
+ignored `build/`; Linux save probes replace the same evidence paths used by
+Windows probes. A successful scripted test does not establish complete gameplay.
+
+Private local player folders can be assembled from the builds and supplied
+inputs with tools/package_player.py --game <id> --platform Windows (or Linux).
+They go under ignored build/player/ and include Play.cmd or Play.sh plus a
+separate writable profile directory. Keep the complete player folder together.
 
 ## Other targets
 
@@ -139,8 +177,8 @@ After the shared runtime gaps are resolved, `tools/build.py --game <id>`
 forwards `--target app`, `android`, `ios` or `web` to RecompKit.
 macOS and iOS require Apple tooling on a Mac; Android requires its SDK/NDK;
 web requires Emscripten and the kit's WebGPU/browser requirements.
-Linux and other CPU architectures need their own native builds and gameplay
-verification. No binaries for these targets have been produced here.
+Other CPU architectures need their own native builds and gameplay verification.
+No macOS, iOS, Android or web binaries have been produced here.
 
 ## Metadata references
 

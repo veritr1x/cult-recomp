@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 import re
 import subprocess
 import time
@@ -56,8 +57,15 @@ def main():
     parser.add_argument("--watch-guest", help="guest watchpoint in hex address[:length] form")
     parser.add_argument("--trace-windows", action="store_true")
     parser.add_argument("--trace-gdi", action="store_true")
+    parser.add_argument("--host-keyboard", action="store_true",
+                        help="Use the desktop host's keyboard delivery in the headless probe")
+    parser.add_argument("--dump-blit-return", type=lambda v: int(v, 16),
+                        help="Snapshot up to 16 bitmap blits returning to this hex address")
+    parser.add_argument("--dump-blit-source-size", help="Filter diagnostic bitmap snapshots by WxH")
     parser.add_argument("--max-seconds", type=float, default=30)
-    parser.add_argument("--toolchain", type=Path, default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64")
+    parser.add_argument("--toolchain", type=Path,
+                        default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64"
+                        if os.name == "nt" else None)
     args = parser.parse_args()
     if args.max_seconds <= 0:
         parser.error("The time bound must be positive")
@@ -71,7 +79,8 @@ def main():
                    RECOMP_NO_MODS="1", RECOMP_SMOKE_DRAWABLE="1024x768",
                    RECOMP_SMOKE_SECONDS=str(args.max_seconds), RECOMP_FRAME_EVERY="30",
                    RECOMP_FRAMES=str(directory / "frames"), RECOMP_LOG="2" if args.verbose else "1")
-        env["PATH"] = str(args.toolchain.resolve() / "bin") + os.pathsep + env.get("PATH", "")
+        if args.toolchain:
+            env["PATH"] = str(args.toolchain.resolve() / "bin") + os.pathsep + env.get("PATH", "")
         if args.trace_abi:
             env["RECOMP_IMPORT_ABI_TRACE"] = "1"
             env["RECOMP_MODULE_ABI_TRACE"] = "1"
@@ -81,7 +90,16 @@ def main():
             env["RECOMP_TRACE_WINDOWS"] = "1"
         if args.trace_gdi:
             env["RECOMP_TRACE_GDI"] = "1"
-        executable = game / "build/recomp/pop_smoke.exe"
+        if args.host_keyboard:
+            env["RECOMP_SMOKE_KEY_GATE"] = "1"
+        if args.dump_blit_return is not None:
+            bitmaps = directory / "bitmaps"
+            bitmaps.mkdir(exist_ok=True)
+            env["RECOMP_GDI_BITMAP_DUMP_RETURN"] = f"{args.dump_blit_return:x}"
+            env["RECOMP_GDI_BITMAP_DUMP_DIR"] = str(bitmaps)
+            if args.dump_blit_source_size:
+                env["RECOMP_GDI_BITMAP_DUMP_SOURCE_SIZE"] = args.dump_blit_source_size
+        executable = game / "build/recomp" / ("pop_smoke.exe" if os.name == "nt" else "pop_smoke")
         script = game / "smoke" / f"{args.scenario}.script"
         timed_out = False
         started = time.time()
@@ -97,8 +115,10 @@ def main():
         evidence = read_evidence(log)
         completed = evidence["script_completed"]
         missing, unknown = evidence["missing_imports_called"], evidence["unknown_transfers"]
-        record = {"returncode": returncode, "timed_out": timed_out, "platform": "Windows x64",
+        host_platform = "Windows x64" if os.name == "nt" else f"{platform.system()} {platform.machine()}"
+        record = {"returncode": returncode, "timed_out": timed_out, "platform": host_platform,
                   **evidence,
+                  "keyboard_path": "desktop host gate" if args.host_keyboard else "scripted key messages",
                   "playability_verified": False, "executable": str(executable),
                   "script": str(script), "scenario": args.scenario,
                   "probe": "native mouse input and " +

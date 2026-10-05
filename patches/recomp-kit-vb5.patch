@@ -1,11 +1,35 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..7b2c6fc 100644
+index 20fdc15..58f2614 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,88 @@
+@@ -2,6 +2,112 @@
  
  ## Unreleased
  
++- Apply an audited patch to fetched SDL PulseAudio source so playback request
++  accounting remains under the callback's lock instead of losing concurrent updates.
++
++- Rebuild and retry an out-of-date Vulkan swapchain once within acquisition,
++  avoiding a presenter fault for a recoverable window resize.
++
++- Resolve absolute Windows drive and UNC developer game paths directly,
++  including packaged diagnostics launched outside a checkout.
++
++- Allow an explicit RECOMP_HOST_SECONDS diagnostic limit to close a desktop
++  run through the guest window message path after exercising the real devices.
++
++- Bundle LLVM-MinGW's shared C++ runtimes and notices in Windows desktop
++  packages so the app does not depend on the compiler's PATH.
++
++- Add an offline MCI score fixture that accepts private SMF files and verifies
++  sequencer note delivery and nonzero synth output without an audio device.
++
++- Preserve host-supplied keyboard characters through TranslateMessage without
++  queuing a duplicate character for the retrieved key message.
++
++- Crop positive-height StretchDIBits source rectangles from the lower-left origin
++  of bottom-up DIBs, preserving top-down source coordinates.
++
 +- Keep the writable profile tier active when RECOMP_NO_MODS disables plugins.
 +- Honor background erase requests during BeginPaint, use the window class brush,
 +  and repaint the exposed parent when a child window is hidden.
@@ -91,8 +115,26 @@ index 20fdc15..7b2c6fc 100644
  - Allow native game adapters to place their own cursors at absolute touch
    positions in logical game pixels. Placement can discard pending DirectInput
    X/Y movement without losing button, wheel or keyboard input.
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 2735492..a656211 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -22,10 +22,12 @@ set(SDL_GPU OFF CACHE BOOL "" FORCE)
+ if(EMSCRIPTEN)
+   set(SDL_PTHREADS ON CACHE BOOL "" FORCE) # the game runs on a thread of its own
+ endif()
++file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" RECOMP_PATCH_PYTHON)
+ FetchContent_Declare(SDL3
+   GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+   GIT_TAG release-3.4.16
+-  GIT_SHALLOW TRUE)
++  GIT_SHALLOW TRUE
++  PATCH_COMMAND "${RECOMP_PATCH_PYTHON}" "${POP_ROOT}/tools/patch_sdl_pulseaudio.py" <SOURCE_DIR>)
+ FetchContent_MakeAvailable(SDL3)
+ 
+ # glslang compiles the Direct3D 9 renderer's GLSL to SPIR-V at run time
 diff --git a/docs/testing.md b/docs/testing.md
-index bb8776b..60714de 100644
+index bb8776b..9ff6c19 100644
 --- a/docs/testing.md
 +++ b/docs/testing.md
 @@ -3,6 +3,14 @@
@@ -110,6 +152,19 @@ index bb8776b..60714de 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
+@@ -63,6 +71,12 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
+ 
+ ## Manual gameplay checks
+ 
++`RECOMP_HOST_SECONDS=10` requests a normal guest close after ten seconds in the
++SDL desktop app, for bounded startup/display/audio diagnostics. Invalid or
++nonpositive values leave the normal run unlimited. Combine this with
++`RECOMP_HOST_AUDIO_CAPTURE=/private/path.wav` to inspect mixer output. A completed
++startup diagnostic does not verify physical input or later gameplay.
++
+ - Start a level, select a person, issue a move order and observe the destination.
+ - Compare Classic/Enhanced and Wide on/off in a window wider than an 800×600 canvas.
+ - Cycle resolution through 640×480, 800×600 and 3840×2160, then resume play.
 diff --git a/dx/dx.cpp b/dx/dx.cpp
 index 72e0d0a..db76bf7 100644
 --- a/dx/dx.cpp
@@ -961,6 +1016,18 @@ index 9246458..e0dd58f 100644
      waves.clear();
  }
  void waveout_frame_pump(X86 *c) {
+diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
+index 58e79fd..3968113 100644
+--- a/host/CMakeLists.txt
++++ b/host/CMakeLists.txt
+@@ -327,6 +327,7 @@ pop_host(host_tests UI_LAYER
+           ${POP_ROOT}/dx/d3d11.cpp ${POP_ROOT}/dx/dxgi.cpp
+           ${POP_ROOT}/dx/d3dcompiler.cpp ${POP_ROOT}/dx/d3dx10.cpp
+           ${POP_ROOT}/dx/d3d9_shader.cpp ${POP_ROOT}/dx/d3d9_shadergen.cpp
++          ${POP_ROOT}/dx/soundlib.cpp
+           ${POP_ROOT}/dx/host_d9_default.cpp
+   LIBS recomp_platform recomp_runtime gpu_backend gpu_fake ${POP_D9_LIBS}
+   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
 diff --git a/host/boot.cpp b/host/boot.cpp
 index f5e287c..69b65d7 100644
 --- a/host/boot.cpp
@@ -1014,6 +1081,45 @@ index a2dba69..d3ee018 100644
      bool load_mods = true;
  
      // An absolute run deadline in seconds, 0 for none. The host is told
+diff --git a/host/game_path.cpp b/host/game_path.cpp
+index 71c41d8..add93cd 100644
+--- a/host/game_path.cpp
++++ b/host/game_path.cpp
+@@ -69,7 +69,12 @@ GamePath game_path_resolve(const char *flag, const char *data_root) {
+     // app runs; a relative spelling is taken from the checkout root.
+     const HostLayout &l = host_layout();
+     std::string candidate = RECOMP_DEVELOPER_EXE;
+-    if (candidate.empty() || candidate[0] != '/')
++    const bool absolute = !candidate.empty() && (candidate[0] == '/' || candidate[0] == '\\' ||
++                                                 (candidate.size() >= 3 && candidate[1] == ':' &&
++                                                  (candidate[2] == '/' || candidate[2] == '\\') &&
++                                                  ((candidate[0] >= 'A' && candidate[0] <= 'Z') ||
++                                                   (candidate[0] >= 'a' && candidate[0] <= 'z'))));
++    if (!absolute)
+         candidate = l.developer ? l.checkout_root + "/" + candidate : std::string();
+     OsStat st;
+     if (!candidate.empty() && os_stat(candidate.c_str(), &st) == 0) {
+diff --git a/host/gpu/vulkan/vulkan_swapchain.cpp b/host/gpu/vulkan/vulkan_swapchain.cpp
+index fe40a38..020f8ea 100644
+--- a/host/gpu/vulkan/vulkan_swapchain.cpp
++++ b/host/gpu/vulkan/vulkan_swapchain.cpp
+@@ -196,7 +196,15 @@ Texture VulkanDevice::acquire(Swapchain s) {
+         vkAcquireNextImageKHR(device_, c.swapchain, UINT64_MAX, sem, VK_NULL_HANDLE, &index);
+     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+         c.needs_recreate = true;
+-        return {};
++        // Resize invalidates a swapchain without acquiring an image or
++        // signalling its semaphore. Rebuild and retry once within acquire,
++        // rather than reporting a presenter fault for a recoverable resize.
++        if (!build_swapchain(*this, c, c.width, c.height))
++            return {};
++        sem = c.acquire_semaphores[c.next_acquire % c.acquire_semaphores.size()];
++        r = vkAcquireNextImageKHR(device_, c.swapchain, UINT64_MAX, sem, VK_NULL_HANDLE, &index);
++        if (r == VK_ERROR_OUT_OF_DATE_KHR)
++            c.needs_recreate = true;
+     }
+     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
+         return {};
 diff --git a/host/input.cpp b/host/input.cpp
 index 091660f..eace5b3 100644
 --- a/host/input.cpp
@@ -1032,7 +1138,7 @@ index 091660f..eace5b3 100644
  }
  
 diff --git a/host/input_gate.cpp b/host/input_gate.cpp
-index 2dd011b..35ed2a5 100644
+index 2dd011b..1ae71d5 100644
 --- a/host/input_gate.cpp
 +++ b/host/input_gate.cpp
 @@ -52,8 +52,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1045,6 +1151,27 @@ index 2dd011b..35ed2a5 100644
          return;
      }
      uint32_t hwnd = host_main_window();
+@@ -72,14 +71,14 @@ void post_key(HostKeyMapping m, bool down, bool sys, bool context, uint32_t char
+     bool was_down = g_guest_key[m.vk];
+     g_guest_key[m.vk] = down;
+     uint32_t lparam = host_key_lparam(m, down, context, down ? was_down : true);
+-    post(down ? (sys ? WM_SYSKEYDOWN_ : WM_KEYDOWN_) : (sys ? WM_SYSKEYUP_ : WM_KEYUP_), m.vk,
+-         lparam);
+     // Printable characters, and the four control characters Win32 also
+     // delivers as WM_CHAR.
+-    if (down && !sys && character &&
+-        ((character >= 0x20 && character < 0x7f) || character == 0x0d || character == 0x1b ||
+-         character == 0x09 || character == 0x08))
+-        post(WM_CHAR_, character, lparam);
++    const bool has_character = down && !sys && character &&
++                               ((character >= 0x20 && character < 0x7f) || character == 0x0d ||
++                                character == 0x1b || character == 0x09 || character == 0x08);
++    host_post_key_message(down ? (sys ? WM_SYSKEYDOWN_ : WM_KEYDOWN_)
++                               : (sys ? WM_SYSKEYUP_ : WM_KEYUP_),
++                          m.vk, lparam, has_character ? character : 0);
+ }
+ 
+ // The modifier bit a scan code contributes: either side counts, which is what
 diff --git a/host/script.cpp b/host/script.cpp
 index 19d5522..8ec9ab7 100644
 --- a/host/script.cpp
@@ -1071,7 +1198,7 @@ index 19d5522..8ec9ab7 100644
      if (view) {
          const uint32_t observed = view();
 diff --git a/host/sdl/main.cpp b/host/sdl/main.cpp
-index d983f15..8fd45a5 100644
+index d983f15..39b2084 100644
 --- a/host/sdl/main.cpp
 +++ b/host/sdl/main.cpp
 @@ -137,8 +137,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1084,8 +1211,27 @@ index d983f15..8fd45a5 100644
          return;
      }
      uint32_t hwnd = host_main_window();
+@@ -1278,6 +1277,18 @@ controls::Screen controls_screen() {
+ 
+ // The housekeeping every turn does once the events are in.
+ void after_events() {
++    // Explicit desktop diagnostics can exercise the real presenter and audio
++    // device, then request the same guest close as a window-manager event.
++    static const double diagnostic_seconds = [] {
++        const char *value = recomp_env("HOST_SECONDS");
++        if (!value || !*value)
++            return 0.0;
++        char *end = nullptr;
++        const double seconds = strtod(value, &end);
++        return end && !*end && isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
++    }();
++    if (diagnostic_seconds > 0.0 && boot_elapsed() >= diagnostic_seconds && !boot_close_requested())
++        boot_request_close("desktop diagnostic time limit");
+     {
+         // Time-based gestures (a long press) fire from the clock, not an event,
+         // and deferred clicks go out once the game's cursor has caught up and
 diff --git a/host/smoke_main.cpp b/host/smoke_main.cpp
-index 9525259..b08b4e0 100644
+index 9525259..c5dcf13 100644
 --- a/host/smoke_main.cpp
 +++ b/host/smoke_main.cpp
 @@ -191,6 +191,8 @@ void pointer_space(uint32_t *w, uint32_t *h) {
@@ -1127,6 +1273,136 @@ index 9525259..b08b4e0 100644
          return;
      }
      uint32_t hwnd = host_main_window();
+@@ -1411,6 +1419,15 @@ void run_step(const HostScriptStep &step) {
+         HostKeyMapping m = host_key_mapping_for_dik(step.dik);
+         if (!m.dik)
+             break;
++        if (recomp_env("SMOKE_KEY_GATE")) {
++            // Exercise the windowed host's delivery, including its character,
++            // without requiring an interactive platform window in this probe.
++            uint32_t character = m.vk >= 'A' && m.vk <= 'Z'                    ? m.vk + ('a' - 'A')
++                                 : (m.vk >= '0' && m.vk <= '9') || m.vk == ' ' ? m.vk
++                                                                               : 0;
++            host_key_event(m.mac, step.down != 0, step.down ? character : 0);
++            break;
++        }
+         if (host_gate_key(m.mac, step.down != 0))
+             break; // consumed
+         host_input_key(m.mac, step.down != 0);
+diff --git a/host/tests/host_tests.cpp b/host/tests/host_tests.cpp
+index 8bc24e5..9bddf5f 100644
+--- a/host/tests/host_tests.cpp
++++ b/host/tests/host_tests.cpp
+@@ -869,6 +869,7 @@ static void test_script_parsing() {
+     CHECK_EQ(steps[11].threshold, 840.0);
+     CHECK(steps[11].at_least);
+     // This host test binary has no mod runtime/game view linked or loaded.
++#if defined(RECOMP_GLOBAL_SIMULATION_TURN_ADDR) && defined(RECOMP_GLOBAL_COMMAND_FRAME_ADDR)
+     const uint32_t saved_turn = rd32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR);
+     const uint32_t saved_command = rd32(RECOMP_GLOBAL_COMMAND_FRAME_ADDR);
+     wr32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR, 820);
+@@ -888,6 +889,9 @@ static void test_script_parsing() {
+     CHECK_EQ(host_script_counter_metric("turn", rd32), 860.0);
+     wr32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR, saved_turn);
+     wr32(RECOMP_GLOBAL_COMMAND_FRAME_ADDR, saved_command);
++#else
++    printf("  [skip] script turn/frame counters: this profile provides no simulation globals\n");
++#endif
+ 
+     // Five malformed forms for each of the five verbs. The categories the
+     // brief names are missing operand, non-integer, unknown enum, extra token
+@@ -7098,6 +7102,9 @@ static void test_input_gate() {
+     uint32_t wp = 0;
+     CHECK(gate_next_message(&ctx, &wp) == 0x0100); // 4. WM_KEYDOWN
+     CHECK(wp == m.vk);
++    // SDL already supplied the character with this key. A normal Win32
++    // message loop must not synthesize another, lower-case copy of it.
++    CHECK(gate_call_import(&ctx, "USER32.dll", "TranslateMessage", {gate_scratch(0x200)}) == 1);
+     CHECK(gate_next_message(&ctx, &wp) == 0x0102); //    and its WM_CHAR
+     CHECK(wp == 'G');
+     CHECK(gate_next_message(&ctx, nullptr) == 0);
+@@ -9758,6 +9765,54 @@ static void test_d3d9_gpu_renderer() {
+     host_d9_texture_drop(DEPTH);
+ }
+ 
++// Render a supplied SMF through the production MCI sequencer and host synth.
++// This uses the real mixer graph in offline mode; it opens no audio device.
++static void test_mci_score(const char *path) {
++    CHECK(path && !strchr(path, '"') && !strchr(path, '\n'));
++    if (!path || strchr(path, '"') || strchr(path, '\n'))
++        return;
++    const std::string host_path(path);
++    const size_t slash = host_path.find_last_of("/\\");
++    const std::string directory = slash == std::string::npos ? "." : host_path.substr(0, slash);
++    const std::string filename =
++        slash == std::string::npos ? host_path : host_path.substr(slash + 1);
++    win32_init(directory);
++    imports_init();
++    soundlib_register();
++    X86 ctx{};
++    loader_init_context(&ctx);
++    const std::string bank = host_resource("general-midi.sf2");
++    CHECK(host_audio_offline_begin(44100.0, 4096));
++    CHECK(host_midi_startup(bank.c_str()));
++    host_set_time_source_pinned(0, 100);
++    const uint32_t text = gate_scratch(0x1000);
++    auto command = [&](const std::string &value) {
++        gm_put_str(text, value.c_str(), 4096);
++        return gate_call_import(&ctx, "WINMM.dll", "mciSendStringA", {text, 0, 0, 0});
++    };
++    const uint32_t opened =
++        command(std::string("open \"") + filename + "\" type sequencer alias score");
++    CHECK_EQ(opened, 0u);
++    float loudest = 0.0f;
++    if (!opened) {
++        CHECK_EQ(command("play score"), 0u);
++        for (unsigned step = 0; step < 120; ++step) {
++            host_pinned_clock_advance();
++            soundlib_frame_pump(&ctx);
++            float peak = 0.0f;
++            CHECK_EQ(host_audio_offline_render(4410, &peak), 4410u);
++            loudest = std::max(loudest, peak);
++        }
++        printf("MCI score %s: notes=%u, 12 seconds rendered, peak=%.6f\n", path,
++               host_midi_notes_started(), loudest);
++        CHECK(host_midi_notes_started() > 0);
++        CHECK(loudest > 0.0f);
++        CHECK_EQ(command("close score"), 0u);
++    }
++    host_clear_time_source();
++    host_audio_offline_end();
++}
++
+ int main(int argc, char **argv) {
+     if (argc == 2 && !strcmp(argv[1], "--dumpat-only")) {
+         test_dumpat_present_and_seal();
+@@ -9818,6 +9873,26 @@ int main(int argc, char **argv) {
+         }
+     }
+     mem_init();
++    if (argc == 2 && !strcmp(argv[1], "--game-path-only")) {
++        test_game_path();
++        printf("game path: %d checks, %d failures\n", g_checks, g_failures);
++        mem_shutdown();
++        return g_failures ? 1 : 0;
++    }
++    if (argc >= 3 && !strcmp(argv[1], "--mci-scores")) {
++        for (int i = 2; i < argc; ++i)
++            test_mci_score(argv[i]);
++        printf("MCI score mix: %d checks, %d failures\n", g_checks, g_failures);
++        mem_shutdown();
++        return g_failures ? 1 : 0;
++    }
++    if (argc == 2 && !strcmp(argv[1], "--key-gate-only")) {
++        test_input_gate();
++        test_input_gate_modifiers();
++        printf("keyboard gate: %d checks, %d failures\n", g_checks, g_failures);
++        mem_shutdown();
++        return g_failures ? 1 : 0;
++    }
+     test_fullscreen_edge_presentation();
+     test_native_frame_metrics();
+     test_wide_cursor_bound();
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
 index 10a5e39..4499b0c 100644
 --- a/runtime/CMakeLists.txt
@@ -1178,7 +1454,7 @@ index 06d5e2b..551fe85 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..ddc3677 100644
+index 13ba56f..b8f4cdf 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
 @@ -6,6 +6,7 @@
@@ -1808,7 +2084,33 @@ index 13ba56f..ddc3677 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1927,17 +2166,48 @@ void stretch_dibits(X86 *c) {
+@@ -1882,11 +2121,23 @@ void dib_to_device(X86 *c, bool stretch) {
+     src.size = count * src.stride;
+     DibDc input(src);
+     if (stretch) {
++        // DIB source coordinates use the storage orientation. Our temporary
++        // bitmap DC uses top-left pixel coordinates, so a positive-height crop
++        // in a bottom-up DIB must be translated from its lower-left origin.
++        const int32_t source_height = int32_t(arg(c, 8));
++        int64_t source_y = int32_t(arg(c, 6));
++        if (!top && source_height > 0)
++            source_y = int64_t(count) - source_y - source_height;
++        if (source_y < INT_MIN || source_y > INT_MAX) {
++            set_eax(c, 0);
++            return;
++        }
+         // Reuse StretchBlt's clipping, ROP and primary routing via a nested
+         // shim call on a fresh stack frame, preserving this import's args.
+         uint32_t before = c->r[R_ESP];
+-        uint32_t values[] = {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), input.dc,
+-                             arg(c, 5), arg(c, 6), arg(c, 7), arg(c, 8), arg(c, 12)};
++        uint32_t values[] = {arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3),
++                             arg(c, 4), input.dc,  arg(c, 5), uint32_t(source_y),
++                             arg(c, 7), arg(c, 8), arg(c, 12)};
+         for (int i = 10; i >= 0; --i) {
+             c->r[R_ESP] -= 4;
+             wr32(c->r[R_ESP], values[i]);
+@@ -1927,17 +2178,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -1863,10 +2165,18 @@ index 13ba56f..ddc3677 100644
      imports_register(shims, sizeof(shims) / sizeof(shims[0]));
  }
 diff --git a/runtime/gdi32_draw.cpp b/runtime/gdi32_draw.cpp
-index c22dc11..277d051 100644
+index c22dc11..f46098c 100644
 --- a/runtime/gdi32_draw.cpp
 +++ b/runtime/gdi32_draw.cpp
-@@ -61,6 +61,25 @@ void pen_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p) {
+@@ -11,6 +11,7 @@
+ #include <climits>
+ #include <cstring>
+ #include <deque>
++#include <cstdlib>
+ using namespace gdi;
+ namespace {
+ int32_t si(X86 *c, int i) {
+@@ -61,6 +62,25 @@ void pen_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p) {
  bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src, int32_t sx,
            int32_t sy, int32_t sw, int32_t sh, uint32_t rop, uint32_t mask = 0, int32_t mx = 0,
            int32_t my = 0) {
@@ -1892,7 +2202,58 @@ index c22dc11..277d051 100644
      int dw, dh, srcw, srch;
      if (!dc_size(dst, &dw, &dh) || !dc_size(src, &srcw, &srch) || !w || !h || !sw || !sh)
          return false;
-@@ -181,6 +200,16 @@ void blit_shim(X86 *c, int mode) {
+@@ -133,6 +153,29 @@ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src
+         }
+     return true;
+ }
++// Optional bounded snapshots of one caller's blits. The caller address and
++// destination directory come from diagnostic options, never game constants.
++void dump_blit_bitmap(uint32_t dc, uint32_t ret, const char *side, unsigned sequence) {
++    const char *directory = recomp_env("GDI_BITMAP_DUMP_DIR");
++    const auto *state = dc_of(dc);
++    GdiImage image;
++    if (!directory || !state || !state->bitmap || !gdi_read_bitmap(state->bitmap, &image) ||
++        image.width > 1024 || image.height > 1024)
++        return;
++    char path[1024];
++    if (snprintf(path, sizeof path, "%s/blit_%08x_%02u_%s.ppm", directory, ret, sequence, side) >=
++        int(sizeof path))
++        return;
++    FILE *file = fopen(path, "wb");
++    if (!file)
++        return;
++    fprintf(file, "P6\n%d %d\n255\n", image.width, image.height);
++    for (uint32_t pixel : image.pixels) {
++        const uint8_t rgb[] = {uint8_t(pixel >> 16), uint8_t(pixel >> 8), uint8_t(pixel)};
++        fwrite(rgb, 1, sizeof rgb, file);
++    }
++    fclose(file);
++}
+ // Window blits target an active DirectDraw primary. Its seam pairs the write
+ // with the existing readback, mutation recorder and present machinery.
+ void blit_shim(X86 *c, int mode) {
+@@ -161,6 +204,20 @@ void blit_shim(X86 *c, int mode) {
+                    mode == 2 ? arg(c, 8) : 0, mode == 2 ? si(c, 9) : 0, mode == 2 ? si(c, 10) : 0);
+     if (primary)
+         ddraw_gdi_end_primary(primary);
++    static unsigned snapshots = 0;
++    if (const char *requested = recomp_env("GDI_BITMAP_DUMP_RETURN")) {
++        char *end = nullptr;
++        const auto selected = strtoul(requested, &end, 16);
++        int filter_w = 0, filter_h = 0, source_w = 0, source_h = 0;
++        const char *size = recomp_env("GDI_BITMAP_DUMP_SOURCE_SIZE");
++        const bool size_matches = !size || (sscanf(size, "%dx%d", &filter_w, &filter_h) == 2 &&
++                                            dc_size(arg(c, 5), &source_w, &source_h) &&
++                                            source_w == filter_w && source_h == filter_h);
++        if (end != requested && !*end && selected == blit_ret && snapshots < 16 && size_matches) {
++            dump_blit_bitmap(arg(c, 5), blit_ret, "source", snapshots);
++            dump_blit_bitmap(dest, blit_ret, "destination", snapshots++);
++        }
++    }
+     // A refused blit is an anomaly worth naming: the guest asked for a draw and
+     // got nothing, and the usual cause is a device context with no bitmap
+     // behind it, which the geometry below makes obvious. RECOMP_TRACE_GDI=1
+@@ -181,6 +238,16 @@ void blit_shim(X86 *c, int mode) {
                      : mode == 2 ? 11
                                  : 8),
               blit_ret);
@@ -1909,7 +2270,7 @@ index c22dc11..277d051 100644
          if (!ok) {
              // Who asked for it. A frame whose locals were never initialised
              // says the routine was entered past its own setup, which the
-@@ -452,6 +481,7 @@ void set_region(X86 *c) {
+@@ -452,6 +519,7 @@ void set_region(X86 *c) {
          return;
      }
      it->second.rect = rectangle(c);
@@ -1917,7 +2278,7 @@ index c22dc11..277d051 100644
      set_eax(c, 1);
  }
  void region_box(X86 *c) {
-@@ -466,7 +496,75 @@ void region_box(X86 *c) {
+@@ -466,7 +534,75 @@ void region_box(X86 *c) {
      wr32(p + 4, r.t);
      wr32(p + 8, r.r);
      wr32(p + 12, r.b);
@@ -1994,7 +2355,7 @@ index c22dc11..277d051 100644
  }
  void frame_region(X86 *c) {
      auto it = objects().find(arg(c, 1));
-@@ -477,6 +575,10 @@ void frame_region(X86 *c) {
+@@ -477,6 +613,10 @@ void frame_region(X86 *c) {
          set_eax(c, 0);
          return;
      }
@@ -2005,7 +2366,7 @@ index c22dc11..277d051 100644
      Rect r = it->second.rect, clip = intersection(r, clip_box(arg(c, 0)));
      for (int64_t y = clip.t; y < clip.b; ++y)
          for (int64_t x = clip.l; x < clip.r; ++x)
-@@ -561,6 +663,15 @@ void line(uint32_t dc, int32_t x, int32_t y, int32_t x1, int32_t y1) {
+@@ -561,6 +701,15 @@ void line(uint32_t dc, int32_t x, int32_t y, int32_t x1, int32_t y1) {
      auto *d = dc_of(dc);
      if (!d)
          return;
@@ -2021,7 +2382,7 @@ index c22dc11..277d051 100644
      auto pen = objects().find(d->pen);
      if (pen == objects().end() || pen->second.style == 5)
          return;
-@@ -632,6 +743,7 @@ void register_draw() {
+@@ -632,6 +781,7 @@ void register_draw() {
                                         G("CreateRectRgn", 4, create_region),
                                         G("SetRectRgn", 5, set_region),
                                         G("GetRgnBox", 2, region_box),
@@ -4754,7 +5115,7 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..2658bca 100644
+index cf0d171..ea1dbc8 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
 @@ -177,6 +177,12 @@ static void test_model() {
@@ -4784,7 +5145,49 @@ index cf0d171..2658bca 100644
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "MoveToEx", {dc, 0, 16, 0});
      check(call_import(&c, "GDI32.dll", "LineTo", {dc, 16, 16}) == 1 &&
-@@ -337,7 +350,7 @@ static void test_dib_rows_and_regions() {
+@@ -330,6 +343,41 @@ static void test_drawing() {
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
++static void test_cropped_stretch_dib_orientation() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00308000;
++    uint32_t hwnd = make_test_window(&c, s, 8, 8),
++             dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++    memset(g_mem + s, 0, 40);
++    wr32(s, 40);
++    wr32(s + 4, 4);
++    wr16(s + 12, 1);
++    wr16(s + 14, 32);
++    const uint32_t rows[] = {0x00ff0000, 0x0000ff00, 0x000000ff, 0x00ffff00};
++    auto upload = [&](bool top, int y) {
++        wr32(s + 8, top ? uint32_t(-4) : 4);
++        for (int row = 0; row < 4; ++row)
++            for (int x = 0; x < 4; ++x)
++                wr32(s + 64 + (row * 4 + x) * 4, rows[top ? row : 3 - row]);
++        return call_import(&c, "GDI32.dll", "StretchDIBits",
++                           {dc, 0, 0, 4, 2, 0, uint32_t(y), 4, 2, s + 64, s, 0, 0xcc0020});
++    };
++    check(upload(false, 0) != 0 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 0}) == 0xff0000 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 1}) == 0x00ffff,
++          "bottom-up cropped DIB starts at its lower-left source origin");
++    check(upload(false, 2) != 0 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 0}) == 0x0000ff &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 1}) == 0x00ff00,
++          "bottom-up source y selects the top rows without reversing their display");
++    check(upload(true, 0) != 0 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 0}) == 0x0000ff &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 0, 1}) == 0x00ff00,
++          "top-down cropped DIB retains its upper-left source origin");
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
+ static void test_dib_rows_and_regions() {
+     X86 c;
+     loader_init_context(&c);
+@@ -337,7 +385,7 @@ static void test_dib_rows_and_regions() {
      uint32_t hwnd = make_test_window(&c, s, 16, 16),
               dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
      uint32_t child = call_import(&c, "USER32.dll", "CreateWindowExW",
@@ -4793,7 +5196,7 @@ index cf0d171..2658bca 100644
      uint32_t child_dc = call_import(&c, "USER32.dll", "GetDC", {child});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 0, 0, 0xff});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 2, 0, 0xff});
-@@ -380,7 +393,14 @@ static void test_dib_rows_and_regions() {
+@@ -380,7 +428,14 @@ static void test_dib_rows_and_regions() {
      uint32_t pen = call_import(&c, "GDI32.dll", "GetStockObject", {8});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "SetPixel", {dc, 11, 11, 0xff});
@@ -4808,7 +5211,7 @@ index cf0d171..2658bca 100644
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 11, 11}) == 0xff,
-@@ -390,6 +410,49 @@ static void test_dib_rows_and_regions() {
+@@ -390,6 +445,49 @@ static void test_dib_rows_and_regions() {
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
@@ -4858,7 +5261,7 @@ index cf0d171..2658bca 100644
  static void test_text() {
      X86 c;
      loader_init_context(&c);
-@@ -415,6 +478,29 @@ static void test_text() {
+@@ -415,6 +513,29 @@ static void test_text() {
                rd32(s + 340) == 16 && rd32(s + 344) == 16 && rd8(s + 375) == 0x30 &&
                rd8(s + 376) == 0,
            "TEXTMETRICW layout and scaled metrics");
@@ -4888,7 +5291,7 @@ index cf0d171..2658bca 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -911,8 +997,16 @@ static void test_clip_children() {
+@@ -911,8 +1032,16 @@ static void test_clip_children() {
      check(pixel(parent, 0, 0) == 0xff && pixel(child, 1, 1) == 0,
            "a WS_CLIPCHILDREN parent paints around its visible child, not over it");
      call_import(&c, "USER32.dll", "ShowWindow", {child, 0});
@@ -4906,7 +5309,7 @@ index cf0d171..2658bca 100644
      call_import(&c, "USER32.dll", "DestroyWindow", {child});
      call_import(&c, "USER32.dll", "DestroyWindow", {parent});
  }
-@@ -1070,11 +1164,31 @@ static void test_memory_truetype_font() {
+@@ -1070,11 +1199,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -4938,7 +5341,7 @@ index cf0d171..2658bca 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,15 +1238,248 @@ static void test_windows_face_substitute() {
+@@ -1124,15 +1273,248 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -5193,10 +5596,11 @@ index cf0d171..2658bca 100644
  int main(int argc, char **argv) {
      mem_init();
      imports_init();
-@@ -1147,6 +1494,11 @@ int main(int argc, char **argv) {
+@@ -1147,6 +1529,12 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
++        test_cropped_stretch_dib_orientation();
 +        test_dib_download_formats();
 +        test_background_erasing();
 +        test_region_boolean_operations();
@@ -6714,7 +7118,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..9a156f0 100644
+index 2ef5486..eed070c 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -6725,7 +7129,30 @@ index 2ef5486..9a156f0 100644
  #include "win32.h"
  #include "../platform/os.h"
  #include "memory.h"
-@@ -147,6 +148,8 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
+@@ -35,6 +36,10 @@ std::deque<Msg> &queue() {
+     static std::deque<Msg> q;
+     return q;
+ }
++std::map<uint32_t, Msg> &retrieved_messages() {
++    static std::map<uint32_t, Msg> messages;
++    return messages;
++}
+ 
+ uint32_t g_next_hwnd = 0x00020004;
+ uint32_t g_next_gdi = 0x00028004;
+@@ -105,6 +110,11 @@ void store_msg(uint32_t p, const Msg &m) {
+     wr32(p + 16, m.time);
+     wr32(p + 20, m.ptx);
+     wr32(p + 24, m.pty);
++    // Keep host metadata outside the guest MSG layout. A bounded cache follows
++    // the buffers returned by PeekMessage/GetMessage, including PM_NOREMOVE.
++    retrieved_messages()[p] = m;
++    if (retrieved_messages().size() > 64)
++        retrieved_messages().erase(retrieved_messages().begin());
+ }
+ 
+ } // namespace user32
+@@ -147,6 +157,8 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
          win->w = w;
          win->h = h;
          win->update_pending = true;
@@ -6734,7 +7161,7 @@ index 2ef5486..9a156f0 100644
      }
  }
  void host_set_key_state(int vk, bool down) {
-@@ -163,6 +166,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
+@@ -163,6 +175,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
      host_set_cursor_pos(int32_t(uint32_t(x) + uint32_t(origin_x)),
                          int32_t(uint32_t(y) + uint32_t(origin_y)));
  }
@@ -6753,7 +7180,7 @@ index 2ef5486..9a156f0 100644
  void host_set_message_waiter(bool (*fn)()) {
      g_message_waiter = fn;
  }
-@@ -198,8 +213,98 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
+@@ -198,8 +222,98 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
      return guest_call(c, proc, hwnd, msg, wparam, lparam);
  }
  
@@ -6852,7 +7279,7 @@ index 2ef5486..9a156f0 100644
  // ---------------------------------------------------------------------------
  // Classes and windows
  // ---------------------------------------------------------------------------
-@@ -358,6 +463,8 @@ void create_window_body(X86 *c, bool wide) {
+@@ -358,6 +472,8 @@ void create_window_body(X86 *c, bool wide) {
              nw->visible = true;
              nw->shown = true;
              nw->update_pending = true;
@@ -6861,7 +7288,7 @@ index 2ef5486..9a156f0 100644
              if (g_window_shown)
                  g_window_shown(hwnd);
          }
-@@ -390,6 +497,8 @@ static void became_visible(Window *w, bool to_top) {
+@@ -390,6 +506,8 @@ static void became_visible(Window *w, bool to_top) {
      if (to_top)
          reorder_window(w->hwnd, 0);
      w->update_pending = true;
@@ -6870,7 +7297,7 @@ index 2ef5486..9a156f0 100644
      if (!w->shown) {
          w->shown = true;
          post_geometry(w->hwnd, w, false, true);
-@@ -427,6 +536,11 @@ void u_ShowWindow(X86 *c) {
+@@ -427,6 +545,11 @@ void u_ShowWindow(X86 *c) {
      set_eax(c, was ? 1 : 0);
      if (!was && w->visible)
          became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
@@ -6882,7 +7309,7 @@ index 2ef5486..9a156f0 100644
  }
  
  // UpdateWindow sends WM_PAINT directly to the window procedure, synchronously,
-@@ -467,7 +581,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -467,7 +590,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
          w->w = cx;
          w->h = cy;
          if (!(flags & 0x0008)) // SWP_NOREDRAW
@@ -6891,7 +7318,7 @@ index 2ef5486..9a156f0 100644
      } // SWP_NOSIZE
      LOGV("SetWindowPos(%08x): %dx%d at %d,%d, flags=%08x changed=%d/%d", w->hwnd, w->w, w->h, w->x,
           w->y, flags, moved, sized);
-@@ -481,6 +595,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -481,6 +604,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
      } else if ((flags & 0x0080) && w->visible) {
          w->visible = false;
          w->style &= ~WS_VISIBLE;
@@ -6903,7 +7330,7 @@ index 2ef5486..9a156f0 100644
      }
      if (moved || sized) {
          // SetWindowPos sends this before returning. VCL updates its cached
-@@ -506,6 +625,21 @@ void u_SetWindowPos(X86 *c) {
+@@ -506,6 +634,21 @@ void u_SetWindowPos(X86 *c) {
                         int32_t(arg(c, 5)), arg(c, 6));
      set_eax(c, 1);
  }
@@ -6925,7 +7352,7 @@ index 2ef5486..9a156f0 100644
  // The bounds a window had before a display took it over, by handle.
  std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
      static std::map<uint32_t, std::array<int32_t, 4>> m;
-@@ -617,12 +751,19 @@ void u_SetRect(X86 *c) {
+@@ -617,12 +760,19 @@ void u_SetRect(X86 *c) {
  // A null hwnd invalidates every window, which is what Windows does.
  void u_InvalidateRect(X86 *c) {
      uint32_t hwnd = arg(c, 0);
@@ -6949,7 +7376,23 @@ index 2ef5486..9a156f0 100644
      set_eax(c, 1);
  }
  
-@@ -969,6 +1110,16 @@ void u_PostMessageA(X86 *c) {
+@@ -911,6 +1061,15 @@ void u_TranslateMessage(X86 *c) {
+         return;
+     }
+     uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
++    const auto previous = retrieved_messages().find(p);
++    if (previous != retrieved_messages().end()) {
++        const Msg &m = previous->second;
++        if (m.text_pretranslated && m.hwnd == rd32(p) && m.message == msg && m.wparam == vk &&
++            m.lparam == lparam && m.time == rd32(p + 16)) {
++            set_eax(c, 1);
++            return;
++        }
++    }
+     if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
+         uint32_t ch = 0;
+         if (vk >= 0x30 && vk <= 0x5a)
+@@ -969,6 +1128,16 @@ void u_PostMessageA(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -6966,7 +7409,7 @@ index 2ef5486..9a156f0 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1142,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -991,9 +1160,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -6990,7 +7433,7 @@ index 2ef5486..9a156f0 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1178,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1015,8 +1196,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -7009,7 +7452,7 @@ index 2ef5486..9a156f0 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1222,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1050,20 +1240,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -7048,7 +7491,7 @@ index 2ef5486..9a156f0 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1408,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1226,8 +1426,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -7060,7 +7503,7 @@ index 2ef5486..9a156f0 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1419,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1235,15 +1437,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -7110,7 +7553,7 @@ index 2ef5486..9a156f0 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,13 +1480,28 @@ void u_DestroyIcon(X86 *c) {
+@@ -1268,13 +1498,28 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -7140,7 +7583,7 @@ index 2ef5486..9a156f0 100644
  void u_SetCursorPos(X86 *c) {
      g_cursor_x = (int32_t)arg(c, 0);
      g_cursor_y = (int32_t)arg(c, 1);
-@@ -1398,6 +1625,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1398,6 +1643,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -7159,7 +7602,7 @@ index 2ef5486..9a156f0 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +1934,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +1952,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -7167,7 +7610,7 @@ index 2ef5486..9a156f0 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1716,15 +1956,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1716,15 +1974,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -7186,7 +7629,7 @@ index 2ef5486..9a156f0 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +1984,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1741,6 +2002,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -7502,7 +7945,7 @@ index 0000000..22e2204
 +}
 +} // namespace user32
 diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
-index ae4313f..4391891 100644
+index ae4313f..b2924be 100644
 --- a/runtime/user32_internal.h
 +++ b/runtime/user32_internal.h
 @@ -24,6 +24,11 @@ struct WndClass {
@@ -7545,7 +7988,15 @@ index ae4313f..4391891 100644
      // SetLayeredWindowAttributes: LWA_COLORKEY (1) makes every pixel of that
      // colour transparent, LWA_ALPHA (2) applies one opacity to the whole
      // window. Both are honoured where the window surfaces are composited.
-@@ -92,8 +110,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
+@@ -57,6 +75,7 @@ struct Window {
+ 
+ struct Msg {
+     uint32_t hwnd, message, wparam, lparam, time, ptx, pty;
++    bool text_pretranslated = false; // host already queued the matching character
+ };
+ 
+ std::map<std::string, WndClass> &classes();
+@@ -92,8 +111,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
  void client_origin(uint32_t hwnd, int32_t *x, int32_t *y);
  void display_rect(uint32_t out);
  void alias_ansi(X86 *c, const char *name);
@@ -8004,10 +8455,18 @@ index 0000000..baf4f68
 +}
 +} // namespace user32
 diff --git a/runtime/user32_static.cpp b/runtime/user32_static.cpp
-index 4b3b30d..d68145d 100644
+index 4b3b30d..35a675b 100644
 --- a/runtime/user32_static.cpp
 +++ b/runtime/user32_static.cpp
-@@ -114,18 +114,235 @@ void static_proc(X86 *c) {
+@@ -5,6 +5,7 @@
+ // falls back to DefWindowProc, and every caption stays blank.
+ #include "memory.h"
+ #include "user32_internal.h"
++#include <algorithm>
+ #include <climits>
+ 
+ namespace user32 {
+@@ -114,18 +115,235 @@ void static_proc(X86 *c) {
          def_window_proc(c, w && w->unicode);
      }
  }
@@ -8254,7 +8713,7 @@ index 4b3b30d..d68145d 100644
  }
  } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
-index dea756d..bc90a6e 100644
+index dea756d..e35be13 100644
 --- a/runtime/user32_vcl.cpp
 +++ b/runtime/user32_vcl.cpp
 @@ -4,6 +4,7 @@
@@ -8532,6 +8991,28 @@ index dea756d..bc90a6e 100644
  // Menus attached to an owned window retire with it; detached menus stay caller-owned.
  void user32::forget_window_services(uint32_t hwnd) {
      Window *w = find_window(hwnd);
+@@ -1502,14 +1627,19 @@ void user32::forget_window_services(uint32_t hwnd) {
+ // is the invisible application window, which does nothing with a keystroke.
+ // Falls back to the active window and then to the main one, so a guest that
+ // never called SetFocus is no worse off than before.
+-void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam) {
++void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam, uint32_t character) {
+     uint32_t hwnd = user32::focus;
+     if (!hwnd || !user32::find_window(hwnd))
+         hwnd = user32::active;
+     if (!hwnd || !user32::find_window(hwnd))
+         hwnd = host_main_window();
+-    if (hwnd)
++    if (hwnd) {
+         host_post_message(hwnd, msg, wparam, lparam);
++        if (msg == 0x0100 && character) {
++            user32::queue().back().text_pretranslated = true;
++            host_post_message(hwnd, 0x0102, character, lparam);
++        }
++    }
+ }
+ 
+ void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y) {
 diff --git a/runtime/user32_wide.cpp b/runtime/user32_wide.cpp
 index ff9b21d..a92baa6 100644
 --- a/runtime/user32_wide.cpp
@@ -8808,7 +9289,7 @@ index ff9b21d..a92baa6 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index b59ecac..980069e 100644
+index b59ecac..ee21e56 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,12 @@
@@ -8836,7 +9317,7 @@ index b59ecac..980069e 100644
  const std::string &win32_game_dir();
  // Guest spelling shared by shell folder APIs; creation uses the write overlay.
  std::string shell_folder_guest_path(uint32_t csidl, bool create);
-@@ -348,6 +359,10 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
+@@ -348,10 +359,16 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
  void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
  // The same routed event, starting in a specific window's client pixels.
  void host_post_client_mouse_message(uint32_t hwnd, uint32_t msg, uint32_t mk, int32_t x, int32_t y);
@@ -8847,6 +9328,13 @@ index b59ecac..980069e 100644
  // Post a keyboard message to the window that has the focus, which is where
  // Windows sends one. Not the same as host_main_window: in a VCL application
  // that is the invisible application window.
+-void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam);
++// An optional host character is queued with KEYDOWN and marked so a guest
++// TranslateMessage on the retrieved MSG does not generate a second character.
++void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam, uint32_t character = 0);
+ uint32_t host_main_window();              // first created top-level HWND, or 0
+ uint32_t host_window_proc(uint32_t hwnd); // guest WNDPROC address, or 0
+ bool host_window_rect(uint32_t hwnd, int32_t *x, int32_t *y, int32_t *w, int32_t *h);
 diff --git a/tests/test_game_config.py b/tests/test_game_config.py
 index 4f45372..e9d41f1 100644
 --- a/tests/test_game_config.py
@@ -8909,6 +9397,88 @@ index e9d2983..7ccaf4b 100644
      lines.append("#define RECOMP_CD_AUDIO_TRACKS %s" % c_string_list(cfg.get("media", {}).get("cd_tracks", [])))
      # Auxiliary modules the loader maps beside the image: {name, developer path, sha256, base, size}.
      lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
+diff --git a/tools/package_desktop.py b/tools/package_desktop.py
+index 355513a..8c8044b 100644
+--- a/tools/package_desktop.py
++++ b/tools/package_desktop.py
+@@ -64,6 +64,19 @@ def stage(app_binary: Path, cfg: dict, out_dir: Path, system=None, build_dir=Non
+         video = any(line.startswith("RECOMP_VIDEO:BOOL=") and
+                     line.partition("=")[2].upper() in {"1", "ON", "YES", "TRUE", "Y"}
+                     for line in cache)
++        if system == "Windows":
++            compiler = next((line.partition("=")[2] for line in cache
++                             if line.partition("=")[0].split(":")[0] == "CMAKE_CXX_COMPILER"), "")
++            if compiler:
++                # LLVM-MinGW's desktop host uses these shared C++ runtimes.
++                # Copy only named runtime files, never unrelated compiler tools.
++                compiler_dir = Path(compiler).parent
++                runtime_files = [compiler_dir / name for name in ("libc++.dll", "libunwind.dll")
++                                 if (compiler_dir / name).is_file()]
++                for runtime_file in runtime_files:
++                    copy(runtime_file, staged / runtime_file.name)
++                if runtime_files:
++                    copy(compiler_dir.parent / "LICENSE.TXT", resources / "llvm-runtime-LICENSE.txt")
+     for component, major in (("avformat", 61), ("avcodec", 61), ("avutil", 59)):
+         name = f"{component}-{major}.dll" if system == "Windows" else f"lib{component}.so.{major}"
+         if video:
+@@ -98,7 +111,7 @@ def stage(app_binary: Path, cfg: dict, out_dir: Path, system=None, build_dir=Non
+         "path, the host tries the configured developer executable, then a\n"
+         "previously saved executable path, then opens a file picker. It does\n"
+         "not search a game/ directory beside this binary.\n\n"
+-        "Keep resources/ and any FFmpeg shared libraries beside the app.\n"
++        "Keep resources/ and any bundled runtime or FFmpeg libraries beside the app.\n"
+         "See resources/ffmpeg-NOTICE.md when video is enabled.\n"
+         "Shaders are embedded in the binary;\n"
+         "any game SoundFont stays in your installation. See LICENSE and NOTICE.\n",
+diff --git a/tools/patch_sdl_pulseaudio.py b/tools/patch_sdl_pulseaudio.py
+new file mode 100644
+index 0000000..9321d1b
+--- /dev/null
++++ b/tools/patch_sdl_pulseaudio.py
+@@ -0,0 +1,43 @@
++"""Apply the bounded write-accounting fix to the pinned fetched SDL source."""
++
++from pathlib import Path
++import sys
++
++
++def main():
++    source = Path(sys.argv[1]) / "src/audio/pulseaudio/SDL_pulseaudio.c"
++    old = b'''    const int rc = PULSEAUDIO_pa_stream_write(h->stream, buffer, buffer_size, NULL, 0LL, PA_SEEK_RELATIVE);
++    PULSEAUDIO_pa_threaded_mainloop_unlock(pulseaudio_threaded_mainloop);
++
++    if (rc < 0) {
++        return false;
++    }
++
++    //SDL_Log("PULSEAUDIO FEED! nbytes=%d", buffer_size);
++    h->bytes_requested -= buffer_size;
++'''
++    new = b'''    const int rc = PULSEAUDIO_pa_stream_write(h->stream, buffer, buffer_size, NULL, 0LL, PA_SEEK_RELATIVE);
++    // The write callback adds requests under this same lock. Keep the debit
++    // inside it too, so a concurrent callback cannot be lost.
++    if (rc >= 0) {
++        h->bytes_requested -= buffer_size;
++    }
++    PULSEAUDIO_pa_threaded_mainloop_unlock(pulseaudio_threaded_mainloop);
++
++    if (rc < 0) {
++        return false;
++    }
++'''
++    contents = source.read_bytes()
++    if b"\r\n" in contents:
++        old = old.replace(b"\n", b"\r\n")
++        new = new.replace(b"\n", b"\r\n")
++    if new in contents:
++        return
++    if contents.count(old) != 1:
++        raise RuntimeError("The pinned SDL PulseAudio source does not match the audited patch")
++    source.write_bytes(contents.replace(old, new))
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/tools/recomp/tests/test_translate_driver.py b/tools/recomp/tests/test_translate_driver.py
 index 71465b7..4a7003b 100644
 --- a/tools/recomp/tests/test_translate_driver.py
@@ -9430,3 +10000,35 @@ index 0aea3f4..a0adf75 100644
          else:
              run([sys.executable, "-m", "pytest", "-q"] + PORTABLE_TESTS, env)
      except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError, TimeoutError) as error:
+diff --git a/tools/tests/test_package_desktop.py b/tools/tests/test_package_desktop.py
+index f94a129..c25c6b6 100644
+--- a/tools/tests/test_package_desktop.py
++++ b/tools/tests/test_package_desktop.py
+@@ -138,6 +138,27 @@ def test_windows_folder(tmp_path):
+     assert ".\\StubRecomp.exe" in readme
+ 
+ 
++def test_windows_package_carries_llvm_runtime_without_build_path(tmp_path):
++    exe = tmp_path / "recomp_app.exe"
++    exe.write_bytes(b"MZ")
++    compiler = tmp_path / "toolchain/bin/clang++.exe"
++    compiler.parent.mkdir(parents=True)
++    for name in ("libc++.dll", "libunwind.dll"):
++        (compiler.parent / name).write_bytes(name.encode())
++    (compiler.parent / "unrelated-private-file").write_bytes(b"private")
++    (compiler.parent.parent / "LICENSE.TXT").write_text("toolchain notices")
++    build_dir = tmp_path / "cmake"
++    build_dir.mkdir()
++    (build_dir / "CMakeCache.txt").write_text(
++        f"CMAKE_CXX_COMPILER:FILEPATH={compiler.as_posix()}\nRECOMP_VIDEO:BOOL=OFF\n")
++    cfg = {"game": {"app_name": "StubRecomp", "name": "Stub Game", "executable": "STUB.EXE"}}
++    out = package_desktop.stage(exe, cfg, tmp_path / "out", system="Windows", build_dir=build_dir)
++    for name in ("libc++.dll", "libunwind.dll"):
++        assert (out / name).read_bytes() == name.encode()
++    assert (out / "resources/llvm-runtime-LICENSE.txt").read_text() == "toolchain notices"
++    assert not (out / "unrelated-private-file").exists()
++
++
+ @pytest.mark.parametrize("system", ["Linux", "Windows"])
+ def test_video_libraries_and_notice(tmp_path, monkeypatch, system):
+     exe = tmp_path / "recomp_app"

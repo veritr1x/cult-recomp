@@ -1,7 +1,7 @@
 """Run the experimental Cult profiles through the pinned RecompKit toolchain.
 
-Translation emits genuine native C. The kit still needs VB5/ActiveX support
-before these profiles can launch a playable game.
+Translation emits native C, including the mapped VB5/ActiveX libraries.
+Completed builds still require platform and gameplay verification.
 """
 
 import argparse
