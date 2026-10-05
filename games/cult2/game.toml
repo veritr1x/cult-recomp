@@ -1,0 +1,50 @@
+# Exact supplied image. Native code translation remains experimental.
+[game]
+id = "cult2"
+name = "Cult II - Federal Crime"
+app_name = "Cult2Recomp"
+bundle_id = "dev.recompkit.cult2"
+executable = "Cult2FC.exe"
+sha256 = "d574e3a84823829f58ef858d4fdf95a855551a96bd8f36a1314571124fdec316"
+image_base = 0x00400000
+entry_point = 0x0040168c
+guest_root = 'C:\Cult2FC'
+developer_exe = "original/install/Cult2FC.exe"
+windows_version = "4.10"
+
+[translate]
+function_alignment = 4
+listings = "analysis/Cult2FC.exe"
+globals = "globals.toml"
+animation_counter = 0
+volatile_reads = []
+entry_points = [0x0040168c, 0x00405384, 0x0040538c, 0x00405391, 0x00405399, 0x0040580c, 0x00405814, 0x00405819, 0x00405821, 0x00405826, 0x0040582e, 0x00405833, 0x0040583b, 0x00405840, 0x00405848, 0x0040584d, 0x00405855, 0x0040585a, 0x00405862, 0x00405867, 0x0040586f, 0x0040587c, 0x00405881, 0x00405889, 0x00407618, 0x0040761d, 0x00407625, 0x0040762a, 0x00407632, 0x00407637, 0x0040763f, 0x00407644, 0x0040764c, 0x00407651, 0x00407659, 0x00407666, 0x00407673, 0x00407680, 0x00407685, 0x0040768d, 0x00407692, 0x0040769a, 0x0040769f, 0x004076a7, 0x004076ac, 0x004076b4, 0x004076b9, 0x004076c1, 0x004076c6, 0x004076ce, 0x004076d3, 0x004076db, 0x004076e8, 0x004076f5, 0x00407702, 0x0040770f, 0x0040771c, 0x00407729, 0x00407736, 0x00407743, 0x00407750, 0x0040775d, 0x0040776a, 0x00407777, 0x00407784, 0x00407789, 0x00407791, 0x0040779e, 0x004077ab, 0x004077b8, 0x004077bd, 0x004077c5, 0x004077d2, 0x004077df, 0x004077ec, 0x004077f9]
+
+[hooks]
+# Zero means no audited native timing or pointer adapter for this game.
+frame_clock_begin = 0
+frame_clock_wait = 0
+frame_clock_wait_clamp = 0
+frame_clock_clamp_deadline = 0
+frame_clock_wait_deadline = 0
+cursor_surface_ptrs = []
+mouse_vtable = 0
+mouse_device_ptr = 0
+mouse_device_right = 0
+camera = 0
+
+[controls]
+default_layout = "keys"
+pad = "mapped"
+
+[controls.mapped]
+left_stick = "cursor"
+dpad = "arrows"
+cross = "mouse_left"
+circle = "key:Escape"
+
+[mods]
+builtin = "none"
+
+[bundle]
+exclude = ["*.DEP", "ReadMe.txt", "Cheats.txt", "*.url", "file_id.diz"]

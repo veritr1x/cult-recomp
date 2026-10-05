@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+games/*/original/
+games/*/analysis/
+games/*/build/
+build/
+*.zip
