@@ -20,6 +20,7 @@ def read_evidence(log):
         "missing_imports_called": re.findall(r"unimplemented import ([^:]+):", log),
         "unknown_transfers": re.findall(r"(?:call to unknown target|unknown (?:call|jump)(?: target)?|no translated function|no block entry for indirect jump)[^\n]*", log),
         "runtime_errors": re.findall(r"Run-time error '(\d+)'", log),
+        "guest_access_violations": re.findall(r"[^\n]*raising an access violation[^\n]*", log),
         "unsupported_control_messages": re.findall(r"(?:ListBox|Edit) message [0-9a-f]+ is unsupported", log),
     }
 
@@ -65,7 +66,7 @@ def main():
                   "script": str(script), "probe": "native mouse input and play-control transition"}
         (directory / "result.json").write_text(json.dumps(record, indent=2) + "\n")
         failed |= returncode != 0 or timed_out or not completed or any(
-            evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "unsupported_control_messages"))
+            evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "guest_access_violations", "unsupported_control_messages"))
         print(f"{game_id}: exit={returncode}, timeout={timed_out}, script_completed={completed}, missing={missing}, unknown={len(unknown)}, runtime_errors={evidence['runtime_errors']}")
         print(f"Evidence: {directory / 'result.json'}")
     return int(failed)

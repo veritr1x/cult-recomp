@@ -107,9 +107,10 @@ The smoke host also checks input through the native window-message path:
 Both games render their language screens, including artwork and the Play label,
 and the scripted clicks advance into the intro. Temporary OLE storage is now
 implemented. System ListBox and Edit controls now initialize. The last completed
-input probes expose a VB timer callback; it is audited and the updated
-executables are being built. Both probes now submit three WAV effects with
-nonzero audio samples. These are diagnostic builds;
+input probes now activate PictureClip's native class factory and load pictures
+through OLE memory streams. They still expose two uncovered VB callbacks during
+control setup; those are audited and their translations are being refreshed.
+Both probes submit three WAV effects with nonzero audio samples. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
 ## Other targets

@@ -1,11 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..21ce344 100644
+index 20fdc15..bd8e9ee 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,61 @@
+@@ -2,6 +2,65 @@
  
  ## Unreleased
  
++- Activate mapped native COM class factories through the shared guest DLL
++  lifecycle. Format task-owned GUID strings and support streams backed by
++  global memory, including clone ownership and backing-handle growth.
++
 +- Play file-backed and in-memory PCM WAV effects through the shared host audio
 +  service, including synchronous waits, asynchronous loops and stop/NOSTOP.
 +
@@ -1589,7 +1593,7 @@ index d01eb0a..960cfd9 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..cc05daf 100644
+index 529d27d..4323874 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
 @@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
@@ -1758,11 +1762,42 @@ index 529d27d..cc05daf 100644
                  call_dll_entry(c, *m, 0);    // failed attach still receives detach
                  m->attached = false;
                  m->load_refs = 0;
-@@ -1306,6 +1435,43 @@ void win32_reset_command_line_for_test() {
+@@ -1195,6 +1324,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
+ void k_LoadLibraryA(X86 *c) {
+     load_library_named(c, gm_str(arg(c, 0)));
+ }
++void k_DisableThreadLibraryCalls(X86 *c) {
++    uint32_t handle = arg(c, 0);
++    const LoaderModule *found = loader_module_containing(handle);
++    LoaderModule *m = found ? loader_module_named(found->name.c_str()) : nullptr;
++    if (!m || m->base != handle || handle == loader_image_base()) {
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    uint32_t opt = handle + rd32(handle + 0x3c) + 24;
++    // Static TLS requires thread notifications. The loader verified these
++    // mapped PE32 headers; do not disable a module that declares a TLS directory.
++    if (rd32(opt + 92) > 9 && (rd32(opt + 96 + 9 * 8) || rd32(opt + 100 + 9 * 8))) {
++        set_last_error(87);
++        set_eax(c, 0);
++        return;
++    }
++    m->thread_notifications_disabled = true;
++    set_eax(c, 1);
++}
+ 
+ void k_LoadLibraryW(X86 *c) {
+     load_library_named(c, gm_wstr(arg(c, 0)));
+@@ -1306,6 +1455,47 @@ void win32_reset_command_line_for_test() {
      kernel32_wide_reset_command_line();
      g_cmdline_addr = 0;
  }
 +
++uint32_t win32_load_library(X86 *c, const std::string &name) {
++    load_library_named(c, name);
++    return c->r[R_EAX];
++}
 +bool win32_attach_static_imports(X86 *c, const LoaderModule &m) {
 +    // The loader has already validated and bound this PE's import directory.
 +    // Marking a DLL attached before descending breaks cyclic dependencies;
@@ -1802,7 +1837,7 @@ index 529d27d..cc05daf 100644
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1483,6 +1649,19 @@ void k_GetSystemDirectoryA(X86 *c) {
+@@ -1483,6 +1673,19 @@ void k_GetSystemDirectoryA(X86 *c) {
      memcpy(g_mem + buf, dir, len + 1);
      set_eax(c, len);
  }
@@ -1822,7 +1857,7 @@ index 529d27d..cc05daf 100644
  
  void k_GetLogicalDriveStringsA(X86 *c) {
      logical_drive_strings(c, false);
-@@ -1753,6 +1932,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1753,6 +1956,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -1830,7 +1865,7 @@ index 529d27d..cc05daf 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -4742,6 +4922,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4742,6 +4946,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -1839,7 +1874,7 @@ index 529d27d..cc05daf 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +4940,12 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4758,6 +4964,12 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
@@ -1852,7 +1887,7 @@ index 529d27d..cc05daf 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +4965,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4777,6 +4989,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
@@ -1861,7 +1896,15 @@ index 529d27d..cc05daf 100644
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4935,6 +5125,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4785,6 +4999,7 @@ const ImportShim g_kernel32_shims[] = {
+     {"KERNEL32.dll", "GetModuleHandleA", 1, k_GetModuleHandleA},
+     {"KERNEL32.dll", "GetModuleHandleW", 1, k_GetModuleHandleW},
+     {"KERNEL32.dll", "LoadLibraryA", 1, k_LoadLibraryA},
++    {"KERNEL32.dll", "DisableThreadLibraryCalls", 1, k_DisableThreadLibraryCalls},
+     {"KERNEL32.dll", "LoadLibraryW", 1, k_LoadLibraryW},
+     {"KERNEL32.dll", "LoadLibraryExW", 3, k_LoadLibraryExW},
+     {"KERNEL32.dll", "FreeLibrary", 1, k_FreeLibrary},
+@@ -4935,6 +5150,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -2048,6 +2091,18 @@ index 75269f0..c747dc0 100644
          uint32_t count = 0;
          for (uint32_t p = g_tls.callbacks; p && rva_ok(p - g_base, 4); p += 4) {
              uint32_t cb = rd32(p);
+diff --git a/runtime/loader.h b/runtime/loader.h
+index bfe336c..1ad8db4 100644
+--- a/runtime/loader.h
++++ b/runtime/loader.h
+@@ -49,6 +49,7 @@ struct LoaderModule {
+     std::string name, path;
+     uint32_t base = 0, size = 0, entry = 0, export_rva = 0, export_size = 0;
+     bool attached = false;
++    bool thread_notifications_disabled = false;
+     uint32_t load_refs = 0;
+     std::vector<uint8_t> initial_image;
+     std::vector<SectionInfo> sections;
 diff --git a/runtime/misc.cpp b/runtime/misc.cpp
 index 3c955d7..170b38e 100644
 --- a/runtime/misc.cpp
@@ -2352,18 +2407,19 @@ index 3c955d7..170b38e 100644
 +    task_free(p);
 +}
 diff --git a/runtime/oleaut32.cpp b/runtime/oleaut32.cpp
-index a9f6b9f..17057aa 100644
+index a9f6b9f..87dafc0 100644
 --- a/runtime/oleaut32.cpp
 +++ b/runtime/oleaut32.cpp
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  // the guest scheduler baton; copies own their strings and array elements.
  #include "imports.h"
  #include "memory.h"
++#include "loader.h"
 +#include "win32.h"
  #include <cmath>
  #include <cstring>
  #include <iomanip>
-@@ -9,38 +10,45 @@
+@@ -9,38 +11,45 @@
  #include <locale>
  #include <sstream>
  #include <array>
@@ -2418,7 +2474,7 @@ index a9f6b9f..17057aa 100644
  }
  uint32_t element_size(uint16_t vt) {
      switch (vt) {
-@@ -94,14 +102,14 @@ uint32_t array_bound_at(uint32_t a, uint32_t left_index) {
+@@ -94,14 +103,14 @@ uint32_t array_bound_at(uint32_t a, uint32_t left_index) {
      return a + 16 + 8 * left_index;
  }
  
@@ -2436,7 +2492,7 @@ index a9f6b9f..17057aa 100644
          return false;
      uint64_t count = 1;
      for (uint32_t i = 0; i < dims; ++i) {
-@@ -110,8 +118,16 @@ bool array_valid(uint32_t a) {
+@@ -110,8 +119,16 @@ bool array_valid(uint32_t a) {
              return false;
      }
      uint64_t bytes = uint64_t(rd32(a + 4)) * count;
@@ -2454,7 +2510,7 @@ index a9f6b9f..17057aa 100644
  }
  
  // Every element, across every dimension.
-@@ -123,7 +139,7 @@ uint32_t array_count(uint32_t a) {
+@@ -123,7 +140,7 @@ uint32_t array_count(uint32_t a) {
  }
  uint32_t variant_clear(uint32_t v);
  uint32_t variant_copy(uint32_t dst, uint32_t src, bool indirect, unsigned depth = 0);
@@ -2463,7 +2519,7 @@ index a9f6b9f..17057aa 100644
      if (!a)
          return 0;
      if (!array_valid(a))
-@@ -141,11 +157,28 @@ uint32_t array_destroy(uint32_t a) {
+@@ -141,11 +158,28 @@ uint32_t array_destroy(uint32_t a) {
                  return hr;
          }
      }
@@ -2475,8 +2531,8 @@ index a9f6b9f..17057aa 100644
 +    if (data && !(rd16(a + 2) & 2))
 +        win32_task_free(data);
 +    wr32(a + 12, 0);
-+    return 0;
-+}
+     return 0;
+ }
 +uint32_t array_destroy_descriptor(uint32_t a) {
 +    if (!a)
 +        return 0;
@@ -2486,8 +2542,8 @@ index a9f6b9f..17057aa 100644
 +        return 0x8002000du;
 +    if (!(rd16(a + 2) & 7))
 +        win32_task_free(a);
-     return 0;
- }
++    return 0;
++}
 +uint32_t array_destroy(uint32_t a) {
 +    uint32_t hr = array_destroy_data(a);
 +    return hr ? hr : array_destroy_descriptor(a);
@@ -2495,7 +2551,7 @@ index a9f6b9f..17057aa 100644
  // `bounds` is the caller's rgsabound, already in OLE's rightmost-first order,
  // and is copied through unchanged.
  uint32_t array_create_dims(uint16_t vt, uint32_t dims, const uint32_t *counts,
-@@ -164,12 +197,12 @@ uint32_t array_create_dims(uint16_t vt, uint32_t dims, const uint32_t *counts,
+@@ -164,12 +198,12 @@ uint32_t array_create_dims(uint16_t vt, uint32_t dims, const uint32_t *counts,
      if (uint64_t(step) * count > GUEST_SIZE)
          return 0;
      uint32_t header = 16 + 8 * dims;
@@ -2511,7 +2567,7 @@ index a9f6b9f..17057aa 100644
          return 0;
      }
      wr16(a, uint16_t(dims));
-@@ -303,6 +336,40 @@ uint32_t variant_copy(uint32_t dst, uint32_t src, bool indirect, unsigned depth)
+@@ -303,6 +337,40 @@ uint32_t variant_copy(uint32_t dst, uint32_t src, bool indirect, unsigned depth)
  void o_SysAllocStringLen(X86 *c) {
      set_eax(c, bstr_alloc(arg(c, 0), arg(c, 1)));
  }
@@ -2552,7 +2608,7 @@ index a9f6b9f..17057aa 100644
  void o_SysFreeString(X86 *c) {
      bstr_free(arg(c, 0));
      set_eax(c, 0);
-@@ -451,6 +518,34 @@ void o_SafeArrayCreate(X86 *c) {
+@@ -451,6 +519,34 @@ void o_SafeArrayCreate(X86 *c) {
      }
      set_eax(c, array_create_dims(uint16_t(arg(c, 0)), dims, counts, lowers));
  }
@@ -2587,7 +2643,7 @@ index a9f6b9f..17057aa 100644
  void array_bound(X86 *c, bool upper) {
      uint32_t a = arg(c, 0), out = arg(c, 2);
      if (!array_valid(a) || !valid(out, 4)) {
-@@ -467,19 +562,37 @@ void array_bound(X86 *c, bool upper) {
+@@ -467,19 +563,37 @@ void array_bound(X86 *c, bool upper) {
      wr32(out, rd32(b + 4) + (upper ? rd32(b) - 1 : 0));
      set_eax(c, 0);
  }
@@ -2630,7 +2686,7 @@ index a9f6b9f..17057aa 100644
  }
  void o_SafeArrayGetLBound(X86 *c) {
      array_bound(c, false);
-@@ -549,21 +662,106 @@ void o_SafeArrayPtrOfIndex(X86 *c) {
+@@ -549,21 +663,216 @@ void o_SafeArrayPtrOfIndex(X86 *c) {
      array_element(c, false, true);
  }
  void o_GetErrorInfo(X86 *c) {
@@ -2664,8 +2720,119 @@ index a9f6b9f..17057aa 100644
 +void o_OaBuildVersion(X86 *c) {
 +    // OLE Automation 2.20, build 4054: the Win9x-era API contract exposed here.
 +    set_eax(c, (20u << 16) | 4054u);
++}
++// Configured auxiliary COM servers are hash-verified and statically translated.
++// Attach them through the guest loader, then ask their exports for class objects;
++// never load a host DLL or consult the host's installation registry.
++void o_CoGetClassObject(X86 *c) {
++    uint32_t clsid = arg(c, 0), context = arg(c, 1), server = arg(c, 2);
++    uint32_t iid = arg(c, 3), out = arg(c, 4);
++    if (!valid(out, 4)) {
++        set_eax(c, 0x80004003u); // E_POINTER
++        return;
++    }
++    wr32(out, 0);
++    if (!valid(clsid, 16) || !valid(iid, 16)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    LOGV("CoGetClassObject: class %08x-%04x-%04x, IID %08x, context %08x", rd32(clsid),
++         rd16(clsid + 4), rd16(clsid + 6), rd32(iid), context);
++    if (server || !(context & 1)) {
++        set_eax(c, 0x80040154u); // No remote or executable COM activation.
++        return;
++    }
++    for (uint32_t i = 0; i < loader_module_count(); ++i) {
++        const LoaderModule *module = loader_module(i);
++        if (!module)
++            continue;
++        uint32_t factory = loader_module_export(*module, "DllGetClassObject");
++        if (!factory)
++            continue;
++        // Guest callbacks can alter loader references. Retain only values,
++        // not a pointer into the loader's module vector, across the call.
++        std::string name = module->name;
++        if (!module->attached && !win32_load_library(c, name)) {
++            wr32(out, 0);
++            set_eax(c, 0x800401f9u); // CO_E_ERRORINDLL
++            return;
++        }
++        wr32(out, 0);
++        uint32_t result = guest_call(c, factory, clsid, iid, out);
++        LOGV("CoGetClassObject: %s returned %08x, interface %08x", name.c_str(), result, rd32(out));
++        if (result == 0) {
++            uint32_t object = rd32(out);
++            if (!valid(object, 4) || !valid(rd32(object), 12)) {
++                wr32(out, 0);
++                set_eax(c, 0x8000ffffu); // E_UNEXPECTED: no usable interface.
++            } else {
++                set_eax(c, 0); // The export transferred an owned reference.
++            }
++            return;
++        }
++        wr32(out, 0);
++        if (result != 0x80040111u && result != 0x80040154u) {
++            set_eax(c, result);
++            return;
++        }
++    }
++    set_eax(c, 0x80040154u); // REGDB_E_CLASSNOTREG, never false success.
  }
- const ImportShim shims[] = {
+-const ImportShim shims[] = {
++// RPC proxy/stub factories are not in-process application classes. Automation
++// delegates unknown CLSIDs here; report unavailable so the next configured
++// native server may handle the class, rather than returning a null success.
++void o_NdrDllGetClassObject(X86 *c) {
++    uint32_t out = arg(c, 2);
++    if (!valid(out, 4)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    wr32(out, 0);
++    LOGV("NdrDllGetClassObject: RPC proxy factories are unavailable");
++    set_eax(c, 0x80040111u); // CLASS_E_CLASSNOTAVAILABLE
++}
++std::string guid_text(uint32_t p) {
++    char text[39];
++    snprintf(text, sizeof text, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", rd32(p),
++             rd16(p + 4), rd16(p + 6), rd8(p + 8), rd8(p + 9), rd8(p + 10), rd8(p + 11),
++             rd8(p + 12), rd8(p + 13), rd8(p + 14), rd8(p + 15));
++    return text;
++}
++void o_StringFromCLSID(X86 *c) {
++    uint32_t guid = arg(c, 0), out = arg(c, 1);
++    if (!valid(out, 4)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    wr32(out, 0);
++    if (!valid(guid, 16)) {
++        set_eax(c, INVALID);
++        return;
++    }
++    uint32_t text = win32_task_alloc(78);
++    if (!text) {
++        set_eax(c, OOM);
++        return;
++    }
++    gm_put_wstr(text, guid_text(guid), 39);
++    wr32(out, text);
++    set_eax(c, 0);
++}
++void o_StringFromGUID2(X86 *c) {
++    uint32_t guid = arg(c, 0), text = arg(c, 1);
++    if (!valid(guid, 16) || int32_t(arg(c, 2)) < 39 || !valid(text, 78)) {
++        set_eax(c, 0);
++        return;
++    }
++    gm_put_wstr(text, guid_text(guid), 39);
++    set_eax(c, 39); // Includes the UTF-16 terminator.
++}
++const ImportShim shims[] = {{"ole32.dll", "CoGetClassObject", 5, o_CoGetClassObject},
++                            {"RPCRT4.dll", "NdrDllGetClassObject", 6, o_NdrDllGetClassObject},
++                            {"ole32.dll", "StringFromCLSID", 2, o_StringFromCLSID},
++                            {"ole32.dll", "StringFromIID", 2, o_StringFromCLSID},
++                            {"ole32.dll", "StringFromGUID2", 3, o_StringFromGUID2},
  #define O(name, n) {"OLEAUT32.dll", #name, n, o_##name}
 -    O(VariantInit, 1),           O(VariantClear, 1),        O(VariantCopy, 2),
 -    O(VariantCopyInd, 2),        O(VariantChangeType, 4),   O(SysAllocStringLen, 2),
@@ -2673,68 +2840,68 @@ index a9f6b9f..17057aa 100644
 -    O(SafeArrayGetLBound, 3),    O(SafeArrayGetUBound, 3),  O(SafeArrayGetElement, 3),
 -    O(SafeArrayPutElement, 3),   O(SafeArrayPtrOfIndex, 3), O(SafeArrayAccessData, 2),
 -    O(SafeArrayUnaccessData, 1), O(GetErrorInfo, 2)
-+    O(VariantInit, 1),
-+    O(VariantClear, 1),
-+    O(VariantCopy, 2),
-+    O(VariantCopyInd, 2),
-+    O(VariantChangeType, 4),
-+    O(SysAllocStringLen, 2),
-+    O(SysReAllocStringLen, 3),
-+    O(SysFreeString, 1),
-+    O(SafeArrayCreate, 3),
-+    O(SafeArrayGetLBound, 3),
-+    O(SafeArrayGetUBound, 3),
-+    O(SafeArrayGetElement, 3),
-+    O(SafeArrayPutElement, 3),
-+    O(SafeArrayPtrOfIndex, 3),
-+    O(SafeArrayAccessData, 2),
-+    O(SafeArrayUnaccessData, 1),
-+    O(SafeArrayLock, 1),
-+    O(SafeArrayUnlock, 1),
-+    O(GetErrorInfo, 2),
-+    O(SetErrorInfo, 2),
-+    O(OaBuildVersion, 0),
-+    O(SysAllocString, 1),
-+    O(SysReAllocString, 2),
-+    O(SysStringLen, 1),
-+    O(SysStringByteLen, 1),
-+    O(SysAllocStringByteLen, 2),
-+    O(SafeArrayAllocData, 1),
-+    O(SafeArrayDestroyDescriptor, 1),
-+    O(SafeArrayDestroyData, 1),
-+    O(SafeArrayDestroy, 1),
++                            O(VariantInit, 1),
++                            O(VariantClear, 1),
++                            O(VariantCopy, 2),
++                            O(VariantCopyInd, 2),
++                            O(VariantChangeType, 4),
++                            O(SysAllocStringLen, 2),
++                            O(SysReAllocStringLen, 3),
++                            O(SysFreeString, 1),
++                            O(SafeArrayCreate, 3),
++                            O(SafeArrayGetLBound, 3),
++                            O(SafeArrayGetUBound, 3),
++                            O(SafeArrayGetElement, 3),
++                            O(SafeArrayPutElement, 3),
++                            O(SafeArrayPtrOfIndex, 3),
++                            O(SafeArrayAccessData, 2),
++                            O(SafeArrayUnaccessData, 1),
++                            O(SafeArrayLock, 1),
++                            O(SafeArrayUnlock, 1),
++                            O(GetErrorInfo, 2),
++                            O(SetErrorInfo, 2),
++                            O(OaBuildVersion, 0),
++                            O(SysAllocString, 1),
++                            O(SysReAllocString, 2),
++                            O(SysStringLen, 1),
++                            O(SysStringByteLen, 1),
++                            O(SysAllocStringByteLen, 2),
++                            O(SafeArrayAllocData, 1),
++                            O(SafeArrayDestroyDescriptor, 1),
++                            O(SafeArrayDestroyData, 1),
++                            O(SafeArrayDestroy, 1),
 +#define ORD(n, name, argc) {"OLEAUT32.dll", "ord" #n, argc, o_##name}
-+    ORD(2, SysAllocString, 1),
-+    ORD(3, SysReAllocString, 2),
-+    ORD(4, SysAllocStringLen, 2),
-+    ORD(5, SysReAllocStringLen, 3),
-+    ORD(6, SysFreeString, 1),
-+    ORD(7, SysStringLen, 1),
-+    ORD(8, VariantInit, 1),
-+    ORD(9, VariantClear, 1),
-+    ORD(10, VariantCopy, 2),
-+    ORD(11, VariantCopyInd, 2),
-+    ORD(12, VariantChangeType, 4),
-+    ORD(15, SafeArrayCreate, 3),
-+    ORD(16, SafeArrayDestroy, 1),
-+    ORD(19, SafeArrayGetUBound, 3),
-+    ORD(20, SafeArrayGetLBound, 3),
-+    ORD(21, SafeArrayLock, 1),
-+    ORD(22, SafeArrayUnlock, 1),
-+    ORD(23, SafeArrayAccessData, 2),
-+    ORD(24, SafeArrayUnaccessData, 1),
-+    ORD(25, SafeArrayGetElement, 3),
-+    ORD(26, SafeArrayPutElement, 3),
-+    ORD(37, SafeArrayAllocData, 1),
-+    ORD(38, SafeArrayDestroyDescriptor, 1),
-+    ORD(39, SafeArrayDestroyData, 1),
-+    ORD(148, SafeArrayPtrOfIndex, 3),
-+    ORD(149, SysStringByteLen, 1),
-+    ORD(150, SysAllocStringByteLen, 2),
-+    ORD(200, GetErrorInfo, 2),
-+    ORD(201, SetErrorInfo, 2),
++                            ORD(2, SysAllocString, 1),
++                            ORD(3, SysReAllocString, 2),
++                            ORD(4, SysAllocStringLen, 2),
++                            ORD(5, SysReAllocStringLen, 3),
++                            ORD(6, SysFreeString, 1),
++                            ORD(7, SysStringLen, 1),
++                            ORD(8, VariantInit, 1),
++                            ORD(9, VariantClear, 1),
++                            ORD(10, VariantCopy, 2),
++                            ORD(11, VariantCopyInd, 2),
++                            ORD(12, VariantChangeType, 4),
++                            ORD(15, SafeArrayCreate, 3),
++                            ORD(16, SafeArrayDestroy, 1),
++                            ORD(19, SafeArrayGetUBound, 3),
++                            ORD(20, SafeArrayGetLBound, 3),
++                            ORD(21, SafeArrayLock, 1),
++                            ORD(22, SafeArrayUnlock, 1),
++                            ORD(23, SafeArrayAccessData, 2),
++                            ORD(24, SafeArrayUnaccessData, 1),
++                            ORD(25, SafeArrayGetElement, 3),
++                            ORD(26, SafeArrayPutElement, 3),
++                            ORD(37, SafeArrayAllocData, 1),
++                            ORD(38, SafeArrayDestroyDescriptor, 1),
++                            ORD(39, SafeArrayDestroyData, 1),
++                            ORD(148, SafeArrayPtrOfIndex, 3),
++                            ORD(149, SysStringByteLen, 1),
++                            ORD(150, SysAllocStringByteLen, 2),
++                            ORD(200, GetErrorInfo, 2),
++                            ORD(201, SetErrorInfo, 2),
 +#undef ORD
-+    {"OLEAUT32.dll", "ord170", 0, o_OaBuildVersion}
++                            {"OLEAUT32.dll", "ord170", 0, o_OaBuildVersion}
  #undef O
  };
  } // namespace
@@ -2830,10 +2997,10 @@ index d746097..3dc3b0d 100644
 +                    std::string *why = nullptr, uint32_t module = 0);
 diff --git a/runtime/structured_storage.cpp b/runtime/structured_storage.cpp
 new file mode 100644
-index 0000000..23e84ed
+index 0000000..37c89a1
 --- /dev/null
 +++ b/runtime/structured_storage.cpp
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,740 @@
 +// Transient OLE storage. All interfaces are 32-bit guest objects; host state
 +// holds stream bytes and reference ownership under the guest scheduler baton.
 +// Named compound files and transactions are deliberately rejected: this is
@@ -2858,6 +3025,18 @@ index 0000000..23e84ed
 +    std::vector<uint8_t> data;
 +    std::u16string name;
 +    bool live = true;
++    uint32_t global = 0, global_size = 0;
++    bool memory_stream = false, delete_global = false;
++    size_t size() const {
++        return memory_stream ? global_size : data.size();
++    }
++    uint8_t *ptr() {
++        return memory_stream ? g_mem + global : data.data();
++    }
++    ~Bytes() {
++        if (delete_global && global)
++            heap_free(global);
++    }
 +};
 +struct Storage {
 +    uint32_t refs = 1, mode = 0, state = 0;
@@ -3006,11 +3185,11 @@ index 0000000..23e84ed
 +        set_eax(c, DENIED);
 +        return;
 +    }
-+    size_t n = s->position >= s->bytes->data.size()
++    size_t n = s->position >= s->bytes->size()
 +                   ? 0
-+                   : size_t(std::min<uint64_t>(count, s->bytes->data.size() - s->position));
++                   : size_t(std::min<uint64_t>(count, s->bytes->size() - s->position));
 +    if (n)
-+        memcpy(g_mem + p, s->bytes->data.data() + size_t(s->position), n);
++        memmove(g_mem + p, s->bytes->ptr() + size_t(s->position), n);
 +    s->position += n;
 +    if (out)
 +        wr32(out, uint32_t(n));
@@ -3019,6 +3198,20 @@ index 0000000..23e84ed
 +bool resize(Bytes &bytes, uint64_t n) {
 +    if (n > MAX_STREAM)
 +        return false;
++    if (bytes.memory_stream) {
++        if (!heap_owns(bytes.global))
++            return false;
++        if (n > heap_size(bytes.global)) {
++            uint32_t next = heap_realloc(bytes.global, uint32_t(n), true);
++            if (!next)
++                return false;
++            bytes.global = next;
++        }
++        if (n > bytes.global_size)
++            memset(g_mem + bytes.global + bytes.global_size, 0, size_t(n - bytes.global_size));
++        bytes.global_size = uint32_t(n);
++        return true;
++    }
 +    try {
 +        bytes.data.resize(size_t(n), 0);
 +    } catch (const std::bad_alloc &) {
@@ -3047,14 +3240,14 @@ index 0000000..23e84ed
 +        set_eax(c, DENIED);
 +        return;
 +    }
-+    if (count && (s->position > MAX_STREAM || count > MAX_STREAM - s->position ||
-+                  (s->position + count > s->bytes->data.size() &&
-+                   !resize(*s->bytes, s->position + count)))) {
++    if (count &&
++        (s->position > MAX_STREAM || count > MAX_STREAM - s->position ||
++         (s->position + count > s->bytes->size() && !resize(*s->bytes, s->position + count)))) {
 +        set_eax(c, OOM);
 +        return;
 +    }
 +    if (count)
-+        memcpy(s->bytes->data.data() + size_t(s->position), g_mem + p, count);
++        memmove(s->bytes->ptr() + size_t(s->position), g_mem + p, count);
 +    s->position += count;
 +    if (out)
 +        wr32(out, count);
@@ -3079,7 +3272,7 @@ index 0000000..23e84ed
 +    if (origin == 1)
 +        base = s->position;
 +    else if (origin == 2)
-+        base = s->bytes->data.size();
++        base = s->bytes->size();
 +    if (move & (uint64_t(1) << 63)) {
 +        uint64_t magnitude = ~move + 1;
 +        if (magnitude > base) {
@@ -3326,8 +3519,8 @@ index 0000000..23e84ed
 +        memcpy(g_mem + out + 48, root->clsid.data(), 16);
 +        wr32(out + 64, root->state);
 +    } else {
-+        put64(out + 8, s->bytes->data.size());
-+        if (!flags) {
++        put64(out + 8, s->bytes->size());
++        if (!flags && !s->bytes->memory_stream) {
 +            uint32_t bytes = uint32_t(s->bytes->name.size() + 1) * 2;
 +            uint32_t p = win32_task_alloc(bytes, true);
 +            if (!p) {
@@ -3366,8 +3559,7 @@ index 0000000..23e84ed
 +        return;
 +    }
 +    uint64_t requested = u64(arg(c, 2), arg(c, 3));
-+    uint64_t available =
-+        s->position >= s->bytes->data.size() ? 0 : s->bytes->data.size() - s->position;
++    uint64_t available = s->position >= s->bytes->size() ? 0 : s->bytes->size() - s->position;
 +    uint64_t remaining = std::min(requested, available), nr = 0, nw = 0;
 +    uint32_t buffer = heap_alloc(4096 + 4), result = 0;
 +    if (!buffer) {
@@ -3378,7 +3570,7 @@ index 0000000..23e84ed
 +    // write to a clone of this stream and reallocate the shared backing bytes.
 +    while (remaining) {
 +        uint32_t n = uint32_t(std::min<uint64_t>(remaining, 4096));
-+        memcpy(g_mem + buffer, s->bytes->data.data() + size_t(s->position), n);
++        memcpy(g_mem + buffer, s->bytes->ptr() + size_t(s->position), n);
 +        s->position += n;
 +        nr += n;
 +        remaining -= n;
@@ -3481,15 +3673,70 @@ index 0000000..23e84ed
 +    wr32(out, obj);
 +    set_eax(c, 0);
 +}
++// Global handles in this runtime are guest heap allocations. Clones share the
++// current handle and size; the final owned reference frees it exactly once.
++void create_global_stream(X86 *c) {
++    uint32_t global = arg(c, 0), out = arg(c, 2);
++    if (!output(out)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    if (global && (!heap_owns(global) || heap_size(global) > MAX_STREAM)) {
++        set_eax(c, 0x80070057u);
++        return;
++    }
++    if (!ensure_vtables()) {
++        set_eax(c, 0x8007000eu);
++        return;
++    }
++    auto bytes = std::make_shared<Bytes>();
++    bytes->memory_stream = true;
++    bytes->global_size = global ? heap_size(global) : 0;
++    // A nonnull backing handle may reserve more bytes than the logical stream.
++    bytes->global = global ? global : heap_alloc(16, true);
++    if (!bytes->global) {
++        set_eax(c, 0x8007000eu);
++        return;
++    }
++    uint32_t object = new_stream(bytes, 2);
++    if (!object) {
++        if (!global)
++            heap_free(bytes->global);
++        set_eax(c, 0x8007000eu);
++        return;
++    }
++    bytes->delete_global = arg(c, 1) != 0;
++    wr32(out, object);
++    set_eax(c, 0);
++}
++void get_global_from_stream(X86 *c) {
++    uint32_t out = arg(c, 1);
++    if (!output(out)) {
++        set_eax(c, 0x80004003u);
++        return;
++    }
++    auto *s = stream(c);
++    if (!s || !s->bytes->memory_stream) {
++        set_eax(c, 0x80070057u);
++        return;
++    }
++    wr32(out, s->bytes->global);
++    set_eax(c, 0);
++}
 +} // namespace
 +
 +void structured_storage_register() {
-+    static const ImportShim shims[] = {{"ole32.dll", "StgCreateDocfile", 4, create_docfile}};
++    static const ImportShim shims[] = {
++        {"ole32.dll", "StgCreateDocfile", 4, create_docfile},
++        {"ole32.dll", "CreateStreamOnHGlobal", 3, create_global_stream},
++        {"ole32.dll", "GetHGlobalFromStream", 2, get_global_from_stream}};
 +    imports_register(shims, sizeof shims / sizeof *shims);
 +}
 +void structured_storage_reset() {
 +    // win32_init follows arena reset; clear host ownership without freeing
 +    // addresses that may already have been reused by the fresh guest heap.
++    for (auto &entry : streams)
++        entry.second.bytes->delete_global = false;
 +    storages.clear();
 +    streams.clear();
 +    storage_vtable = stream_vtable = 0;
@@ -3757,7 +4004,7 @@ index cf0d171..e5a5a4e 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..ec71352 100644
+index 7016990..0d3d816 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -3782,7 +4029,7 @@ index 7016990..ec71352 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,849 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,969 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -3869,6 +4116,126 @@ index 7016990..ec71352 100644
 +          "OLE Automation version resolves by name and ordinal");
 +}
 +
++static void test_class_object_guards() {
++    section("in-process COM class factory guards");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t clsid = scratch, iid = scratch + 32, out = scratch + 64;
++    memset(g_mem + clsid, 0, 80);
++    wr32(iid, 1); // IID_IClassFactory
++    wr32(iid + 8, 0xc0);
++    wr8(iid + 15, 0x46);
++    check(call_import(&c, "ole32.dll", "CoGetClassObject", {clsid, 1, 0, iid, 0}) == 0x80004003u,
++          "class factory lookup requires a writable output pointer");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "ole32.dll", "CoGetClassObject", {0, 1, 0, iid, out}) == 0x80070057u &&
++              rd32(out) == 0,
++          "invalid class identifiers fail and clear the output");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "ole32.dll", "CoGetClassObject", {clsid, 1, 0, 0, out}) == 0x80070057u &&
++              rd32(out) == 0,
++          "invalid requested interfaces fail and clear the output");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "ole32.dll", "CoGetClassObject", {clsid, 4, 0, iid, out}) ==
++                  0x80040154u &&
++              rd32(out) == 0,
++          "executable COM activation does not claim an in-process factory");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "ole32.dll", "CoGetClassObject", {clsid, 1, scratch + 96, iid, out}) ==
++                  0x80040154u &&
++              rd32(out) == 0,
++          "remote COM activation is explicitly unavailable");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "RPCRT4.dll", "NdrDllGetClassObject", {clsid, iid, out, 0, 0, 0}) ==
++                  0x80040111u &&
++              rd32(out) == 0,
++          "unavailable RPC factories clear outputs without claiming class ownership");
++    check(call_import(&c, "RPCRT4.dll", "NdrDllGetClassObject", {clsid, iid, 0, 0, 0, 0}) ==
++              0x80004003u,
++          "RPC factory lookup preserves its six-argument failure ABI");
++    wr32(clsid, 0x11223344);
++    wr16(clsid + 4, 0x5566);
++    wr16(clsid + 6, 0x7788);
++    const uint8_t tail[] = {0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0};
++    memcpy(g_mem + clsid + 8, tail, 8);
++    const std::string expected = "{11223344-5566-7788-99AA-BBCCDDEEFF00}";
++    check(call_import(&c, "ole32.dll", "StringFromCLSID", {clsid, out}) == 0 &&
++              gm_wstr(rd32(out)) == expected,
++          "StringFromCLSID returns a task-owned canonical UTF-16 GUID");
++    call_import(&c, "ole32.dll", "CoTaskMemFree", {rd32(out)});
++    check(call_import(&c, "ole32.dll", "StringFromIID", {clsid, out}) == 0 &&
++              gm_wstr(rd32(out)) == expected,
++          "StringFromIID shares GUID formatting and allocation ownership");
++    call_import(&c, "ole32.dll", "CoTaskMemFree", {rd32(out)});
++    uint32_t text = scratch + 128;
++    wr16(text, 0x1234);
++    check(call_import(&c, "ole32.dll", "StringFromGUID2", {clsid, text, 38}) == 0 &&
++              rd16(text) == 0x1234,
++          "a GUID output lacking terminator capacity is unchanged");
++    check(call_import(&c, "ole32.dll", "StringFromGUID2", {clsid, text, 39}) == 39 &&
++              gm_wstr(text) == expected && rd16(text + 76) == 0,
++          "StringFromGUID2 counts the terminator and respects its 78-byte span");
++    wr32(out, 0xdeadbeef);
++    check(call_import(&c, "ole32.dll", "StringFromCLSID", {0, out}) == 0x80070057u &&
++              rd32(out) == 0,
++          "invalid GUID allocation clears the output");
++}
++static void test_memory_streams() {
++    section("OLE streams over global memory");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t out = scratch, count = scratch + 4, global_out = scratch + 8;
++    uint32_t data = scratch + 64, info = scratch + 128;
++    auto api = [&](const char *name, std::initializer_list<uint32_t> args) {
++        return call_import(&c, "ole32.dll", name, args);
++    };
++    check(api("CreateStreamOnHGlobal", {0, 1, out}) == 0 && rd32(out),
++          "an empty memory stream supplies an owned interface");
++    uint32_t stm = rd32(out);
++    if (!stm)
++        return;
++    check(api("IStream::Stat", {stm, info, 1}) == 0 && rd32(info + 8) == 0,
++          "the empty stream has logical length zero");
++    memcpy(g_mem + data, "ABCDEFGHIJKL", 12);
++    check(api("IStream::Write", {stm, data, 12, count}) == 0 && rd32(count) == 12,
++          "memory stream writes report their byte count");
++    check(api("GetHGlobalFromStream", {stm, global_out}) == 0 &&
++              !memcmp(g_mem + rd32(global_out), "ABCDEFGHIJKL", 12),
++          "the returned global handle exposes the written bytes");
++    check(api("IStream::Clone", {stm, out}) == 0 && rd32(out) != stm,
++          "memory stream clones share storage with separate identities");
++    uint32_t clone = rd32(out);
++    if (!clone) {
++        api("IStream::Release", {stm});
++        return;
++    }
++    check(api("IStream::SetSize", {clone, 64, 0}) == 0,
++          "a clone may grow the shared backing allocation");
++    check(api("GetHGlobalFromStream", {stm, global_out}) == 0 &&
++              heap_size(rd32(global_out)) >= 64 && rd8(rd32(global_out) + 63) == 0,
++          "all identities expose the current handle after zero-filled growth");
++    uint32_t owned = rd32(global_out);
++    check(api("IStream::Release", {stm}) == 0 && heap_owns(owned),
++          "a live clone retains the owned global allocation");
++    check(api("IStream::Release", {clone}) == 0 && !heap_owns(owned),
++          "the final stream reference frees an owned global handle");
++    uint32_t supplied = heap_alloc(3);
++    memcpy(g_mem + supplied, "XYZ", 3);
++    check(api("CreateStreamOnHGlobal", {supplied, 0, out}) == 0,
++          "caller-owned global memory may back a stream");
++    stm = rd32(out);
++    if (stm) {
++        check(api("IStream::Read", {stm, data, 8, count}) == 1 && rd32(count) == 3 &&
++                  !memcmp(g_mem + data, "XYZ", 3),
++              "the initial stream length is the supplied allocation length");
++        check(api("IStream::Release", {stm}) == 0 && heap_owns(supplied),
++              "delete-on-release false retains the caller's allocation");
++    }
++    heap_free(supplied);
++    wr32(global_out, 0xdeadbeef);
++    check(api("GetHGlobalFromStream", {0, global_out}) == 0x80070057u && rd32(global_out) == 0,
++          "non-memory streams do not invent a backing global handle");
++}
 +static void test_transient_storage() {
 +    section("transient OLE storage and streams");
 +    X86 c;
@@ -4632,7 +4999,7 @@ index 7016990..ec71352 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1601,27 @@ static void test_loader() {
+@@ -755,18 +1721,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -4663,7 +5030,7 @@ index 7016990..ec71352 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +4099,98 @@ static void test_scheduling(X86 *c) {
+@@ -3244,6 +4219,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -4762,7 +5129,7 @@ index 7016990..ec71352 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -6078,6 +7025,16 @@ static void test_host_mouse_routing() {
+@@ -6078,6 +7145,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -4779,7 +5146,7 @@ index 7016990..ec71352 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7234,11 @@ static void test_user32_services() {
+@@ -6277,6 +7354,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -4791,7 +5158,7 @@ index 7016990..ec71352 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7267,12 @@ static void test_user32_services() {
+@@ -6305,6 +7387,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -4804,7 +5171,7 @@ index 7016990..ec71352 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7402,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7522,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -4826,12 +5193,14 @@ index 7016990..ec71352 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7670,45 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7790,49 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
 +        test_wide_string_comparison();
 +        test_task_allocator();
++        test_class_object_guards();
++        test_memory_streams();
 +        test_transient_storage();
 +        test_module_string_resources();
 +        test_module_icon_resources();
@@ -4858,6 +5227,8 @@ index 7016990..ec71352 100644
      test_modules_and_wide();
 +    test_wide_string_comparison();
 +    test_task_allocator();
++    test_class_object_guards();
++    test_memory_streams();
 +    test_transient_storage();
 +    test_module_string_resources();
 +    test_module_icon_resources();
@@ -6725,7 +7096,7 @@ index ff9b21d..a92baa6 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index b59ecac..edb7686 100644
+index b59ecac..cfe5633 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,10 @@
@@ -6739,17 +7110,19 @@ index b59ecac..edb7686 100644
  // The guest root's own directory name (the last component of RECOMP_GUEST_ROOT), so
  // C:\<root>\data\x and \data\x resolve to the same host file.
  static inline const char *win32_guest_root_name() {
-@@ -34,6 +38,9 @@ void win32_forget_scrollbars(uint32_t hwnd);
+@@ -34,6 +38,11 @@ void win32_forget_scrollbars(uint32_t hwnd);
  // directory that backs the guest root RECOMP_GUEST_ROOT (the directory holding the
  // loaded EXE).
  void win32_init(const std::string &game_dir);
 +struct LoaderModule;
 +// Initialize mapped PE import dependencies before the importing entry point.
 +bool win32_attach_static_imports(X86 *c, const LoaderModule &module);
++// Acquire a mapped guest DLL using the same attach/reference path as LoadLibrary.
++uint32_t win32_load_library(X86 *c, const std::string &name);
  const std::string &win32_game_dir();
  // Guest spelling shared by shell folder APIs; creation uses the write overlay.
  std::string shell_folder_guest_path(uint32_t csidl, bool create);
-@@ -348,6 +355,10 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
+@@ -348,6 +357,10 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
  void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
  // The same routed event, starting in a specific window's client pixels.
  void host_post_client_mouse_message(uint32_t hwnd, uint32_t msg, uint32_t mk, int32_t x, int32_t y);

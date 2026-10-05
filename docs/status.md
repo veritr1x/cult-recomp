@@ -17,7 +17,7 @@ executables have compiled and been probed. No other platform has been tested.
 - RecompKit emits 549 native C functions / 606 dispatch entries for Cult and
   587 functions / 655 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
-- Fifteen focused input/profile/report checks pass. Complete gameplay coverage
+- Sixteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
 - Both LLVM-MinGW headless native builds link with four statically translated
   supplied libraries on the locally patched kit. Probes enter the actual
@@ -30,9 +30,9 @@ The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult image passes 433 loader/startup contract checks (zero failures,
+The real Cult image passes 458 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
-256 focused translator/profile/build/private-input checks in the latest run.
+257 focused translator/profile/build/private-input checks in the latest run.
 Both latest VB5 passes emit 23,154 discovered routines and 25,175 dispatch
 entries. PictureClip emits 580 routines.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
@@ -87,12 +87,16 @@ window/shutdown callbacks and Cult II exception cleanup are now translated.
 System ListBox and Edit controls initialize with owned text/items, selection,
 typing limits, read-only state, undo and parent notifications. They are partial
 Win32 implementations: clipboard, scrolling and complex selection remain open.
-The form-loader property callback (`0x74056080`) is now translated and Edit
-margin messages are implemented. The latest probes expose a VB timer callback
-(`0x74033f00`) during startup, with errors 128 in Cult and 104 in Cult II.
-That callback is audited and seeded; regeneration and executable checks are
-ongoing. The last script does
-not complete; gameplay remains unverified. Input evidence is recorded
+The form-loader property and timer callbacks are now translated, and Edit
+margin messages are implemented. Native class activation attaches configured
+guest libraries and delegates to their translated `DllGetClassObject` exports.
+PictureClip returns an owned class factory, and OLE memory streams successfully
+read its picture data. GUID strings use the guest task allocator. RPC proxy
+factories and executable/remote activation remain explicitly unavailable.
+Both latest scripts complete, but fail validation at two uncovered VB callbacks
+(`0x74058f3a` and `0x7402edac`) followed by a guest access violation. Cult also
+reports ListBox message `0x0195` as unsupported. The callbacks are audited and
+seeded; regeneration is ongoing. Gameplay remains unverified. Input evidence is recorded
 under each profile's private `build/input-probe/` directory.
 The remaining work includes callback coverage, physical input, audio,
 save/load and gameplay verification.

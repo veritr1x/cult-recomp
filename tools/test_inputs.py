@@ -96,6 +96,14 @@ class InputProbeTests(unittest.TestCase):
         self.assertEqual(len(result["unsupported_control_messages"]), 1)
 
 
+    def test_completed_script_reports_guest_access_violation(self):
+        from probe_input import read_evidence
+        result = read_evidence("script: 5 of 5 steps\n"
+                               "[recomp] call to 00000000 (return=7405612a): raising an access violation, as Windows would\n")
+        self.assertTrue(result["script_completed"])
+        self.assertEqual(len(result["guest_access_violations"]), 1)
+
+
 class InterfaceThunkTests(unittest.TestCase):
     def test_complete_table_and_corrupt_call(self):
         from prepare_modules import interface_thunks
