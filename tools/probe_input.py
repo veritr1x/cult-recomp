@@ -10,6 +10,20 @@ from pathlib import Path
 from import_archives import GAMES, ROOT
 
 
+def read_evidence(log):
+    """A completed input script cannot hide a VB error dialog or failed call."""
+    progress = re.search(r"script:\s+(\d+) of (\d+) steps", log)
+    frames = re.search(r"presented frames:\s+(\d+)", log)
+    return {
+        "script_completed": bool(progress and progress.group(1) == progress.group(2)),
+        "presented_frames": int(frames.group(1)) if frames else None,
+        "missing_imports_called": re.findall(r"unimplemented import ([^:]+):", log),
+        "unknown_transfers": re.findall(r"(?:call to unknown target|unknown (?:call|jump)(?: target)?|no translated function|no block entry for indirect jump)[^\n]*", log),
+        "runtime_errors": re.findall(r"Run-time error '(\d+)'", log),
+        "unsupported_control_messages": re.findall(r"(?:ListBox|Edit) message [0-9a-f]+ is unsupported", log),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
@@ -42,20 +56,17 @@ def main():
             output, returncode, timed_out = error.stdout or b"", None, True
         (directory / "startup.log").write_bytes(output)
         log = output.decode("utf-8", errors="replace")
-        progress = re.search(r"script:\s+(\d+) of (\d+) steps", log)
-        completed = bool(progress and progress.group(1) == progress.group(2))
-        missing = re.findall(r"unimplemented import ([^:]+):", log)
-        unknown = re.findall(r"(?:call to unknown target|unknown (?:call|jump)(?: target)?|no translated function|no block entry for indirect jump)[^\n]*", log)
-        frames = re.search(r"presented frames:\s+(\d+)", log)
+        evidence = read_evidence(log)
+        completed = evidence["script_completed"]
+        missing, unknown = evidence["missing_imports_called"], evidence["unknown_transfers"]
         record = {"returncode": returncode, "timed_out": timed_out, "platform": "Windows x64",
-                  "script_completed": completed,
-                  "presented_frames": int(frames.group(1)) if frames else None,
-                  "missing_imports_called": missing, "unknown_transfers": unknown,
+                  **evidence,
                   "playability_verified": False, "executable": str(executable),
                   "script": str(script), "probe": "native mouse input and play-control transition"}
         (directory / "result.json").write_text(json.dumps(record, indent=2) + "\n")
-        failed |= returncode != 0 or timed_out or not completed or bool(missing) or bool(unknown)
-        print(f"{game_id}: exit={returncode}, timeout={timed_out}, script_completed={completed}, missing={missing}, unknown={len(unknown)}")
+        failed |= returncode != 0 or timed_out or not completed or any(
+            evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "unsupported_control_messages"))
+        print(f"{game_id}: exit={returncode}, timeout={timed_out}, script_completed={completed}, missing={missing}, unknown={len(unknown)}, runtime_errors={evidence['runtime_errors']}")
         print(f"Evidence: {directory / 'result.json'}")
     return int(failed)
 

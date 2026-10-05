@@ -76,6 +76,26 @@ class ProfileTests(unittest.TestCase):
                     self.assertEqual(report[key], [])
 
 
+class InputProbeTests(unittest.TestCase):
+    def test_completed_script_retains_guest_errors(self):
+        from probe_input import read_evidence
+        result = read_evidence("script: 5 of 5 steps\npresented frames: 180\n"
+                               "MessageBoxIndirectA: Run-time error '7':\nOut of memory\n")
+        self.assertTrue(result["script_completed"])
+        self.assertEqual(result["runtime_errors"], ["7"])
+        self.assertEqual(result["presented_frames"], 180)
+
+    def test_unsupported_code_and_controls(self):
+        from probe_input import read_evidence
+        result = read_evidence("unimplemented import ole32.dll!Test: returning 0\n"
+                               "call to unknown target 74000001: returning 0\n"
+                               "ListBox message 0192 is unsupported\n")
+        self.assertFalse(result["script_completed"])
+        self.assertEqual(result["missing_imports_called"], ["ole32.dll!Test"])
+        self.assertEqual(len(result["unknown_transfers"]), 1)
+        self.assertEqual(len(result["unsupported_control_messages"]), 1)
+
+
 class InterfaceThunkTests(unittest.TestCase):
     def test_complete_table_and_corrupt_call(self):
         from prepare_modules import interface_thunks

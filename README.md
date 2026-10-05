@@ -7,9 +7,10 @@ save compatibility, audio, input and other platforms are not yet verified.
 Both Windows x64 headless executables link with the statically translated VB5
 runtime, PictureClip control, OLE Automation library and ASYCFILT image decoder.
 Both reach their language-selection forms, radio buttons and frames.
-Both have completed bounded 150-frame native captures without called missing
-imports or unknown transfers. Captures show the language labels, but flags and
-other artwork remain blank. Work continues on image mapping, input and audio.
+Both have completed bounded language-screen captures without called missing
+imports or unknown transfers. Titles, flags, character artwork and the Play
+label render, and native mouse clicks advance into intro processing.
+Work continues on callback coverage, save controls and audio.
 Runtime x86 interpretation is disabled
 for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
@@ -105,9 +106,10 @@ The smoke host also checks input through the native window-message path:
 
 Both games render their language screens, including artwork and the Play label,
 and the scripted clicks advance into the intro. Temporary OLE storage is now
-implemented. The last completed input probes expose two uncovered VB callbacks
-and a Cult II exception-cleanup entry; these have been audited and translated,
-and the updated executables are being checked. These are diagnostic builds;
+implemented. System ListBox and Edit controls now initialize. The last completed
+input probes report VB error 321 and an uncovered form-loader property callback;
+the callback has been audited and translated, and the updated executables are
+being checked. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
 ## Other targets

@@ -17,7 +17,7 @@ executables have compiled and been probed. No other platform has been tested.
 - RecompKit emits 549 native C functions / 606 dispatch entries for Cult and
   587 functions / 655 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
-- Thirteen focused input/profile/report checks pass. Complete gameplay coverage
+- Fifteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
 - Both LLVM-MinGW headless native builds link with four statically translated
   supplied libraries on the locally patched kit. Probes enter the actual
@@ -30,10 +30,11 @@ The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult image passes 402 loader/startup contract checks (zero failures,
+The real Cult image passes 433 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
-254 focused translator/profile/build/private-input checks in the latest run.
-The VB5 pass emits 23,039 discovered routines and PictureClip 580.
+256 focused translator/profile/build/private-input checks in the latest run.
+The latest Cult VB5 pass emits 23,150 discovered routines and 25,172 dispatch
+entries; Cult II regeneration is ongoing. PictureClip emits 580 routines.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
 has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
@@ -74,11 +75,16 @@ The temporary OLE storage service is now implemented with named streams,
 read/write/seek, cloning, copying and ownership. Native Windows conformance
 probes confirm stream invalidation after element deletion and parent release.
 Persistent compound files, transactions and substorages remain unsupported.
-Both last completed input probes successfully use that service, then fail at
-an uncovered VB callback (`0x7402e6a7`) and shutdown callback (`0x7403b4ae`).
-Cult II also exposes exception cleanup at `0x00467a71`. All three entries have
-been audited and translated; updated executable checks are ongoing. The last
-script does not complete; gameplay remains unverified. Input evidence is recorded
+Both last completed input probes successfully use that service. Audited VB
+window/shutdown callbacks and Cult II exception cleanup are now translated.
+System ListBox and Edit controls initialize with owned text/items, selection,
+typing limits, read-only state, undo and parent notifications. They are partial
+Win32 implementations: clipboard, scrolling and complex selection remain open.
+The last probes fail with VB error 321 (Invalid file format) after an uncovered
+form-loader property callback (`0x74056080`) and unsupported Edit margin message.
+The margin message is implemented and tested; the property callback is audited
+and translated. Updated executable checks are ongoing. The last script does
+not complete; gameplay remains unverified. Input evidence is recorded
 under each profile's private `build/input-probe/` directory.
 The remaining work includes callback coverage, physical input, audio,
 save/load and gameplay verification.

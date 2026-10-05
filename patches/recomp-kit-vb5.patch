@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..82a7e7b 100644
+index 20fdc15..71d97a2 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,55 @@
+@@ -2,6 +2,58 @@
  
  ## Unreleased
  
++- Provide system ListBox item storage, selection and parent notifications,
++  and Edit text, selection, replacement, typing limits, read-only state and undo.
++
 +- Supply transient OLE storage and owned streams with reads, writes, 64-bit
 +  seeks, cloning, CopyTo and parent-lifetime invalidation. Reject persistent
 +  compound files and unsupported transactions without returning false success.
@@ -182,7 +185,7 @@ index 9525259..d036a70 100644
      }
      uint32_t hwnd = host_main_window();
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
-index 10a5e39..2aedc29 100644
+index 10a5e39..4499b0c 100644
 --- a/runtime/CMakeLists.txt
 +++ b/runtime/CMakeLists.txt
 @@ -2,7 +2,7 @@
@@ -190,7 +193,7 @@ index 10a5e39..2aedc29 100644
  set(POP_RUNTIME_SOURCES
    memory.cpp loader.cpp imports.cpp cpu.cpp thunks.cpp seh.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
 -  resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
-+  resources.cpp oleaut32.cpp structured_storage.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
++  resources.cpp oleaut32.cpp structured_storage.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp user32_listbox.cpp user32_edit.cpp
    misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
@@ -3394,7 +3397,7 @@ index cf0d171..e5a5a4e 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..d2804f3 100644
+index 7016990..ec71352 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -3419,7 +3422,7 @@ index 7016990..d2804f3 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,717 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,849 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -3803,6 +3806,138 @@ index 7016990..d2804f3 100644
 +    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
 +    call_import(&c, "USER32.dll", "UnregisterClassA", {s + 64, 0});
 +}
++static void test_system_listbox() {
++    section("system ListBox model and notifications");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    gm_put_str(s, "ListBox", 32);
++    gm_put_str(s + 64, "RecompListParent", 32);
++    uint32_t callback =
++        imports_alloc_trampoline("recomp-test.dll", "ListParent", fixture_button_parent, 4);
++    memset(g_mem + s + 128, 0, 40);
++    wr32(s + 132, callback);
++    wr32(s + 164, s + 64);
++    call_import(&c, "USER32.dll", "RegisterClassA", {s + 128});
++    check(call_import(&c, "USER32.dll", "GetClassInfoA", {0, s, s + 128}) != 0 &&
++              rd32(s + 132) != 0 && rd32(s + 140) == 8,
++          "system ListBox exposes a subclassable procedure and eight extra bytes");
++    uint32_t parent = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                  {0, s + 64, 0, 0x10000000, 0, 0, 200, 200, 0, 0, 0, 0});
++    uint32_t list = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                {0, s, 0, 0x50000003, 0, 0, 180, 100, parent, 42, 0, 0});
++    check(list != 0, "ListBox creation succeeds through the system procedure");
++    auto msg = [&](uint32_t message, uint32_t wp = 0, uint32_t lp = 0) {
++        return call_import(&c, "USER32.dll", "SendMessageA", {list, message, wp, lp});
++    };
++    button_notifications = 0;
++    gm_put_str(s + 256, "Zulu", 32);
++    check(msg(0x180, 0, s + 256) == 0, "LB_ADDSTRING stores the initial string");
++    gm_put_str(s + 256, "alpha", 32);
++    check(msg(0x180, 0, s + 256) == 0 && msg(0x18b) == 2,
++          "sorted addition returns the actual index and updates count");
++    check(msg(0x18a, 0) == 5 && msg(0x189, 0, s + 320) == 5 && gm_str(s + 320) == "alpha",
++          "LB_GETTEXTLEN and LB_GETTEXT expose the retained item string");
++    check(msg(0x19a, 1, 0x76543210) == 0 && msg(0x199, 1) == 0x76543210,
++          "item data is independent of the string and its storage");
++    gm_put_str(s + 256, "Z", 32);
++    check(msg(0x18f, 0xffffffff, s + 256) == 1,
++          "prefix search starts before index zero and ignores ASCII case");
++    check(msg(0x186, 1) == 1 && msg(0x188) == 1 && button_notifications == 0,
++          "programmatic selection sends no user-selection notification");
++    msg(0x100, 0x26);
++    check(msg(0x188) == 0 && button_notifications == 1 && (button_notification_id & 0xffff) == 42 &&
++              (button_notification_id >> 16) == 1,
++          "arrow selection sends LBN_SELCHANGE with the real control ID");
++    msg(0x201, 1, (24u << 16) | 4u);
++    check(msg(0x188) == 1 && button_notifications == 2,
++          "mouse selection resolves the clicked row and notifies the parent");
++    check(msg(0x198, 1, s + 384) == 0 && rd32(s + 388) == 16 && rd32(s + 396) == 32,
++          "item rectangles use the current top index and row height");
++    check(msg(0x182, 0) == 1 && msg(0x188) == 0 && msg(0x199, 0) == 0x76543210,
++          "deleting an earlier item shifts selection and preserves item data");
++    check(msg(0x189, 8, s + 320) == 0xffffffff && msg(0x19a, 8, 1) == 0xffffffff,
++          "invalid item indices fail without overwriting retained state");
++    msg(0x184);
++    check(msg(0x18b) == 0 && msg(0x188) == 0xffffffff,
++          "reset releases items and clears the current selection");
++    call_import(&c, "USER32.dll", "DestroyWindow", {list});
++    list = call_import(&c, "USER32.dll", "CreateWindowExA",
++                       {0, s, 0, 0x40000008, 0, 0, 180, 100, parent, 43, 0, 0});
++    gm_put_str(s + 256, "one", 32);
++    msg(0x180, 0, s + 256);
++    gm_put_str(s + 256, "two", 32);
++    msg(0x180, 0, s + 256);
++    check(msg(0x185, 1, 0xffffffff) == 0 && msg(0x190) == 2 && msg(0x191, 2, s + 384) == 2 &&
++              rd32(s + 384) == 0 && rd32(s + 388) == 1,
++          "multi-selection enumerates the selected item indices");
++    check(msg(0x185, 0, 0) == 0 && msg(0x187, 0) == 0 && msg(0x187, 1) == 1,
++          "multi-selection changes an individual item without clearing the others");
++    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
++    call_import(&c, "USER32.dll", "UnregisterClassA", {s + 64, 0});
++}
++
++static void test_system_edit() {
++    section("system Edit text, selection and typing");
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = scratch;
++    gm_put_str(s, "Edit", 32);
++    check(call_import(&c, "USER32.dll", "GetClassInfoA", {0, s, s + 128}) != 0 && rd32(s + 132) &&
++              rd32(s + 140) == 8,
++          "system Edit exposes the subclass procedure and eight extra bytes");
++    uint32_t edit = call_import(&c, "USER32.dll", "CreateWindowExA",
++                                {0, s, 0, 0x10000000, 0, 0, 160, 24, 0, 0, 0, 0});
++    check(edit != 0, "Edit creation accepts WM_NCCREATE and WM_CREATE");
++    auto msg = [&](uint32_t message, uint32_t wp = 0, uint32_t lp = 0) {
++        return call_import(&c, "USER32.dll", "SendMessageA", {edit, message, wp, lp});
++    };
++    auto text = [&]() {
++        msg(0xd, 64, s + 320);
++        return gm_str(s + 320);
++    };
++    gm_put_str(s + 256, "save001", 32);
++    check(msg(0xc, 0, s + 256) == 1 && text() == "save001" && msg(0xe) == 7 && msg(0xb8) == 0,
++          "WM_SETTEXT owns the text and clears its modification state");
++    msg(0xb1, 7, 4);
++    check(msg(0xb0, s + 384, s + 388) == 0x00070004u && rd32(s + 384) == 4 && rd32(s + 388) == 7,
++          "reversed selection reports ordered TCHAR indices");
++    gm_put_str(s + 256, "ABC", 32);
++    msg(0xc2, 1, s + 256);
++    check(text() == "saveABC" && msg(0xb8) == 1 && msg(0xc6) == 1 && msg(0xb0) == 0x00070007u,
++          "replacement owns its text, moves the caret and creates undo state");
++    check(msg(0xc7) == 1 && text() == "save001", "Undo restores the previous owned text");
++    msg(0xcd);
++    check(msg(0xc6) == 0, "EM_EMPTYUNDOBUFFER clears undo ownership");
++    msg(0xc5, 3);
++    check(msg(0xd5) == 3, "EM_GETLIMITTEXT reports the typing limit");
++    msg(0xb1, 0, 0xffffffff);
++    msg(0x102, 'A');
++    msg(0x102, 'B');
++    msg(0x102, 'C');
++    msg(0x102, 'D');
++    check(text() == "ABC", "typed text replaces selection and stops at the requested limit");
++    msg(0x102, 8);
++    check(text() == "AB", "Backspace deletes text before the caret");
++    msg(0xcf, 1);
++    msg(0x102, 'Z');
++    check(text() == "AB", "read-only state rejects user typing");
++    msg(0xcf, 0);
++    msg(0x102, 'Z');
++    check(text() == "ABZ", "clearing read-only state restores typing");
++    gm_put_str(s + 256, "longer than three", 32);
++    msg(0xc, 0, s + 256);
++    check(text() == "longer than three", "WM_SETTEXT is independent of the user typing limit");
++    msg(0xcc, '*');
++    check(msg(0xd2) == '*' && text() == "longer than three",
++          "password masking preserves the underlying text");
++    msg(0xd3, 3, (7u << 16) | 5u);
++    check(msg(0xd4) == 0x00070005u && msg(0xb2, 0, s + 384) == 0 && rd32(s + 384) == 5 &&
++              rd32(s + 392) == 153,
++          "Edit margins change the measured formatting rectangle");
++    call_import(&c, "USER32.dll", "DestroyWindow", {edit});
++}
++
 +static void test_module_icon_resources() {
 +    section("mapped module icon resources");
 +    X86 c;
@@ -4137,7 +4272,7 @@ index 7016990..d2804f3 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1469,27 @@ static void test_loader() {
+@@ -755,18 +1601,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -4168,7 +4303,7 @@ index 7016990..d2804f3 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +3967,98 @@ static void test_scheduling(X86 *c) {
+@@ -3244,6 +4099,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -4267,7 +4402,7 @@ index 7016990..d2804f3 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -6078,6 +6893,16 @@ static void test_host_mouse_routing() {
+@@ -6078,6 +7025,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -4284,7 +4419,7 @@ index 7016990..d2804f3 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7102,11 @@ static void test_user32_services() {
+@@ -6277,6 +7234,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -4296,7 +4431,7 @@ index 7016990..d2804f3 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7135,12 @@ static void test_user32_services() {
+@@ -6305,6 +7267,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -4309,7 +4444,7 @@ index 7016990..d2804f3 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7270,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7402,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -4331,7 +4466,7 @@ index 7016990..d2804f3 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7538,41 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7670,45 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
@@ -4341,6 +4476,8 @@ index 7016990..d2804f3 100644
 +        test_module_string_resources();
 +        test_module_icon_resources();
 +        test_system_button();
++        test_system_listbox();
++        test_system_edit();
 +        test_host_mouse_routing();
 +        test_point_in_rect();
 +        test_legacy_file_reads();
@@ -4365,6 +4502,8 @@ index 7016990..d2804f3 100644
 +    test_module_string_resources();
 +    test_module_icon_resources();
 +    test_system_button();
++    test_system_listbox();
++    test_system_edit();
 +    test_point_in_rect();
 +    test_legacy_file_reads();
 +    test_vb_startup_platform_apis();
@@ -4702,11 +4841,330 @@ index 2ef5486..37b4099 100644
      {"USER32.dll", "MessageBoxW", 4, u_MessageBoxW},
      {"USER32.dll", "wvsprintfA", 3, u_wvsprintfA},
      // Not imported by D3DPopTB.exe, but registered so GetProcAddress and the
+diff --git a/runtime/user32_edit.cpp b/runtime/user32_edit.cpp
+new file mode 100644
+index 0000000..22e2204
+--- /dev/null
++++ b/runtime/user32_edit.cpp
+@@ -0,0 +1,301 @@
++// System EDIT control: owned text, selection, replacement and typing. The
++// window model retains ANSI bytes or UTF-8 for Unicode windows; selection
++// positions are TCHAR offsets. Parent callbacks can destroy the window.
++#include "user32_internal.h"
++#include "memory.h"
++#include <algorithm>
++#include <climits>
++
++namespace user32 {
++namespace {
++uint32_t length(const Window &w) {
++    return w.unicode ? wide_units(w.title_utf8) : uint32_t(w.title_utf8.size());
++}
++// Translate a UTF-16 selection offset into an offset of the model's UTF-8
++// string. ANSI offsets already index bytes. Do not split a surrogate pair.
++size_t byte_offset(const Window &w, uint32_t offset) {
++    if (!w.unicode)
++        return std::min<size_t>(offset, w.title_utf8.size());
++    size_t n = 0;
++    uint32_t units = 0;
++    while (n < w.title_utf8.size() && units < offset) {
++        uint8_t ch = uint8_t(w.title_utf8[n]);
++        size_t bytes = ch < 0x80 ? 1 : ch < 0xe0 ? 2 : ch < 0xf0 ? 3 : 4;
++        units += bytes == 4 ? 2 : 1;
++        n = std::min(n + bytes, w.title_utf8.size());
++    }
++    return n;
++}
++void notify(X86 *c, uint32_t hwnd, uint32_t code) {
++    Window *w = find_window(hwnd);
++    if (w && w->parent) {
++        uint32_t parent = w->parent, id = w->id;
++        host_dispatch_to_wndproc(c, parent, 0x111, (code << 16) | (id & 0xffff), hwnd);
++    }
++}
++void changed(X86 *c, uint32_t hwnd) {
++    notify(c, hwnd, 0x400); // EN_UPDATE
++    if (find_window(hwnd))
++        notify(c, hwnd, 0x300); // EN_CHANGE
++}
++void replace(X86 *c, uint32_t hwnd, const std::string &text, bool undo, bool typed) {
++    Window *w = find_window(hwnd);
++    if (!w || (typed && w->edit_readonly))
++        return;
++    uint32_t total = length(*w);
++    uint32_t start = std::min({w->edit_start, w->edit_end, total});
++    uint32_t end = std::min(std::max(w->edit_start, w->edit_end), total);
++    uint32_t inserted = w->unicode ? wide_units(text) : uint32_t(text.size());
++    if (typed && uint64_t(total - (end - start)) + inserted > w->edit_limit) {
++        notify(c, hwnd, 0x501); // EN_MAXTEXT
++        return;
++    }
++    size_t first = byte_offset(*w, start), last = byte_offset(*w, end);
++    if (undo) {
++        w->edit_undo = w->title_utf8;
++        w->edit_can_undo = true;
++    } else
++        w->edit_can_undo = false;
++    w->title_utf8.replace(first, last - first, text);
++    w->edit_start = w->edit_end = start + inserted;
++    w->edit_modified = true;
++    w->update_pending = true;
++    changed(c, hwnd);
++}
++std::string character(uint16_t unit, bool wide) {
++    if (!wide)
++        return std::string(1, char(unit));
++    if (unit < 0x80)
++        return std::string(1, char(unit));
++    if (unit < 0x800)
++        return {char(0xc0 | (unit >> 6)), char(0x80 | (unit & 63))};
++    return {char(0xe0 | (unit >> 12)), char(0x80 | ((unit >> 6) & 63)), char(0x80 | (unit & 63))};
++}
++void paint(X86 *c, uint32_t hwnd, uint32_t into) {
++    Window *w = find_window(hwnd);
++    if (!w)
++        return;
++    if (!into)
++        w->update_pending = false;
++    uint32_t parent = w->parent, font = w->font;
++    int32_t width = w->w, height = w->h;
++    uint16_t margin_left = w->edit_margin_left, margin_right = w->edit_margin_right;
++    bool multiline = (w->style & 4) != 0;
++    std::string text =
++        w->edit_password
++            ? std::string(length(*w), char(w->edit_password < 128 ? w->edit_password : '*'))
++            : w->title_utf8;
++    if (!w->unicode && !w->edit_password) {
++        // Convert the ANSI window's bytes for the shared UTF-16 text renderer.
++        std::string utf8;
++        for (uint8_t byte : text)
++            utf8 += character(gdi::font_ansi_unit(byte), true);
++        text = std::move(utf8);
++    }
++    uint32_t dc = into ? into : gdi_window_dc(hwnd);
++    auto *state = gdi::dc_of(dc);
++    if (!state)
++        return;
++    uint32_t old_font = state->font;
++    if (font)
++        state->font = font;
++    uint32_t brush = parent ? host_dispatch_to_wndproc(c, parent, 0x133, dc, hwnd) : 0;
++    state = gdi::dc_of(dc);
++    if (!state)
++        return;
++    uint32_t pixel = gdi::argb(state->bk_color), color = 0;
++    if (brush && gdi::brush_color(brush, &color))
++        pixel = color;
++    gdi::fill(dc, {0, 0, width, height}, pixel);
++    uint32_t units = wide_units(text), block = heap_alloc(16 + (units + 1) * 2, true);
++    if (block) {
++        wr32(block, margin_left);
++        wr32(block + 4, 1);
++        wr32(block + 8, uint32_t(width - margin_right));
++        wr32(block + 12, uint32_t(height));
++        gm_put_wstr(block + 16, text, units + 1);
++        gdi::draw_text(dc, block + 16, units, block, multiline ? 0x810 : 0x820);
++        heap_free(block);
++    }
++    if (auto *after = gdi::dc_of(dc))
++        after->font = old_font;
++    if (!into)
++        gdi_release_window_dc(hwnd, dc);
++}
++} // namespace
++void edit_proc(X86 *c) {
++    uint32_t hwnd = arg(c, 0), msg = arg(c, 1), wp = arg(c, 2), lp = arg(c, 3);
++    Window *w = find_window(hwnd);
++    if (!w) {
++        set_eax(c, 0);
++        return;
++    }
++    LOGV("Edit(%08x): msg=%04x wp=%08x lp=%08x", hwnd, msg, wp, lp);
++    uint32_t result = 0;
++    switch (msg) {
++    case 1:
++        w->edit_readonly = (w->style & 0x800) != 0;
++        w->edit_password = w->style & 0x20 ? '*' : 0;
++        break;
++    case 0xc: // WM_SETTEXT is not constrained by EM_LIMITTEXT
++        def_window_proc(c, w->unicode);
++        w = find_window(hwnd);
++        if (w) {
++            w->edit_start = w->edit_end = 0;
++            w->edit_modified = false;
++            w->edit_can_undo = false;
++            w->update_pending = true;
++            changed(c, hwnd);
++        }
++        result = w ? 1 : 0;
++        break;
++    case 0xf:
++    case 0x318:
++        paint(c, hwnd, wp);
++        break;
++    case 0x30:
++        w->font = wp;
++        if (lp)
++            w->update_pending = true;
++        break;
++    case 0x31:
++        result = w->font;
++        break;
++    case 0x87:
++        result = 0x89;
++        break; // WANTARROWS | WANTCHARS | HASSETSEL
++    case 0xb0: // EM_GETSEL
++        if ((wp && !gm_valid(wp, 4)) || (lp && !gm_valid(lp, 4)))
++            break;
++        if (wp)
++            wr32(wp, std::min(w->edit_start, w->edit_end));
++        if (lp)
++            wr32(lp, std::max(w->edit_start, w->edit_end));
++        result = w->edit_start > 65535 || w->edit_end > 65535
++                     ? 0xffffffffu
++                     : (std::max(w->edit_start, w->edit_end) << 16) |
++                           std::min(w->edit_start, w->edit_end);
++        break;
++    case 0xb1: // EM_SETSEL
++        if (wp == 0xffffffffu)
++            w->edit_start = w->edit_end;
++        else {
++            w->edit_start = std::min(wp, length(*w));
++            w->edit_end = lp == 0xffffffffu ? length(*w) : std::min(lp, length(*w));
++        }
++        break;
++    case 0xb2: // EM_GETRECT
++        if (lp && gm_valid(lp, 16)) {
++            wr32(lp, w->edit_margin_left);
++            wr32(lp + 4, 1);
++            wr32(lp + 8, uint32_t(w->w - w->edit_margin_right));
++            wr32(lp + 12, uint32_t(w->h));
++        }
++        break;
++    case 0xb8:
++        result = w->edit_modified;
++        break;
++    case 0xb9:
++        w->edit_modified = wp != 0;
++        break;
++    case 0xba: { // EM_GETLINECOUNT
++        result = 1;
++        if (w->style & 4)
++            result += uint32_t(std::count(w->title_utf8.begin(), w->title_utf8.end(), '\n'));
++        break;
++    }
++    case 0xbb: // EM_LINEINDEX, single-line control
++        result = wp == 0 || wp == 0xffffffffu ? 0 : 0xffffffffu;
++        break;
++    case 0xc1:
++        result = length(*w);
++        break; // EM_LINELENGTH, single-line control
++    case 0xc2: // EM_REPLACESEL
++        replace(c, hwnd, w->unicode ? gm_wstr(lp) : gm_str(lp), wp != 0, false);
++        break;
++    case 0xc5:
++        w->edit_limit = wp ? std::min(wp, 0x7ffffffeu) : (w->style & 4 ? 1 : 0x7ffffffeu);
++        break;
++    case 0xc6:
++        result = w->edit_can_undo;
++        break;
++    case 0xc7: // EM_UNDO
++        if (w->edit_can_undo) {
++            w->title_utf8.swap(w->edit_undo);
++            w->edit_start = w->edit_end = length(*w);
++            w->edit_modified = true;
++            w->update_pending = true;
++            result = 1;
++            changed(c, hwnd);
++        }
++        break;
++    case 0xcc:
++        w->edit_password = wp & 0xffff;
++        w->update_pending = true;
++        break;
++    case 0xcd:
++        w->edit_can_undo = false;
++        w->edit_undo.clear();
++        break;
++    case 0xce:
++    case 0xcb: // EM_GETFIRSTVISIBLELINE / EM_SCROLLCARET for unscrolled text
++        break;
++    case 0xcf:
++        w->edit_readonly = wp != 0;
++        result = 1;
++        break;
++    case 0xd2:
++        result = w->edit_password;
++        break;
++    case 0xd3: // EM_SETMARGINS; EC_USEFONTINFO restores the default inset.
++        if (wp & 1)
++            w->edit_margin_left = uint16_t(lp) == 0xffff ? 2 : uint16_t(lp);
++        if (wp & 2)
++            w->edit_margin_right = uint16_t(lp >> 16) == 0xffff ? 2 : uint16_t(lp >> 16);
++        w->update_pending = true;
++        break;
++    case 0xd4:
++        result = uint32_t(w->edit_margin_left) | (uint32_t(w->edit_margin_right) << 16);
++        break;
++    case 0xd5:
++        result = w->edit_limit;
++        break;
++    case 0x102: // WM_CHAR
++        if (!w->enabled || w->edit_readonly)
++            break;
++        if (wp == 8) {
++            if (w->edit_start == w->edit_end && w->edit_start)
++                --w->edit_start;
++            replace(c, hwnd, "", true, true);
++        } else if (wp >= 32 && wp < 0xd800)
++            replace(c, hwnd, character(uint16_t(wp), w->unicode), true, true);
++        else if (wp == 13 && (w->style & 4))
++            replace(c, hwnd, "\r\n", true, true);
++        break;
++    case 0x100: // WM_KEYDOWN: caret and Delete
++        if (wp == 0x24)
++            w->edit_start = w->edit_end = 0;
++        else if (wp == 0x23)
++            w->edit_start = w->edit_end = length(*w);
++        else if (wp == 0x25)
++            w->edit_start = w->edit_end = w->edit_start ? w->edit_start - 1 : 0;
++        else if (wp == 0x27)
++            w->edit_start = w->edit_end = std::min(w->edit_end + 1, length(*w));
++        else if (wp == 0x2e && !w->edit_readonly) {
++            if (w->edit_start == w->edit_end)
++                w->edit_end = std::min(w->edit_end + 1, length(*w));
++            replace(c, hwnd, "", true, true);
++        }
++        break;
++    default:
++        if (msg >= 0xb0 && msg <= 0xda) {
++            log_once(("edit-message:" + std::to_string(msg)).c_str(),
++                     "Edit message %04x is unsupported", msg);
++        } else {
++            def_window_proc(c, w->unicode);
++            return;
++        }
++    }
++    set_eax(c, result);
++}
++} // namespace user32
 diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
-index ae4313f..b4198ae 100644
+index ae4313f..dc2c74f 100644
 --- a/runtime/user32_internal.h
 +++ b/runtime/user32_internal.h
-@@ -40,6 +40,9 @@ struct Window {
+@@ -24,6 +24,11 @@ struct WndClass {
+     std::vector<uint32_t> extra;
+ };
+ 
++struct ListItem {
++    std::string text;
++    uint32_t data = 0;
++    bool selected = false;
++};
+ struct Window {
+     gdi::Surface surface;
+     uint32_t hwnd = 0;
+@@ -40,7 +45,18 @@ struct Window {
      uint32_t region = 0;
      uint32_t show_cmd = 0;
      uint32_t userdata = 0;
@@ -4714,13 +5172,446 @@ index ae4313f..b4198ae 100644
 +    uint32_t button_check = 0, button_image = 0;
 +    bool button_pressed = false;
      uint32_t font = 0; // WM_SETFONT, kept for the system control classes
++    std::vector<ListItem> list_items;
++    int32_t list_selection = -1, list_caret = 0, list_top = 0;
++    uint32_t list_item_height = 16, list_extent = 0;
++    uint32_t edit_start = 0, edit_end = 0, edit_limit = 32767, edit_password = 0;
++    uint16_t edit_margin_left = 2, edit_margin_right = 2;
++    bool edit_modified = false, edit_readonly = false;
++    std::string edit_undo;
++    bool edit_can_undo = false;
      uint32_t hinstance = 0;
      std::vector<uint32_t> extra;
+     bool visible = false;
+@@ -92,8 +108,10 @@ bool destroy_window(X86 *c, uint32_t hwnd);
+ void client_origin(uint32_t hwnd, int32_t *x, int32_t *y);
+ void display_rect(uint32_t out);
+ void alias_ansi(X86 *c, const char *name);
+-// Registers the system control classes (STATIC) on first use.
++// Registers the system control classes on first use.
+ void ensure_system_classes();
++void listbox_proc(X86 *c);
++void edit_proc(X86 *c);
+ } // namespace user32
+ void user32_wide_register();
+ 
+diff --git a/runtime/user32_listbox.cpp b/runtime/user32_listbox.cpp
+new file mode 100644
+index 0000000..2f9a7ad
+--- /dev/null
++++ b/runtime/user32_listbox.cpp
+@@ -0,0 +1,406 @@
++// The system LISTBOX procedure remains callable through framework subclasses.
++// Item strings and selection belong to the window, so destruction releases
++// them. Parent notifications may destroy the control: copy state first and
++// never retain a Window pointer across a guest callback.
++#include "user32_internal.h"
++#include "memory.h"
++#include <algorithm>
++#include <cctype>
++#include <climits>
++
++namespace user32 {
++namespace {
++constexpr uint32_t ERROR = 0xffffffffu;
++bool multiple(const Window &w) {
++    return (w.style & 0x808) != 0;
++}
++bool has_strings(const Window &w) {
++    return !(w.style & 0x30) || (w.style & 0x40);
++}
++bool index(const Window &w, uint32_t n) {
++    return n < w.list_items.size();
++}
++std::string folded(std::string s) {
++    for (char &ch : s)
++        if (uint8_t(ch) < 128)
++            ch = char(std::tolower(uint8_t(ch)));
++    return s;
++}
++void notify(X86 *c, uint32_t hwnd, uint32_t code) {
++    Window *w = find_window(hwnd);
++    if (w && (w->style & 1) && w->parent) {
++        uint32_t parent = w->parent, id = w->id;
++        host_dispatch_to_wndproc(c, parent, 0x111, (code << 16) | (id & 0xffff), hwnd);
++    }
++}
++void select(Window &w, int32_t n) {
++    w.list_selection = n;
++    if (n >= 0)
++        w.list_caret = n;
++    for (size_t i = 0; i < w.list_items.size(); ++i)
++        w.list_items[i].selected = int32_t(i) == n;
++    w.update_pending = true;
++}
++void paint(X86 *c, uint32_t hwnd, uint32_t into) {
++    Window *w = find_window(hwnd);
++    if (!w)
++        return;
++    if (!into)
++        w->update_pending = false;
++    const uint32_t font = w->font, parent = w->parent;
++    const int32_t width = w->w, height = w->h, top = w->list_top;
++    const uint32_t row_height = std::max(1u, w->list_item_height);
++    // Snapshot text and highlight state before WM_CTLCOLORLISTBOX.
++    std::vector<ListItem> visible;
++    for (int32_t n = top; n >= 0 && size_t(n) < w->list_items.size() &&
++                          uint64_t(n - top) * row_height < uint64_t(std::max(0, height));
++         ++n)
++        visible.push_back(w->list_items[size_t(n)]);
++    uint32_t dc = into ? into : gdi_window_dc(hwnd);
++    auto *state = gdi::dc_of(dc);
++    if (!state)
++        return;
++    uint32_t old_font = state->font;
++    if (font)
++        state->font = font;
++    uint32_t brush = parent ? host_dispatch_to_wndproc(c, parent, 0x134, dc, hwnd) : 0;
++    state = gdi::dc_of(dc);
++    if (!state)
++        return;
++    uint32_t background = gdi::argb(state->bk_color), color = 0;
++    if (brush && gdi::brush_color(brush, &color))
++        background = color;
++    uint32_t old_text = state->text_color, old_background = state->bk_color;
++    gdi::fill(dc, {0, 0, width, height}, background);
++    for (size_t i = 0; i < visible.size(); ++i) {
++        int32_t y = int32_t(i * row_height);
++        if (visible[i].selected) {
++            gdi::fill(dc, {0, y, width, int32_t(y + row_height)}, 0xff0078d7u);
++            state->text_color = 0xffffff;
++        } else
++            state->text_color = old_text;
++        uint32_t units = wide_units(visible[i].text);
++        uint32_t block = heap_alloc(16 + (units + 1) * 2, true);
++        if (block) {
++            wr32(block, 2);
++            wr32(block + 4, uint32_t(y));
++            wr32(block + 8, uint32_t(width));
++            wr32(block + 12, uint32_t(y + row_height));
++            gm_put_wstr(block + 16, visible[i].text, units + 1);
++            gdi::draw_text(dc, block + 16, units, block, 0x820); // SINGLELINE | NOPREFIX
++            heap_free(block);
++        }
++    }
++    state->text_color = old_text;
++    state->bk_color = old_background;
++    state->font = old_font;
++    if (!into)
++        gdi_release_window_dc(hwnd, dc);
++}
++uint32_t find(const Window &w, uint32_t start, const std::string &text, bool exact) {
++    auto query = folded(text);
++    size_t count = w.list_items.size();
++    if (!count)
++        return ERROR;
++    for (size_t i = 0; i < count; ++i) {
++        size_t n = (uint64_t(start) + 1 + i) % count;
++        if (start == ERROR)
++            n = i;
++        auto candidate = folded(w.list_items[n].text);
++        if (exact ? candidate == query : candidate.compare(0, query.size(), query) == 0)
++            return uint32_t(n);
++    }
++    return ERROR;
++}
++} // namespace
++
++void listbox_proc(X86 *c) {
++    uint32_t hwnd = arg(c, 0), msg = arg(c, 1), wp = arg(c, 2), lp = arg(c, 3);
++    Window *w = find_window(hwnd);
++    if (!w) {
++        set_eax(c, ERROR);
++        return;
++    }
++    LOGV("ListBox(%08x): msg=%04x wp=%08x lp=%08x", hwnd, msg, wp, lp);
++    uint32_t result = 0;
++    switch (msg) {
++    case 0xf:
++    case 0x318:
++        paint(c, hwnd, wp);
++        break;
++    case 0x30: // WM_SETFONT
++        w->font = wp;
++        if (lp)
++            w->update_pending = true;
++        break;
++    case 0x31:
++        result = w->font;
++        break;
++    case 0x87:
++        result = 0x81;
++        break; // DLGC_WANTARROWS | DLGC_WANTCHARS
++    case 0x180:
++    case 0x181: { // LB_ADDSTRING / LB_INSERTSTRING
++        if (w->style & 0x2000) {
++            result = ERROR;
++            break;
++        } // unsupported LBS_NODATA
++        ListItem item;
++        if (has_strings(*w)) {
++            if (!lp || !gm_valid(lp, w->unicode ? 2 : 1)) {
++                result = ERROR;
++                break;
++            }
++            item.text = w->unicode ? gm_wstr(lp) : gm_str(lp);
++        } else
++            item.data = lp;
++        size_t n = msg == 0x181 && wp != ERROR ? std::min<size_t>(wp, w->list_items.size())
++                                               : w->list_items.size();
++        if (msg == 0x180 && (w->style & 2) && has_strings(*w)) {
++            auto query = folded(item.text);
++            n = 0;
++            while (n < w->list_items.size() && folded(w->list_items[n].text) <= query)
++                ++n;
++        }
++        w->list_items.insert(w->list_items.begin() + n, std::move(item));
++        if (w->list_selection >= int32_t(n))
++            ++w->list_selection;
++        if (w->list_caret >= int32_t(n) && w->list_items.size() > 1)
++            ++w->list_caret;
++        w->update_pending = true;
++        result = uint32_t(n);
++        break;
++    }
++    case 0x182: // LB_DELETESTRING
++        if (!index(*w, wp)) {
++            result = ERROR;
++            break;
++        }
++        w->list_items.erase(w->list_items.begin() + wp);
++        if (w->list_selection == int32_t(wp))
++            w->list_selection = -1;
++        else if (w->list_selection > int32_t(wp))
++            --w->list_selection;
++        w->list_caret = std::min(w->list_caret, std::max(0, int32_t(w->list_items.size()) - 1));
++        w->list_top = std::min(w->list_top, w->list_caret);
++        w->update_pending = true;
++        result = uint32_t(w->list_items.size());
++        break;
++    case 0x184: // LB_RESETCONTENT
++        w->list_items.clear();
++        w->list_selection = -1;
++        w->list_caret = w->list_top = 0;
++        w->update_pending = true;
++        break;
++    case 0x185: // LB_SETSEL, multi-selection only
++        if (!multiple(*w) || (lp != ERROR && !index(*w, lp))) {
++            result = ERROR;
++            break;
++        }
++        if (lp == ERROR)
++            for (auto &item : w->list_items)
++                item.selected = wp != 0;
++        else
++            w->list_items[lp].selected = wp != 0;
++        w->update_pending = true;
++        break;
++    case 0x186: // LB_SETCURSEL never sends LBN_SELCHANGE
++        if (multiple(*w) || (wp != ERROR && !index(*w, wp))) {
++            result = ERROR;
++            break;
++        }
++        select(*w, int32_t(wp));
++        result = wp;
++        break;
++    case 0x187:
++        result = index(*w, wp) ? uint32_t(w->list_items[wp].selected) : ERROR;
++        break;
++    case 0x188:
++        result = uint32_t(multiple(*w) ? w->list_caret : w->list_selection);
++        break;
++    case 0x189:
++    case 0x18a: { // LB_GETTEXT / LB_GETTEXTLEN
++        if (!index(*w, wp)) {
++            result = ERROR;
++            break;
++        }
++        const auto &item = w->list_items[wp];
++        if (!has_strings(*w)) {
++            if (msg == 0x189) {
++                if (!lp || !gm_valid(lp, 4)) {
++                    result = ERROR;
++                    break;
++                }
++                wr32(lp, item.data);
++            }
++            result = 4;
++            break;
++        }
++        uint32_t n = w->unicode ? wide_units(item.text) : uint32_t(item.text.size());
++        if (msg == 0x189 && (!lp || !gm_valid(lp, (n + 1) * (w->unicode ? 2 : 1)))) {
++            result = ERROR;
++            break;
++        }
++        result = msg == 0x189 ? put_text(lp, n + 1, item.text, w->unicode) : n;
++        break;
++    }
++    case 0x18b:
++        result = uint32_t(w->list_items.size());
++        break;
++    case 0x18c:
++    case 0x18f:
++    case 0x1a2: { // SELECTSTRING / FINDSTRING / FINDSTRINGEXACT
++        if (!has_strings(*w) || !lp || !gm_valid(lp, w->unicode ? 2 : 1)) {
++            result = ERROR;
++            break;
++        }
++        result = find(*w, wp, w->unicode ? gm_wstr(lp) : gm_str(lp), msg == 0x1a2);
++        if (msg == 0x18c && result != ERROR)
++            select(*w, int32_t(result));
++        break;
++    }
++    case 0x18e:
++        result = uint32_t(w->list_top);
++        break;
++    case 0x190:
++        result = multiple(*w)
++                     ? uint32_t(std::count_if(w->list_items.begin(), w->list_items.end(),
++                                              [](const ListItem &item) { return item.selected; }))
++                     : ERROR;
++        break;
++    case 0x191: {
++        if (!multiple(*w) || wp > GUEST_SIZE / 4 || (wp && (!lp || !gm_valid(lp, wp * 4)))) {
++            result = ERROR;
++            break;
++        }
++        for (size_t i = 0; i < w->list_items.size() && result < wp; ++i)
++            if (w->list_items[i].selected)
++                wr32(lp + result++ * 4, uint32_t(i));
++        break;
++    }
++    case 0x193:
++        result = w->list_extent;
++        break;
++    case 0x194:
++        w->list_extent = wp;
++        break;
++    case 0x197:
++        if (!index(*w, wp)) {
++            result = ERROR;
++            break;
++        }
++        w->list_top = int32_t(wp);
++        w->update_pending = true;
++        break;
++    case 0x198: { // LB_GETITEMRECT
++        if (!index(*w, wp) || !lp || !gm_valid(lp, 16)) {
++            result = ERROR;
++            break;
++        }
++        int64_t y = (int64_t(wp) - w->list_top) * w->list_item_height;
++        wr32(lp, 0);
++        wr32(lp + 4, uint32_t(y));
++        wr32(lp + 8, uint32_t(w->w));
++        wr32(lp + 12, uint32_t(y + w->list_item_height));
++        break;
++    }
++    case 0x199:
++        result = index(*w, wp) ? w->list_items[wp].data : ERROR;
++        break;
++    case 0x19a:
++        if (!index(*w, wp)) {
++            result = ERROR;
++            break;
++        }
++        w->list_items[wp].data = lp;
++        break;
++    case 0x19b: // LB_SELITEMRANGE
++        if (!multiple(*w)) {
++            result = ERROR;
++            break;
++        }
++        for (uint32_t i = lp & 0xffff; i <= (lp >> 16) && i < w->list_items.size(); ++i)
++            w->list_items[i].selected = wp != 0;
++        w->update_pending = true;
++        break;
++    case 0x19e: // LB_SETCARETINDEX
++        if (!index(*w, wp)) {
++            result = ERROR;
++            break;
++        }
++        w->list_caret = int32_t(wp);
++        break;
++    case 0x19f:
++        result = uint32_t(w->list_caret);
++        break;
++    case 0x1a0: // LB_SETITEMHEIGHT, fixed-height model
++        if (!lp || lp > 255 || (w->style & 0x20)) {
++            result = ERROR;
++            break;
++        }
++        w->list_item_height = lp;
++        w->update_pending = true;
++        break;
++    case 0x1a1:
++        result = w->list_item_height;
++        break;
++    case 0x1a8:
++        result = wp;
++        break;    // LB_INITSTORAGE: advisory capacity
++    case 0x100: { // WM_KEYDOWN
++        if (!w->enabled || w->list_items.empty())
++            break;
++        int32_t old = w->list_selection, n = old < 0 ? (wp == 0x28 ? -1 : 0) : old;
++        if (wp == 0x26)
++            --n;
++        else if (wp == 0x28)
++            ++n;
++        else if (wp == 0x24)
++            n = 0;
++        else if (wp == 0x23)
++            n = int32_t(w->list_items.size()) - 1;
++        else
++            break;
++        n = std::clamp(n, 0, int32_t(w->list_items.size()) - 1);
++        select(*w, n);
++        if (n != old)
++            notify(c, hwnd, 1);
++        break;
++    }
++    case 0x201:
++    case 0x203: { // mouse selection / double-click
++        if (!w->enabled || (w->style & 0x4000))
++            break;
++        int32_t y = int16_t(lp >> 16), x = int16_t(lp);
++        if (x < 0 || x >= w->w || y < 0 || y >= w->h)
++            break;
++        uint32_t n = uint32_t(w->list_top + y / int32_t(std::max(1u, w->list_item_height)));
++        if (!index(*w, n))
++            break;
++        bool changed = w->list_selection != int32_t(n);
++        if (multiple(*w)) {
++            w->list_items[n].selected = !w->list_items[n].selected;
++            w->list_caret = int32_t(n);
++            changed = true;
++        } else
++            select(*w, int32_t(n));
++        w->update_pending = true;
++        if (changed)
++            notify(c, hwnd, 1);
++        if (msg == 0x203)
++            notify(c, hwnd, 2);
++        break;
++    }
++    default:
++        if (msg >= 0x180 && msg <= 0x1b3) {
++            log_once(("listbox-message:" + std::to_string(msg)).c_str(),
++                     "ListBox message %04x is unsupported", msg);
++            result = ERROR;
++        } else {
++            def_window_proc(c, w->unicode);
++            return;
++        }
++    }
++    set_eax(c, result);
++}
++} // namespace user32
 diff --git a/runtime/user32_static.cpp b/runtime/user32_static.cpp
-index 4b3b30d..d40e864 100644
+index 4b3b30d..d68145d 100644
 --- a/runtime/user32_static.cpp
 +++ b/runtime/user32_static.cpp
-@@ -114,18 +114,232 @@ void static_proc(X86 *c) {
+@@ -114,18 +114,235 @@ void static_proc(X86 *c) {
          def_window_proc(c, w && w->unicode);
      }
  }
@@ -4947,11 +5838,12 @@ index 4b3b30d..d40e864 100644
 -    wc.atom = 0xc000 + uint32_t(classes().size());
 -    classes()["static"] = wc;
 -    classes()["#atom" + std::to_string(wc.atom)] = wc;
-+    auto add = [](const char *key, const char *name, void (*proc)(X86 *)) {
++    auto add = [](const char *key, const char *name, void (*proc)(X86 *), uint32_t extra = 0) {
 +        if (classes().count(key))
 +            return;
 +        WndClass wc;
 +        wc.style = 0x4088; // CS_GLOBALCLASS | CS_PARENTDC | CS_DBLCLKS
++        wc.wnd_extra = extra;
 +        wc.wndproc = imports_alloc_trampoline("USER32.dll", name, proc, 4);
 +        wc.name = name;
 +        wc.unicode = true;
@@ -4961,6 +5853,8 @@ index 4b3b30d..d40e864 100644
 +    };
 +    add("static", "Static", static_proc);
 +    add("button", "Button", button_proc);
++    add("listbox", "ListBox", listbox_proc, 8);
++    add("edit", "Edit", edit_proc, 8);
  }
  } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
