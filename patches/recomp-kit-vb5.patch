@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..58f2614 100644
+index 20fdc15..94b4158 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,112 @@
+@@ -2,6 +2,115 @@
  
  ## Unreleased
  
++- Package the host's General MIDI bank and notice for web and Android targets;
++  unpack named Android runtime resources without pruning profiles or game data.
++
 +- Apply an audited patch to fetched SDL PulseAudio source so playback request
 +  accounting remains under the callback's lock instead of losing concurrent updates.
 +
@@ -1017,10 +1020,23 @@ index 9246458..e0dd58f 100644
  }
  void waveout_frame_pump(X86 *c) {
 diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
-index 58e79fd..3968113 100644
+index 58e79fd..c286bee 100644
 --- a/host/CMakeLists.txt
 +++ b/host/CMakeLists.txt
-@@ -327,6 +327,7 @@ pop_host(host_tests UI_LAYER
+@@ -266,6 +266,12 @@ if(TARGET recomp_gen)
+     file(REMOVE_RECURSE ${web_resources})
+     file(MAKE_DIRECTORY ${web_resources})
+     file(COPY ${POP_ROOT}/tools/recomp/baseline/classic-modes.json DESTINATION ${web_resources})
++    configure_file(${POP_ROOT}/third_party/soundfonts/generaluser-gs/GeneralUser-GS.sf2
++                   ${web_resources}/general-midi.sf2 COPYONLY)
++    configure_file(${POP_ROOT}/third_party/soundfonts/generaluser-gs/LICENSE
++                   ${web_resources}/general-midi-LICENSE.txt COPYONLY)
++    set_property(TARGET recomp_app APPEND PROPERTY LINK_DEPENDS
++                 ${web_resources}/general-midi.sf2 ${web_resources}/general-midi-LICENSE.txt)
+     if(EXISTS ${POP_BUILD_ROOT}/recomp/symbols.json)
+       file(COPY ${POP_BUILD_ROOT}/recomp/symbols.json DESTINATION ${web_resources})
+     endif()
+@@ -327,6 +333,7 @@ pop_host(host_tests UI_LAYER
            ${POP_ROOT}/dx/d3d11.cpp ${POP_ROOT}/dx/dxgi.cpp
            ${POP_ROOT}/dx/d3dcompiler.cpp ${POP_ROOT}/dx/d3dx10.cpp
            ${POP_ROOT}/dx/d3d9_shader.cpp ${POP_ROOT}/dx/d3d9_shadergen.cpp
@@ -1403,6 +1419,52 @@ index 8bc24e5..9bddf5f 100644
      test_fullscreen_edge_presentation();
      test_native_frame_metrics();
      test_wide_cursor_bound();
+diff --git a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java b/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
+index 4c2fa4e..f474f76 100644
+--- a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
++++ b/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
+@@ -66,6 +66,7 @@ public class RecompActivity extends SDLActivity {
+         if (resources != null) {
+             try {
+                 unpackCoreAssets("mods/core", new File(resources, "mods/core"));
++                unpackRuntimeAssets(resources);
+             } catch (Exception e) {
+                 android.util.Log.e("recomp", "Cannot unpack core mod resources", e);
+             }
+@@ -135,6 +136,33 @@ public class RecompActivity extends SDLActivity {
+                     + " control layout(s) in " + dir);
+     }
+ 
++    /** Copy named runtime files without pruning the game, profile or user data. */
++    private void unpackRuntimeAssets(File base) throws java.io.IOException {
++        String[] names = { "general-midi.sf2", "general-midi-LICENSE.txt", "classic-modes.json", "symbols.json" };
++        for (String name : names) {
++            InputStream asset;
++            try {
++                asset = getAssets().open("runtime/" + name);
++            } catch (java.io.FileNotFoundException e) {
++                if (name.equals("symbols.json")) {
++                    File stale = new File(base, name);
++                    if (stale.exists() && !stale.delete())
++                        throw new java.io.IOException("Cannot remove stale runtime resource " + stale);
++                    continue; // optional translation index
++                }
++                throw e;
++            }
++            File temporary = new File(base, ".runtime-" + name + ".tmp");
++            try (InputStream in = asset; OutputStream out = new FileOutputStream(temporary)) {
++                byte[] buffer = new byte[16 * 1024];
++                for (int n; (n = in.read(buffer)) > 0; )
++                    out.write(buffer, 0, n);
++            }
++            if (!temporary.renameTo(new File(base, name)))
++                throw new java.io.IOException("Cannot replace runtime resource " + name);
++        }
++    }
++
+     /** Refresh only the app-owned core resources before native startup.
+      * Same-sized edits are copied too; user mods and profiles live elsewhere.
+      */
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
 index 10a5e39..4499b0c 100644
 --- a/runtime/CMakeLists.txt
@@ -9335,6 +9397,53 @@ index b59ecac..ee21e56 100644
  uint32_t host_main_window();              // first created top-level HWND, or 0
  uint32_t host_window_proc(uint32_t hwnd); // guest WNDPROC address, or 0
  bool host_window_rect(uint32_t hwnd, int32_t *x, int32_t *y, int32_t *w, int32_t *h);
+diff --git a/tests/test_build_py.py b/tests/test_build_py.py
+index b57433e..67008fa 100644
+--- a/tests/test_build_py.py
++++ b/tests/test_build_py.py
+@@ -3,6 +3,7 @@
+ import importlib.util
+ import os
+ from pathlib import Path
++import tempfile
+ import unittest
+ from unittest.mock import patch
+ 
+@@ -12,6 +13,34 @@ spec.loader.exec_module(build_py)
+ 
+ 
+ class BuildPyTests(unittest.TestCase):
++    def test_android_runtime_assets_include_bank_and_notice_without_unrelated_data(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            bank = root / "third_party/soundfonts/generaluser-gs"
++            bank.mkdir(parents=True)
++            (bank / "GeneralUser-GS.sf2").write_bytes(b"RIFFsound-bank")
++            (bank / "LICENSE").write_text("bank license")
++            (bank / "unrelated.txt").write_text("do not package")
++            modes = root / "tools/recomp/baseline"
++            modes.mkdir(parents=True)
++            (modes / "classic-modes.json").write_text("[]")
++            build = root / "build"
++            (build / "recomp").mkdir(parents=True)
++            symbols = build / "recomp/symbols.json"
++            symbols.write_text('{"symbols":[]}')
++            out = root / "apk"
++            with patch.object(build_py, "ROOT", root):
++                build_py.android_stage_runtime_assets(out, build)
++                assets = out / "app/src/main/assets/runtime"
++                self.assertEqual((assets / "general-midi.sf2").read_bytes(), b"RIFFsound-bank")
++                self.assertEqual((assets / "general-midi-LICENSE.txt").read_text(), "bank license")
++                self.assertEqual((assets / "classic-modes.json").read_text(), "[]")
++                self.assertTrue((assets / "symbols.json").is_file())
++                self.assertFalse((assets / "unrelated.txt").exists())
++                symbols.unlink()
++                build_py.android_stage_runtime_assets(out, build)
++                self.assertFalse((assets / "symbols.json").exists())
++
+     def test_default_preset_follows_the_operating_system(self):
+         self.assertEqual(build_py.default_preset("Darwin"), "macos")
+         self.assertEqual(build_py.default_preset("Linux"), "linux")
 diff --git a/tests/test_game_config.py b/tests/test_game_config.py
 index 4f45372..e9d41f1 100644
 --- a/tests/test_game_config.py
@@ -9370,6 +9479,41 @@ index 4f45372..e9d41f1 100644
          with tempfile.TemporaryDirectory() as tmp:
              game = Path(tmp) / "g"
              game.mkdir()
+diff --git a/tools/build.py b/tools/build.py
+index 6c3d908..7ca62ff 100644
+--- a/tools/build.py
++++ b/tools/build.py
+@@ -203,6 +203,22 @@ def android_stage_core_assets(out, game_dir):
+     copy_core_mods(game_dir, Path(out) / "app/src/main/assets/mods/core")
+ 
+ 
++def android_stage_runtime_assets(out, build_root):
++    """Ship the host's MIDI bank, notice, display modes and optional symbol index."""
++    assets = Path(out) / "app/src/main/assets/runtime"
++    assets.mkdir(parents=True, exist_ok=True)
++    bank = ROOT / "third_party/soundfonts/generaluser-gs"
++    for source, name in ((bank / "GeneralUser-GS.sf2", "general-midi.sf2"),
++                         (bank / "LICENSE", "general-midi-LICENSE.txt"),
++                         (ROOT / "tools/recomp/baseline/classic-modes.json", "classic-modes.json")):
++        shutil.copy2(source, assets / name)
++    symbols = Path(build_root) / "recomp/symbols.json"
++    if symbols.is_file():
++        shutil.copy2(symbols, assets / "symbols.json")
++    else:
++        (assets / "symbols.json").unlink(missing_ok=True)
++
++
+ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+     """Stage the native libraries beside the SDL activity and assemble a debug APK."""
+     library = Path(gen_dir) / "host/libmain.so"
+@@ -234,6 +250,7 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+         notice.unlink(missing_ok=True)
+     android_stage_layout_assets(out, game_dir)
+     android_stage_core_assets(out, game_dir)
++    android_stage_runtime_assets(out, build_root)
+     wrapper = "gradlew.bat" if platform.system() == "Windows" else "./gradlew"
+     subprocess.run([wrapper, "assembleDebug"], cwd=out, check=True)
+     apk = out / "app/build/outputs/apk/debug/app-debug.apk"
 diff --git a/tools/game_config.py b/tools/game_config.py
 index 20838eb..dd42c54 100644
 --- a/tools/game_config.py

@@ -200,6 +200,13 @@ remains unverified. The guest arena extends to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
 cross-origin isolated page and a WebGPU-capable browser.
 
+tools/bootstrap_android.py stages checksum-pinned Windows-hosted NDK r30,
+Android API 36 revision 2 and Build Tools 37.0.0 under ignored build/toolchains/.
+It requires the existing installed Android API 35 package and verifies that the
+repository's associated license text matches its accepted agreement apart from
+whitespace. It refuses changed terms or unexpected package checksums. Android
+builds and device execution remain pending.
+
 ## Metadata references
 
 The VB project/object/event layout was checked against the primary

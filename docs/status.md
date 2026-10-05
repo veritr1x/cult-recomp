@@ -91,7 +91,18 @@ holds the PulseAudio mainloop lock while updating write accounting; it fixes a
 data race, but its relationship to the hangs is unproven. The launcher therefore
 uses the tested WSL settings. Vulkan acquisition also rebuilds and retries once
 after a recoverable out-of-date swapchain. macOS, iOS, Android and web binaries
-have not been produced; the browser toolchain is being prepared.
+have not been produced. Both browser builds are compiling with Emscripten
+6.0.11 after successful WebGPU/pthreads configuration. Windows-hosted Android
+NDK r30, API 36 revision 2 and Build Tools 37.0.0 are staged under ignored
+build/toolchains/android-sdk/. Their archives matched pinned upstream checksums;
+the repository's associated agreement matches the already accepted installed
+SDK agreement after whitespace normalization. No new agreement was accepted.
+Android compilation remains pending.
+
+Browser and Android packaging previously omitted the host's General MIDI bank.
+The pending platform builds now stage it and its license. Android also stages
+display modes and the optional symbol index, with Java copying only those named
+runtime files into the app's data root. Platform execution still needs checking.
 Windows packages now include LLVM-MinGW's shared C++ runtimes and their notices.
 Both packaged executables reach command-line argument handling with a PATH
 containing only Windows system directories. This checks loading dependencies;
@@ -119,6 +130,8 @@ The latest selected native contracts pass:
 - All desktop packaging tests on Linux: **21 pass**.
 - Windows developer/saved game-path contracts: **11 checks, zero failures**,
   including recognition of the actual drive-rooted developer executable.
+- Build argument/runtime-resource staging suite: **15 tests pass**, including
+  MIDI bank/license packaging, exclusion of unrelated files and stale-index removal.
 
 The broader portable suite previously recorded 354 passes, 76 skips and three
 failures because this Windows process lacked symlink-creation privilege in setup
