@@ -1,8 +1,8 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..7452433 100644
+index 20fdc15..7144fa4 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,24 @@
+@@ -2,6 +2,25 @@
  
  ## Unreleased
  
@@ -21,6 +21,7 @@ index 20fdc15..7452433 100644
 +- Recover distant switch arms and preserve taken branches across listing gaps;
 +  recognize split returning epilogues before inferring calls that never return.
 +- Discover callback addresses stored directly into memory fields.
++- Preserve interface adjustors whose shared method body has its own vtable entry.
 +- Allow static ports to disable runtime instruction interpretation with
 +  `[translate] allow_runtime_interpreter = false`.
 +
@@ -1838,7 +1839,7 @@ index e9d2983..7ccaf4b 100644
      # Auxiliary modules the loader maps beside the image: {name, developer path, sha256, base, size}.
      lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
 diff --git a/tools/recomp/tests/test_translate_driver.py b/tools/recomp/tests/test_translate_driver.py
-index 71465b7..dc87018 100644
+index 71465b7..797d899 100644
 --- a/tools/recomp/tests/test_translate_driver.py
 +++ b/tools/recomp/tests/test_translate_driver.py
 @@ -101,6 +101,39 @@ def _walker_image(slots):
@@ -1881,7 +1882,7 @@ index 71465b7..dc87018 100644
  def test_initterm_takes_a_table_of_function_pointers():
      """The walker is found by its shape, whatever registers it happens to use."""
      img, fns = _walker_image([0x00401000, 0, 0x00401005])
-@@ -1672,3 +1705,15 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
+@@ -1672,3 +1705,34 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
      import re
      placed = set(re.findall(r"^(L_[0-9a-f]{8}): ;", text, re.M))
      assert set(re.findall(r"goto (L_[0-9a-f]{8});", text)) <= placed
@@ -1897,6 +1898,25 @@ index 71465b7..dc87018 100644
 +    img.code_pointers = lambda *a, **kw: (set(), set())
 +    text = translate_entry_fixture(tmp_path, monkeypatch, img, {entry: code})
 +    assert "void fn_%08x(" % callback in text
++
++
++def test_relocated_adjustor_and_shared_body_keep_both_entries(tmp_path, monkeypatch):
++    """Two vtables can name an adjusted entry and its common method body."""
++    import struct
++    entry, adjustor, shared, next_fn, slot = (
++        0x00601000, 0x00601023, 0x00601028, 0x00601100, 0x00601800)
++    blocks = {entry: b"\xc3", next_fn: b"\xc3",
++              # SUB [ESP+4],8; MOV EAX,[ESP+4]; MOV EAX,[EAX+1c];
++              # PUSH EAX; MOV EAX,[EAX]; CALL [EAX+4]; RET 4.
++              adjustor: bytes.fromhex("836c2404088b4424048b401c508b00ff5004c20400"),
++              slot: struct.pack("<II", adjustor, shared)}
++    img = synthetic_image(blocks, base=0x00600000)
++    img.relocated_pointers = lambda: {adjustor: slot, shared: slot + 4}
++    text = translate_entry_fixture(tmp_path, monkeypatch, img,
++                                   {a: blocks[a] for a in (entry, next_fn)})
++    assert "void fn_%08x(" % adjustor in text
++    assert "void fn_%08x(" % shared in text
++    assert "SUB dword ptr [ESP + 0x4],0x8" in text
 diff --git a/tools/recomp/tests/test_translate_noreturn.py b/tools/recomp/tests/test_translate_noreturn.py
 index f569db1..2d0d44d 100644
 --- a/tools/recomp/tests/test_translate_noreturn.py
@@ -1955,7 +1975,7 @@ index f569db1..2d0d44d 100644
 +    text = translate(listing)
 +    assert "00401105" not in text and "goto L_00401120" not in text
 diff --git a/tools/recomp/translate.py b/tools/recomp/translate.py
-index 944f2ca..9ad10b0 100644
+index 944f2ca..c7a8bbb 100644
 --- a/tools/recomp/translate.py
 +++ b/tools/recomp/translate.py
 @@ -1336,11 +1336,17 @@ class Image(object):
@@ -2074,6 +2094,17 @@ index 944f2ca..9ad10b0 100644
          return out
  
      # ---- helpers used by emit -------------------------------------------
+@@ -4426,8 +4449,8 @@ def main():
+         own_interior = home is not None and t in home.addrs
+         independent = why != "branch" or protected_source(home)
+         if (t in scan_aliases and t in owner
+-                and entry_strength.get(owner[t].addr, 0) > strength):
+-            independent = False  # Weaker naming of an established instruction boundary.
++                and entry_strength.get(owner[t].addr, 0) >= strength):
++            independent = False  # Shared instruction boundary of an equally strong body.
+         if not own_interior and independent:
+             remember_candidate(t)
+         entry_strength[t] = strength
 @@ -4968,7 +4991,10 @@ def main():
                              dst = parse_operand(ins.ops[0])
                          except TranslateError:
@@ -2086,6 +2117,27 @@ index 944f2ca..9ad10b0 100644
                              continue
                      immediates.add(src.imm)
              # Collect all scan candidates against the settled protected code
+@@ -5020,6 +5046,20 @@ def main():
+                 # boundary. In particular, a bare pointer to its RET must not
+                 # withdraw the method by stopping it one instruction early.
+                 scan_aliases.update(fn.addrs & guesses)
++                # An interface adjustor changes the stack's `this` argument
++                # then falls into a method a second vtable can name directly.
++                # The complete probe passed the ordinary content/termination
++                # checks. Preserve that one shared entry as an alias; arbitrary
++                # equally named candidates still bound speculative sweeps.
++                first = fn.insns[0]
++                if first.mnem in ("ADD", "SUB") and len(first.ops) == 2:
++                    dst, src = map(parse_operand, first.ops)
++                    shared = fn.fallthrough[0]
++                    if (dst.kind == "mem" and dst.size == 32 and dst.base == 4
++                            and dst.index is None and dst.disp == 4 and dst.seg is None
++                            and src.kind == "imm" and src.imm != 0
++                            and shared in fn.addrs and shared in reloc_candidates):
++                        scan_aliases.add(shared)
+                 for i, ins in enumerate(probe):
+                     end = fn.fallthrough[i] or ins.addr + 1
+                     weaker_interiors.update(a for a in range(ins.addr + 1, end) if a in guesses)
 diff --git a/tools/test.py b/tools/test.py
 index 0aea3f4..a0adf75 100644
 --- a/tools/test.py

@@ -31,9 +31,14 @@ x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
 The real Cult II image passes 226 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
-230 focused translator/profile/build checks and 12 private-input checks.
+231 focused translator/profile/build checks and 12 private-input checks.
 The VB5 pass emits over 21,000 discovered routines and PictureClip 580.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
+The translator also preserves shared VB interface adjustors whose method body
+has a separate vtable entry. The native GDI suite passes 142 checks.
+The broader portable suite records 352 passes, 76 skips and three failures:
+this Windows process lacks the privilege to create the symlinks in the setup
+and Linux package fixtures. That complete suite has not passed on this host.
 Neither game has reached verified gameplay.
 
 Both probes now complete the statically translated VB5 DLL's process attach,
