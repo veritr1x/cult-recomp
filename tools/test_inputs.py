@@ -52,6 +52,29 @@ class CompressionTests(unittest.TestCase):
                 filename(name)
 
 
+
+class NativeExportTests(unittest.TestCase):
+    def test_cleanup_return_discovery_excludes_push_data_and_non_epilogues(self):
+        from types import SimpleNamespace as NS
+        from export_native import cleanup_continuations
+        translator = NS(parse_operand=lambda text: NS(kind="imm", imm=int(text, 0)))
+        body = [NS(mnem="MOV"), NS(mnem="POP"), NS(mnem="RET")]
+        image = NS(is_exec=lambda at: 0x400000 <= at < 0x401000,
+                   recover=lambda at, boundaries: body)
+        push = NS(addr=0x400010, mnem="PUSH", ops=["0x400080"])
+        jump = NS(addr=0x400015, mnem="JMP", ops=["0x400040"])
+        self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])),
+                         [(0x400080, 0x400010)])
+        for target in ("0x20", "0x400030", "0x401500"):
+            push.ops = [target]
+            self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])), [])
+        push.ops = ["0x400080"]
+        body.insert(0, NS(mnem="CALL"))
+        self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])), [])
+        body[:] = [NS(mnem="MOV")]
+        self.assertEqual(list(cleanup_continuations(translator, image, [push, jump])), [])
+
+
 class ProfileTests(unittest.TestCase):
     def test_exact_images_and_disabled_builtin(self):
         sys.path.insert(0, str(ROOT / "kit/tools"))
@@ -61,6 +84,7 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(game=game_id):
                 game = ROOT / "games" / game_id
                 cfg = game_config.load(game)
+                self.assertTrue(cfg["translate"]["resumable_stacks"])
                 self.assertEqual(hashlib.sha256(cfg["developer_exe_path"].read_bytes()).hexdigest(),
                                  cfg["game"]["sha256"])
                 self.assertIn("#define RECOMP_MODS_BUILTIN_POPULOUS 0", render_header(cfg))
@@ -102,6 +126,27 @@ class InputProbeTests(unittest.TestCase):
                                "[recomp] call to 00000000 (return=7405612a): raising an access violation, as Windows would\n")
         self.assertTrue(result["script_completed"])
         self.assertEqual(len(result["guest_access_violations"]), 1)
+
+
+class BundledDependencyTests(unittest.TestCase):
+    def test_guest_data_is_copied_and_different_existing_input_preserved(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from prepare_modules import bundle_dependency
+        with TemporaryDirectory() as directory:
+            game = Path(directory)
+            dependencies = game / "original/dependencies"
+            install = game / "original/install"
+            dependencies.mkdir(parents=True)
+            install.mkdir()
+            (dependencies / "StdOle2.tlb").write_bytes(b"own type-library fixture")
+            target = bundle_dependency(game, "stdole2.tlb")
+            self.assertEqual(target.read_bytes(), b"own type-library fixture")
+            self.assertEqual(bundle_dependency(game, "STDOLE2.TLB"), target)
+            target.write_bytes(b"different local input")
+            with self.assertRaises(ValueError):
+                bundle_dependency(game, "stdole2.tlb")
+            self.assertEqual(target.read_bytes(), b"different local input")
 
 
 class InterfaceThunkTests(unittest.TestCase):

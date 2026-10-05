@@ -37,6 +37,7 @@ windows_version = "4.10"
 
 [translate]
 allow_runtime_interpreter = false
+resumable_stacks = true
 function_alignment = 4
 listings = "analysis/{executable}"
 globals = "globals.toml"

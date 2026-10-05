@@ -10,7 +10,9 @@ Both reach their language-selection forms, radio buttons and frames.
 Both have completed bounded language-screen captures without called missing
 imports or unknown transfers. Titles, flags, character artwork and the Play
 label render, and native mouse clicks advance into intro processing.
-Work continues on callback coverage, save controls and audio.
+Longer probes now reach and render both main menus.
+New Game currently fails in guest cleanup/return paths. Work continues on
+those paths, input, save controls and audio.
 Runtime x86 interpretation is disabled
 for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
@@ -25,8 +27,12 @@ changes without fetching an unpublished submodule commit.
 
 | Profile | Original executable | Emitted native functions | Dispatch entries |
 | --- | --- | ---: | ---: |
-| `games/cult` | `Cult.exe` | 549 | 606 |
-| `games/cult2` | `Cult2FC.exe` | 587 | 655 |
+| `games/cult` | `Cult.exe` | 562 | 6,816 |
+| `games/cult2` | `Cult2FC.exe` | 598 | 8,214 |
+
+Both profiles enable RecompKit's resumable guest continuations. Native calls
+propagate a changed guest return address to the dispatch driver, and the
+exporter recovers verified VB cleanup epilogues after PUSH/JMP calls.
 
 Both translation reports contain zero reported instruction failures,
 zero unmodelled instructions and zero unresolved jump-table sites. These
@@ -71,8 +77,9 @@ entry and VB method/event tables. It is a bootstrap alternative to Ghidra
 listings, with provenance in `functions.tsv`; it does not export decompiler
 pseudocode. Additional dynamically discovered callbacks still need auditing.
 `prepare_modules.py` exports DLL entries, direct edges and switch arms and pins
-their hashes in each profile. It copies the four mapped module images beside
-each executable so portable bundles can find their guest data. These remain
+their hashes in each profile. It copies the four mapped module images and the
+supplied standard OLE type library beside each executable so portable bundles
+can find their guest data. These remain
 private inputs and are never registered with Windows.
 
 ## Diagnostic Windows builds
@@ -108,8 +115,12 @@ Both games render their language screens, including artwork and the Play label,
 and the scripted clicks advance into the intro. Temporary OLE storage is now
 implemented. System ListBox and Edit controls now initialize. The last completed
 input probes now activate PictureClip's native class factory and load pictures
-through OLE memory streams. They still expose two uncovered VB callbacks during
-control setup; those are audited and their translations are being refreshed.
+through OLE memory streams. The uncovered VB, Automation and cleanup callbacks
+now execute. DLL-name comparison and legacy file opens are implemented, and the
+standard OLE type library is included as guest-readable data. Both short probes
+finish with no called missing imports, unknown transfers, VB errors or access
+violations. Longer probes render both main menus; a legacy registry query is
+implemented and the next probes exercise New Game and keyboard movement.
 Both probes submit three WAV effects with nonzero audio samples. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 

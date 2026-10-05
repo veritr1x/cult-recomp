@@ -1,0 +1,9 @@
+# Coordinates refer to the 1024x768 virtual GDI desktop.
+wait 1000
+click left 696 329
+wait 1000
+click left 520 545
+wait 20000
+dump after_intro
+wait 1000
+quit

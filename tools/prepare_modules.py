@@ -20,6 +20,21 @@ MODULES = {"vb5": "MSVBVM50.DLL", "pictureclip": "PICCLP32.OCX", "automation": "
            "imagefilter": "ASYCFILT.DLL"}
 
 
+def bundle_dependency(game, filename):
+    """Expose supplied dependency bytes to guest file reads, without registration."""
+    source = next(p for p in (game / "original/dependencies").iterdir()
+                  if p.name.lower() == filename.lower())
+    target_dir = game / "original/install"
+    bundled = next((p for p in target_dir.iterdir() if p.name.lower() == filename.lower()),
+                   target_dir / filename)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if bundled.exists() and hashlib.sha256(bundled.read_bytes()).hexdigest() != digest:
+        raise ValueError(f"Preserving a different existing dependency: {bundled}")
+    if not bundled.exists():
+        shutil.copy2(source, bundled)
+    return bundled
+
+
 def interface_thunks(image):
     """Prove VB's indexed interface CALL table from its complete dispatcher.
 
@@ -63,6 +78,9 @@ def main():
         profile = game / "game.toml"
         text = profile.read_text()
         config = tomllib.loads(text)
+        # Standard OLE type information is read by the translated Automation
+        # library as a file. It is data, not an additional executable module.
+        bundle_dependency(game, "StdOle2.tlb")
         if "guest_size =" not in text:
             text = text.replace('[game]\n', '[game]\nguest_size = 0x74200000\n')
         for key in MODULES if args.module == "all" else [args.module]:
@@ -86,11 +104,7 @@ def main():
                 raise ValueError(f"Preserving a profile for a different {filename} image")
             # Portable bundles stage the installation directory. These pinned
             # image bytes are mapped as guest data; no host DLL is installed.
-            bundled = game / "original/install" / filename
-            if bundled.exists() and hashlib.sha256(bundled.read_bytes()).hexdigest() != digest:
-                raise ValueError(f"Preserving a different existing module: {bundled}")
-            if not bundled.exists():
-                shutil.copy2(path, bundled)
+            bundle_dependency(game, filename)
             seeds.update(a for a in configured.get("entry_points", []) if a not in data_exports)
             provenance = {a: "pe_export_or_entry" if a in exported_seeds else "audited_config_seed" for a in seeds}
             thunks, dispatchers = interface_thunks(image)

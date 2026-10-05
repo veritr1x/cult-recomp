@@ -28,7 +28,9 @@ def read_evidence(log):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
+    parser.add_argument("--scenario", choices=["play", "intro", "newgame"], default="play")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--trace-abi", "--trace-import-abi", dest="trace_abi", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=30)
     parser.add_argument("--toolchain", type=Path, default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64")
     args = parser.parse_args()
@@ -37,7 +39,7 @@ def main():
     failed = False
     for game_id in GAMES if args.game == "all" else [args.game]:
         game = ROOT / "games" / game_id
-        directory = game / "build/input-probe"
+        directory = game / "build" / ("input-probe" if args.scenario == "play" else f"{args.scenario}-probe")
         directory.mkdir(parents=True, exist_ok=True)
         env = {k: v for k, v in os.environ.items() if not k.startswith("RECOMP_")}
         env.update(RECOMP_PROFILE_DIR=str(directory / "profile"), RECOMP_PIN_CLOCK="1",
@@ -45,8 +47,11 @@ def main():
                    RECOMP_SMOKE_SECONDS=str(args.max_seconds), RECOMP_FRAME_EVERY="30",
                    RECOMP_FRAMES=str(directory / "frames"), RECOMP_LOG="2" if args.verbose else "1")
         env["PATH"] = str(args.toolchain.resolve() / "bin") + os.pathsep + env.get("PATH", "")
+        if args.trace_abi:
+            env["RECOMP_IMPORT_ABI_TRACE"] = "1"
+            env["RECOMP_MODULE_ABI_TRACE"] = "1"
         executable = game / "build/recomp/pop_smoke.exe"
-        script = game / "smoke/play.script"
+        script = game / "smoke" / f"{args.scenario}.script"
         timed_out = False
         try:
             result = subprocess.run([str(executable), "--script", str(script)], cwd=directory,
@@ -63,7 +68,10 @@ def main():
         record = {"returncode": returncode, "timed_out": timed_out, "platform": "Windows x64",
                   **evidence,
                   "playability_verified": False, "executable": str(executable),
-                  "script": str(script), "probe": "native mouse input and play-control transition"}
+                  "script": str(script), "scenario": args.scenario,
+                  "probe": "native mouse input and " +
+                           {"play": "play-control transition", "intro": "intro transition",
+                            "newgame": "new-game and keyboard movement"}[args.scenario]}
         (directory / "result.json").write_text(json.dumps(record, indent=2) + "\n")
         failed |= returncode != 0 or timed_out or not completed or any(
             evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "guest_access_violations", "unsupported_control_messages"))

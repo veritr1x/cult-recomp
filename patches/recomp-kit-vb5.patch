@@ -1,11 +1,25 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..bd8e9ee 100644
+index 20fdc15..e429024 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,65 @@
+@@ -2,6 +2,79 @@
  
  ## Unreleased
  
++- Finish translated helper continuations inside generated callback ABI adapters
++  when resumable guest stacks are enabled.
++
++- Compare ANSI library names without case using portable Windows-1252 letter
++  folding. Linguistic sort ordering remains unimplemented.
++- Open legacy files through the guest overlay, including bare-name search,
++  OFSTRUCT paths, parse/existence queries and reopening recorded paths.
++- Read legacy registry default values, including subkey queries, size queries
++  and empty defaults, through the profile registry.
++- Expose Boolean SetPixelV with the shared transformed and clipped pixel writer.
++- Play basic MCI sequencer command strings through the shared MIDI synth and
++  SMF decoder, with quoted guest paths, aliases, stop/close and status queries.
++  Reserve the synth for one MIDI client and reject unsupported commands/flags.
++
 +- Activate mapped native COM class factories through the shared guest DLL
 +  lifecycle. Format task-owned GUID strings and support streams backed by
 +  global memory, including clone ownership and backing-handle growth.
@@ -99,8 +113,404 @@ index 72e0d0a..db76bf7 100644
      ddraw_reset();
      d3d_reset();
      d3d11_reset();
+diff --git a/dx/soundlib.cpp b/dx/soundlib.cpp
+index 2ecf49b..64dac87 100644
+--- a/dx/soundlib.cpp
++++ b/dx/soundlib.cpp
+@@ -35,6 +35,20 @@ size_t next_event = 0;
+ uint32_t last_ms = 0, repeats = 0;
+ uint64_t elapsed_us = 0, duration_us = 0;
+ 
++// MCI and Soundlib share one host synth. Reserve it for one client at a time;
++// additional devices explicitly fail rather than resetting another score.
++struct MciSequence {
++    std::string alias;
++    std::vector<Event> events;
++    uint64_t elapsed = 0, duration = 0;
++    uint32_t last_ms = 0;
++    size_t next = 0;
++    bool playing = false;
++};
++MciSequence mci;
++void mci_close();
++void mci_pump();
++
+ uint16_t be16(const uint8_t *p) {
+     return (uint16_t)((p[0] << 8) | p[1]);
+ }
+@@ -56,7 +70,7 @@ bool vlq(const std::vector<uint8_t> &b, size_t &at, size_t end, uint32_t &value)
+ // Tempo changes from the merged sequence apply before converting later ticks.
+ // Unsupported formats (including SMPTE timing) fail OpenMidi explicitly.
+ bool parse_midi(const std::vector<uint8_t> &b, std::vector<Event> &out, uint64_t &duration) {
+-    if (b.size() < 14 || memcmp(b.data(), "MThd", 4) != 0)
++    if (b.size() < 14 || b.size() > 64u * 1024 * 1024 || memcmp(b.data(), "MThd", 4) != 0)
+         return false;
+     uint32_t header = be32(b.data() + 4);
+     if (header < 6 || header > b.size() - 8)
+@@ -135,6 +149,8 @@ bool parse_midi(const std::vector<uint8_t> &b, std::vector<Event> &out, uint64_t
+                 }
+                 at += size;
+             }
++            if (out.size() == 1000000)
++                return false;
+             out.push_back(std::move(e));
+             if (ended) {
+                 at = end;
+@@ -149,7 +165,11 @@ bool parse_midi(const std::vector<uint8_t> &b, std::vector<Event> &out, uint64_t
+     uint64_t tick = 0, us = 0, remainder = 0;
+     uint32_t tempo = 500000;
+     for (auto &e : out) {
++        if (e.tick - tick > (UINT64_MAX - remainder) / tempo)
++            return false;
+         uint64_t units = (e.tick - tick) * tempo + remainder;
++        if (units / division > UINT64_MAX - us)
++            return false;
+         us += units / division;
+         remainder = units % division;
+         e.us = us;
+@@ -223,6 +243,10 @@ void play() {
+     pump();
+ }
+ void create_midi(X86 *c) {
++    if (!mci.alias.empty()) {
++        set_eax(c, 0);
++        return;
++    }
+     soundlib_reset();
+     std::string sf2 = win32_midi_soundfont_path();
+     opened = host_midi_open(sf2.empty() ? nullptr : sf2.c_str()) != 0;
+@@ -233,22 +257,15 @@ void create_midi(X86 *c) {
+ // OpenMidi's sole argument points to a guest ANSI string pointer, matching
+ // the DLL's extra dereference before MultiByteToWideChar. Use the normal
+ // read resolver for case folding, overlays and drive mapping.
+-void open_midi(X86 *c) {
+-    set_eax(c, ERROR_MIDI);
+-    uint32_t ref = arg(c, 0);
+-    if (!opened || !ref || !gm_valid(ref, 4))
+-        return;
+-    uint32_t name = rd32(ref);
+-    if (!name || !gm_valid(name, 1))
+-        return;
+-    std::string path = win32_host_path_op(gm_str(name), WIN32_FILE_READ);
++uint32_t load_sequence(const std::string &name, std::vector<Event> &parsed, uint64_t &duration) {
++    std::string path = win32_host_path_op(name, WIN32_FILE_READ);
+     int fd = path.empty() ? -1 : os_fd_open(path.c_str(), OS_O_RDONLY);
+     if (fd < 0)
+-        return;
++        return 275; // MCIERR_FILE_NOT_FOUND
+     OsStat st{};
+-    if (os_fd_stat(fd, &st) != 0 || !st.is_regular || !st.size || st.size > INT32_MAX) {
++    if (os_fd_stat(fd, &st) != 0 || !st.is_regular || !st.size || st.size > 64u * 1024 * 1024) {
+         os_fd_close(fd);
+-        return;
++        return 296; // MCIERR_INVALID_FILE
+     }
+     std::vector<uint8_t> bytes((size_t)st.size);
+     size_t got = 0;
+@@ -259,9 +276,21 @@ void open_midi(X86 *c) {
+         got += (size_t)n;
+     }
+     os_fd_close(fd);
++    if (got != bytes.size() || !parse_midi(bytes, parsed, duration))
++        return 296;
++    return 0;
++}
++void open_midi(X86 *c) {
++    set_eax(c, ERROR_MIDI);
++    uint32_t ref = arg(c, 0);
++    if (!opened || !ref || !gm_valid(ref, 4))
++        return;
++    uint32_t name = rd32(ref);
++    if (!name || !gm_valid(name, 1))
++        return;
+     std::vector<Event> parsed;
+     uint64_t duration = 0;
+-    if (got != bytes.size() || !parse_midi(bytes, parsed, duration))
++    if (load_sequence(gm_str(name), parsed, duration))
+         return;
+     stop();
+     events = std::move(parsed);
+@@ -292,9 +321,246 @@ void get_volume(X86 *c) {
+     set_eax(c, (uint32_t)volume);
+ }
+ void free_midi(X86 *c) {
+-    soundlib_reset();
++    if (opened)
++        soundlib_reset();
+     set_eax(c, 0);
+ }
++
++void mci_event(const Event &event) {
++    if (event.message)
++        host_midi_short(event.message);
++    if (!event.sysex.empty())
++        host_midi_sysex(event.sysex.data(), uint32_t(event.sysex.size()));
++}
++void mci_close() {
++    if (!mci.alias.empty()) {
++        host_midi_reset();
++        host_midi_close();
++    }
++    mci = {};
++}
++void mci_pump() {
++    if (!mci.playing)
++        return;
++    uint32_t now = host_millis();
++    uint64_t advance = uint64_t(uint32_t(now - mci.last_ms)) * 1000;
++    mci.elapsed += std::min(advance, mci.duration - mci.elapsed);
++    mci.last_ms = now;
++    uint32_t budget = 4096;
++    while (mci.next < mci.events.size() && mci.events[mci.next].us <= mci.elapsed && budget--) {
++        mci_event(mci.events[mci.next++]);
++    }
++    if (mci.next == mci.events.size()) {
++        mci.playing = false;
++        host_midi_reset();
++    }
++}
++std::string command_lower(std::string text) {
++    for (char &ch : text)
++        if (ch >= 'A' && ch <= 'Z')
++            ch += 'a' - 'A';
++    return text;
++}
++bool command_words(const std::string &command, std::vector<std::string> &words) {
++    size_t at = 0;
++    while (at < command.size()) {
++        if (command[at] == ' ' || command[at] == '\t') {
++            ++at;
++            continue;
++        }
++        size_t begin = at;
++        if (command[at] == '"') {
++            begin = ++at;
++            at = command.find('"', at);
++            if (at == std::string::npos)
++                return false;
++            words.push_back(command.substr(begin, at++ - begin));
++            if (at < command.size() && command[at] != ' ' && command[at] != '\t')
++                return false;
++        } else {
++            while (at < command.size() && command[at] != ' ' && command[at] != '\t')
++                ++at;
++            words.push_back(command.substr(begin, at - begin));
++        }
++        if (words.size() > 16)
++            return false;
++    }
++    return !words.empty();
++}
++
++// Basic sequencer command strings use the shared SMF decoder and guest-frame
++// clock. Registry-inferred types, recording, notifications, command-message
++// structures, arbitrary seek ranges and synchronous wait flags remain unsupported.
++uint32_t mci_command(const std::string &command, std::string &reply) {
++    std::vector<std::string> words;
++    if (!command_words(command, words))
++        return 290; // MCIERR_BAD_CONSTANT
++    std::string verb = command_lower(words[0]);
++    if (verb == "open") {
++        if (words.size() != 6 || command_lower(words[2]) != "type" ||
++            command_lower(words[3]) != "sequencer" || command_lower(words[4]) != "alias" ||
++            words[5].empty())
++            return 259; // MCIERR_UNRECOGNIZED_KEYWORD
++        std::string alias = command_lower(words[5]);
++        if (!mci.alias.empty() && alias == mci.alias)
++            return 289; // MCIERR_DUPLICATE_ALIAS
++        if (opened || !mci.alias.empty())
++            return 265; // MCIERR_DEVICE_OPEN
++        std::vector<Event> parsed;
++        uint64_t duration = 0;
++        uint32_t result = load_sequence(words[1], parsed, duration);
++        if (result)
++            return result;
++        std::string sf2 = win32_midi_soundfont_path();
++        if (!host_midi_open(sf2.empty() ? nullptr : sf2.c_str()))
++            return 266; // MCIERR_DEVICE_NOT_INSTALLED
++        mci.alias = alias;
++        mci.events = std::move(parsed);
++        mci.duration = duration;
++        LOGV("MCI sequencer: %zu events, %llu milliseconds", mci.events.size(),
++             static_cast<unsigned long long>(duration / 1000));
++        return 0;
++    }
++    if (words.size() < 2)
++        return 273; // MCIERR_MISSING_PARAMETER
++    std::string alias = command_lower(words[1]);
++    if (verb == "close" && alias == "all" && words.size() == 2) {
++        mci_close();
++        return 0;
++    }
++    if (mci.alias.empty() || alias != mci.alias)
++        return 263; // MCIERR_INVALID_DEVICE_NAME
++    mci_pump();
++    if (verb == "status") {
++        if (words.size() != 3)
++            return 259;
++        std::string item = command_lower(words[2]);
++        if (item == "mode")
++            reply = mci.playing ? "playing" : "stopped";
++        else if (item == "length")
++            reply = std::to_string(mci.duration / 1000);
++        else if (item == "position")
++            reply = std::to_string(mci.elapsed / 1000);
++        else
++            return 274; // MCIERR_UNSUPPORTED_FUNCTION
++        return 0;
++    }
++    if (words.size() != 2)
++        return 259;
++    if (verb == "close") {
++        mci_close();
++    } else if (verb == "stop") {
++        mci.playing = false;
++        host_midi_reset();
++    } else if (verb == "play") {
++        // Restore the MIDI state at the cursor after a stop. Replaying events
++        // rebuilds program/controller and active-note state on the reset synth.
++        host_midi_reset();
++        for (size_t i = 0; i < mci.next; ++i)
++            mci_event(mci.events[i]);
++        mci.last_ms = host_millis();
++        mci.playing = mci.next < mci.events.size();
++        mci_pump();
++    } else {
++        return 261; // MCIERR_UNRECOGNIZED_COMMAND
++    }
++    return 0;
++}
++void mci_send_string(X86 *c, bool wide) {
++    uint32_t name = arg(c, 0), out = arg(c, 1), capacity = arg(c, 2);
++    if (out && capacity && gm_valid(out, wide ? 2 : 1)) {
++        if (wide)
++            wr16(out, 0);
++        else
++            wr8(out, 0);
++    }
++    std::string reply;
++    uint32_t result = mci_command(wide ? gm_wstr(name, 4096) : gm_str(name, 4096), reply);
++    if (!result && !reply.empty()) {
++        if (!out || !capacity || reply.size() + 1 > capacity ||
++            uint64_t(capacity) * (wide ? 2 : 1) > GUEST_SIZE ||
++            !gm_valid(out, capacity * (wide ? 2 : 1))) {
++            result = 268; // MCIERR_PARAM_OVERFLOW
++        } else if (wide) {
++            gm_put_wstr(out, reply, capacity);
++        } else {
++            gm_put_str(out, reply.c_str(), capacity);
++        }
++    }
++    set_eax(c, result);
++}
++void mci_string_a(X86 *c) {
++    mci_send_string(c, false);
++}
++void mci_string_w(X86 *c) {
++    mci_send_string(c, true);
++}
++void mci_device_id(X86 *c, bool wide) {
++    std::string name = wide ? gm_wstr(arg(c, 0)) : gm_str(arg(c, 0));
++    set_eax(c, !mci.alias.empty() && command_lower(name) == mci.alias ? 1 : 0);
++}
++void mci_device_a(X86 *c) {
++    mci_device_id(c, false);
++}
++void mci_device_w(X86 *c) {
++    mci_device_id(c, true);
++}
++void mci_send_command(X86 *c) {
++    set_eax(c, mci.alias.empty() ? 266 : 274);
++}
++const char *mci_error(uint32_t code) {
++    switch (code) {
++    case 0:
++        return "No error.";
++    case 259:
++        return "The specified command keyword is not supported.";
++    case 261:
++        return "The specified command is not recognized.";
++    case 263:
++        return "The specified device name is invalid.";
++    case 264:
++        return "There is not enough memory available.";
++    case 265:
++        return "The MIDI device is already in use.";
++    case 266:
++        return "The specified device is not installed on the system.";
++    case 268:
++        return "The return buffer is too small.";
++    case 273:
++        return "The command is missing a parameter.";
++    case 274:
++        return "The requested function is not supported.";
++    case 275:
++        return "The specified file was not found.";
++    case 289:
++        return "The specified device alias is already in use.";
++    case 290:
++        return "The command contains an invalid value.";
++    case 296:
++        return "The specified MIDI file is invalid.";
++    default:
++        return nullptr;
++    }
++}
++void mci_error_string(X86 *c, bool wide) {
++    const char *message = mci_error(arg(c, 0));
++    uint32_t out = arg(c, 1), capacity = arg(c, 2);
++    bool valid = message && out && capacity && uint64_t(capacity) * (wide ? 2 : 1) <= GUEST_SIZE &&
++                 gm_valid(out, capacity * (wide ? 2 : 1));
++    if (valid) {
++        if (wide)
++            gm_put_wstr(out, message, capacity);
++        else
++            gm_put_str(out, message, capacity);
++    }
++    set_eax(c, valid ? 1 : 0);
++}
++void mci_error_a(X86 *c) {
++    mci_error_string(c, false);
++}
++void mci_error_w(X86 *c) {
++    mci_error_string(c, true);
++}
+ const ImportShim shims[] = {
+     {"Soundlib.dll", "CreateMidi", 0, create_midi},
+     {"Soundlib.dll", "OpenMidi", 1, open_midi},
+@@ -303,6 +569,15 @@ const ImportShim shims[] = {
+     {"Soundlib.dll", "SetMidiVolume", 1, set_volume},
+     {"Soundlib.dll", "GetMidiVolume", 0, get_volume},
+     {"Soundlib.dll", "FreeMidi", 0, free_midi},
++    {"WINMM.dll", "mciSendStringA", 4, mci_string_a},
++    {"WINMM.dll", "mciSendStringW", 4, mci_string_w},
++    {"WINMM.dll", "mciGetDeviceIDA", 1, mci_device_a},
++    {"WINMM.dll", "mciGetDeviceIDW", 1, mci_device_w},
++    {"WINMM.dll", "mciSendCommandA", 4, mci_send_command},
++    {"WINMM.dll", "mciSendCommandW", 4, mci_send_command},
++    {"WINMM.dll", "mciGetErrorStringA", 3, mci_error_a},
++    {"WINMM.dll", "mciGetErrorStringW", 3, mci_error_w},
++    {"_INMM.dll", "mciSendCommandA", 4, mci_send_command},
+ };
+ } // namespace
+ 
+@@ -310,10 +585,13 @@ void soundlib_register() {
+     imports_register(shims, std::size(shims));
+ }
+ void soundlib_frame_pump(X86 *c) {
+-    if (c)
++    if (c) {
+         pump();
++        mci_pump();
++    }
+ }
+ void soundlib_reset() {
++    mci_close();
+     stop();
+     if (opened)
+         host_midi_close();
 diff --git a/dx/tests/dx_tests.cpp b/dx/tests/dx_tests.cpp
-index 7771a52..7d75dfa 100644
+index 7771a52..0c3af84 100644
 --- a/dx/tests/dx_tests.cpp
 +++ b/dx/tests/dx_tests.cpp
 @@ -405,6 +405,7 @@ static uint32_t g_voice_remaining = 0;
@@ -145,7 +555,101 @@ index 7771a52..7d75dfa 100644
      const uint32_t kPtrA = ptrs[0], kPtrB = ptrs[1];
      wr32(kPtrA, 0);
      wr32(kPtrB, 0);
-@@ -12270,6 +12282,78 @@ static void test_media_foundation_session() {
+@@ -6884,6 +6896,93 @@ static void test_soundlib_stub() {
+     CHECK_EQ(os_rmdir(dir), 0);
+ }
+ 
++static void test_mci_sequencer() {
++    cpu_reset();
++    soundlib_reset();
++    char directory[512];
++    snprintf(directory, sizeof directory, "%s/recomp-mci-XXXXXX", os_temp_dir());
++    CHECK(os_mkdtemp(directory) == 0);
++    const std::string file = std::string(directory) + "/Score file.dat";
++    const uint8_t midi[] = {'M', 'T',  'h', 'd', 0,   0,   0,   6, 0,    0,    0,
++                            1,   0,    96,  'M', 'T', 'r', 'k', 0, 0,    0,    11,
++                            0,   0x90, 60,  100, 96,  60,  0,   0, 0xff, 0x2f, 0};
++    FILE *output = fopen(file.c_str(), "wb");
++    CHECK(output != nullptr);
++    if (!output)
++        return;
++    CHECK_EQ(fwrite(midi, 1, sizeof midi, output), sizeof midi);
++    CHECK_EQ(fclose(output), 0);
++    win32_init(directory);
++    dx_register_shims();
++    CHECK_EQ(imports_argc(tramp("WINMM.dll", "mciSendStringA")), 4u);
++    CHECK_EQ(imports_argc(tramp("WINMM.dll", "mciGetDeviceIDA")), 1u);
++    auto command = [](const char *text, uint32_t out = 0, uint32_t capacity = 0) {
++        gm_put_str(sc(0x100), text, 512);
++        return call_shim(tramp("WINMM.dll", "mciSendStringA"), {sc(0x100), out, capacity, 0});
++    };
++    g_midi_available = false;
++    CHECK_EQ(command("open missing.dat type sequencer alias music"), 275u);
++    CHECK_EQ(command("open \"score file.dat\" type sequencer alias music"), 266u);
++    g_midi_available = true;
++    g_midi_messages.clear();
++    CHECK_EQ(command("OPEN \"score file.dat\" TYPE SEQUENCER ALIAS Music"), 0u);
++    CHECK(g_midi_messages.empty());
++    gm_put_str(sc(0x400), "MUSIC", 32);
++    CHECK_EQ(call_shim(tramp("WINMM.dll", "mciGetDeviceIDA"), {sc(0x400)}), 1u);
++    gm_put_wstr(sc(0x500), "music", 32);
++    CHECK_EQ(call_shim(tramp("WINMM.dll", "mciGetDeviceIDW"), {sc(0x500)}), 1u);
++    CHECK_EQ(command("open \"score file.dat\" type sequencer alias music"), 289u);
++    CHECK_EQ(command("open \"score file.dat\" type sequencer alias other"), 265u);
++    CHECK_EQ(call_shim(tramp("Soundlib.dll", "CreateMidi"), {}), 0u);
++    CHECK_EQ(call_shim(tramp("Soundlib.dll", "FreeMidi"), {}), 0u);
++    CHECK_EQ(command("status music length", sc(0x400), 64), 0u);
++    CHECK(gm_str(sc(0x400)) == "500");
++    wr32(sc(0x404), 0xa55aa55a);
++    CHECK_EQ(command("status music length", sc(0x400), 2), 268u);
++    CHECK_EQ(rd32(sc(0x404)), 0xa55aa55a);
++    CHECK_EQ(command("play music wait"), 259u);
++    CHECK(g_midi_messages.empty());
++    host_set_time_source_pinned(100, 250);
++    CHECK_EQ(command("play MUSIC"), 0u);
++    CHECK(std::find(g_midi_messages.begin(), g_midi_messages.end(), 0x643c90u) !=
++          g_midi_messages.end());
++    host_pinned_clock_advance();
++    host_pump_timers(&g_cpu);
++    CHECK_EQ(command("status music position", sc(0x400), 64), 0u);
++    CHECK(gm_str(sc(0x400)) == "250");
++    CHECK_EQ(command("stop music"), 0u);
++    host_pinned_clock_advance();
++    CHECK_EQ(command("status music mode", sc(0x400), 64), 0u);
++    CHECK(gm_str(sc(0x400)) == "stopped");
++    CHECK_EQ(command("status music position", sc(0x400), 64), 0u);
++    CHECK(gm_str(sc(0x400)) == "250");
++    CHECK_EQ(command("play music"), 0u);
++    host_pinned_clock_advance();
++    host_pump_timers(&g_cpu);
++    CHECK(std::find(g_midi_messages.begin(), g_midi_messages.end(), 0x003c90u) !=
++          g_midi_messages.end());
++    CHECK_EQ(command("status music mode", sc(0x400), 64), 0u);
++    CHECK(gm_str(sc(0x400)) == "stopped");
++    uint32_t closes = g_midi_closes;
++    CHECK_EQ(command("close MUSIC"), 0u);
++    CHECK_EQ(g_midi_closes, closes + 1);
++    CHECK_EQ(command("play music"), 263u);
++    CHECK_EQ(command("open \"score file.dat type sequencer alias music"), 290u);
++    CHECK_EQ(command("open \"score file.dat\" type waveaudio alias music"), 259u);
++    output = fopen(file.c_str(), "wb");
++    CHECK(output != nullptr);
++    if (output) {
++        CHECK_EQ(fwrite("not MIDI", 1, 8, output), 8u);
++        CHECK_EQ(fclose(output), 0);
++        CHECK_EQ(command("open \"score file.dat\" type sequencer alias music"), 296u);
++    }
++    host_clear_time_source();
++    g_midi_available = false;
++    soundlib_reset();
++    CHECK_EQ(remove(file.c_str()), 0);
++    CHECK_EQ(os_rmdir(directory), 0);
++}
++
+ static void test_riff_parse() {
+     cpu_reset();
+     uint32_t wav = build_test_wave();
+@@ -12270,6 +12369,78 @@ static void test_media_foundation_session() {
  
  // Driver output pointers, master gain, named MP3, and WAVEHDR completion are
  // observable API contracts: success without these leaves real games silent.
@@ -224,7 +728,11 @@ index 7771a52..7d75dfa 100644
  static void test_legacy_audio() {
      cpu_reset();
      g_plays.clear();
-@@ -12741,6 +12825,7 @@ int main() {
+@@ -12738,9 +12909,11 @@ int main() {
+         {"FMOD samples", test_fmod},
+         {"FMOD streams", test_fmod_stream},
+         {"Soundlib MIDI", test_soundlib_stub},
++        {"MCI sequencer", test_mci_sequencer},
          {"Miles arities", test_mss32_arities},
          {"RIFF WAVE", test_riff_parse},
          {"Miles samples", test_mss32_sample},
@@ -232,7 +740,7 @@ index 7771a52..7d75dfa 100644
          {"Legacy audio", test_legacy_audio},
          {"AVI reader", test_avi_reader},
          {"Miles streams", test_mss32_stream},
-@@ -12798,11 +12883,15 @@ int main() {
+@@ -12798,11 +12971,15 @@ int main() {
      };
      for (auto &t : tests) {
          int before = g_failures;
@@ -562,10 +1070,34 @@ index 10a5e39..4499b0c 100644
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
-index 06d5e2b..0c84a00 100644
+index 06d5e2b..551fe85 100644
 --- a/runtime/cpu.cpp
 +++ b/runtime/cpu.cpp
-@@ -209,7 +209,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
+@@ -148,6 +148,10 @@ int recomp_module_call(X86 *c, uint32_t target) {
+     int32_t i = module_index(m, target);
+     if (i < 0)
+         return 0;
++    const bool trace_abi = recomp_env("MODULE_ABI_TRACE") != nullptr;
++    const uint32_t saved_ebx = c->r[R_EBX], saved_esi = c->r[R_ESI], saved_edi = c->r[R_EDI],
++                   saved_ebp = c->r[R_EBP], saved_esp = c->r[R_ESP],
++                   ret = gm_valid(saved_esp, 4) ? rd32(saved_esp) : 0;
+ #ifdef RECOMP_NO_HOOKS
+     m->base_ptrs[i](c);
+ #else
+@@ -156,6 +160,12 @@ int recomp_module_call(X86 *c, uint32_t target) {
+     else
+         m->base_ptrs[i](c);
+ #endif
++    if (trace_abi && (saved_ebx != c->r[R_EBX] || saved_esi != c->r[R_ESI] ||
++                      saved_edi != c->r[R_EDI] || saved_ebp != c->r[R_EBP]))
++        LOGW("module ABI: target=%08x ret=%08x EBX=%08x->%08x ESI=%08x->%08x "
++             "EDI=%08x->%08x EBP=%08x->%08x ESP=%08x->%08x",
++             target, ret, saved_ebx, c->r[R_EBX], saved_esi, c->r[R_ESI], saved_edi, c->r[R_EDI],
++             saved_ebp, c->r[R_EBP], saved_esp, c->r[R_ESP]);
+     return 1;
+ }
+ 
+@@ -209,7 +219,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
      // call through a null pointer faults at the call, and there are no
      // instructions at it to interpret. Reading them would be the very
      // dereference this page exists to refuse.
@@ -575,7 +1107,7 @@ index 06d5e2b..0c84a00 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..f59864d 100644
+index 13ba56f..14943cb 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
 @@ -6,6 +6,7 @@
@@ -913,7 +1445,18 @@ index 13ba56f..f59864d 100644
  void stock_object(X86 *c) {
      uint32_t i = arg(c, 0);
      set_eax(c, i <= 19 ? 0x4f100 + i : 0);
-@@ -1579,6 +1673,61 @@ void get_stretch_mode(X86 *c) {
+@@ -1494,6 +1588,10 @@ void set_pixel(X86 *c) {
+                    ? arg(c, 3) & 0xffffff
+                    : 0xffffffff);
+ }
++void set_pixel_v(X86 *c) {
++    set_eax(c, write_pixel(arg(c, 0), int32_t(arg(c, 1)), int32_t(arg(c, 2)), argb(arg(c, 3))) ? 1
++                                                                                               : 0);
++}
+ void save_dc(X86 *c) {
+     auto *dc = dc_of(arg(c, 0));
+     if (!dc) {
+@@ -1579,6 +1677,61 @@ void get_stretch_mode(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      set_eax(c, dc ? dc->stretch_mode : 0);
  }
@@ -975,7 +1518,7 @@ index 13ba56f..f59864d 100644
  void rop2(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      int v = int(arg(c, 1));
-@@ -1589,6 +1738,10 @@ void rop2(X86 *c) {
+@@ -1589,6 +1742,10 @@ void rop2(X86 *c) {
      set_eax(c, dc->rop2);
      dc->rop2 = v;
  }
@@ -986,7 +1529,7 @@ index 13ba56f..f59864d 100644
  void flush(X86 *c) {
      set_eax(c, 1);
  }
-@@ -1642,12 +1795,19 @@ void gdi_model_register() {
+@@ -1642,12 +1799,20 @@ void gdi_model_register() {
      static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                         G("CreateBrushIndirect", 1, brush_indirect),
                                         G("CreatePenIndirect", 1, pen_indirect),
@@ -994,6 +1537,7 @@ index 13ba56f..f59864d 100644
                                         G("GetStockObject", 1, stock_object),
                                         G("GetPixel", 3, get_pixel),
                                         G("SetPixel", 4, set_pixel),
++                                       G("SetPixelV", 4, set_pixel_v),
                                         G("SaveDC", 1, save_dc),
                                         G("RestoreDC", 2, restore_dc),
                                         G("SetWindowOrgEx", 4, window_org),
@@ -1006,7 +1550,7 @@ index 13ba56f..f59864d 100644
                                         G("GetWindowOrgEx", 2, get_window_org),
                                         G("SetViewportOrgEx", 4, viewport_org),
                                         G("SetBrushOrgEx", 4, brush_org),
-@@ -1657,6 +1817,7 @@ void gdi_model_register() {
+@@ -1657,6 +1822,7 @@ void gdi_model_register() {
                                         G("SetStretchBltMode", 2, stretch_mode),
                                         G("GetStretchBltMode", 1, get_stretch_mode),
                                         G("SetROP2", 2, rop2),
@@ -1014,7 +1558,7 @@ index 13ba56f..f59864d 100644
                                         G("GdiFlush", 0, flush),
                                         G("UnrealizeObject", 1, unrealize),
                                         G("ResizePalette", 2, resize_palette),
-@@ -1671,10 +1832,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+@@ -1671,10 +1837,12 @@ Rect to_device(uint32_t hdc, Rect r) {
      auto *dc = dc_of(hdc);
      if (!dc)
          return {};
@@ -1029,7 +1573,7 @@ index 13ba56f..f59864d 100644
  }
  } // namespace gdi
  namespace {
-@@ -1741,6 +1904,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+@@ -1741,6 +1909,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
  }
  void create_section(X86 *c) {
      Dib d;
@@ -1037,7 +1581,7 @@ index 13ba56f..f59864d 100644
      uint32_t out = arg(c, 3);
      if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
          !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
-@@ -1864,6 +2028,12 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1864,6 +2033,12 @@ void dib_to_device(X86 *c, bool stretch) {
          set_eax(c, 0);
          return;
      }
@@ -1050,7 +1594,7 @@ index 13ba56f..f59864d 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1927,17 +2097,48 @@ void stretch_dibits(X86 *c) {
+@@ -1927,17 +2102,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -1567,10 +2111,40 @@ index a6dd8fa..d62f5d6 100644
                                         G("EnumFontsW", 4, enumerate),
                                         G("EnumFontFamiliesExW", 5, enumerate),
 diff --git a/runtime/imports.cpp b/runtime/imports.cpp
-index ec1d2b1..da96891 100644
+index ec1d2b1..1ea6040 100644
 --- a/runtime/imports.cpp
 +++ b/runtime/imports.cpp
-@@ -582,6 +582,7 @@ void imports_init() {
+@@ -1,4 +1,5 @@
+ #include "imports.h"
++#include "../platform/os.h"
+ #include "gdi32_internal.h"
+ #include "user32_internal.h"
+ #include "kernel32_internal.h"
+@@ -436,6 +437,9 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+     ++g_import_calls;
+ 
+     uint32_t ret_addr = rd32(c->r[R_ESP]);
++    const bool trace_abi = recomp_env("IMPORT_ABI_TRACE") != nullptr;
++    const uint32_t saved_ebx = c->r[R_EBX], saved_esi = c->r[R_ESI], saved_edi = c->r[R_EDI],
++                   saved_ebp = c->r[R_EBP], saved_esp = c->r[R_ESP];
+     LOGV("-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
+     recomp_seh_validate_chain(c, "import enter", desc);
+ 
+@@ -467,6 +471,13 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+         set_eax(c, 0);
+     }
+     // Read after the shim ran, so the pointer is into the table as it is now.
++    if (trace_abi &&
++        (saved_ebx != c->r[R_EBX] || saved_esi != c->r[R_ESI] || saved_edi != c->r[R_EDI] ||
++         saved_ebp != c->r[R_EBP] || saved_esp != c->r[R_ESP]))
++        LOGW("import ABI: %s ret=%08x EBX=%08x->%08x ESI=%08x->%08x "
++             "EDI=%08x->%08x EBP=%08x->%08x ESP=%08x->%08x",
++             desc, ret_addr, saved_ebx, c->r[R_EBX], saved_esi, c->r[R_ESI], saved_edi, c->r[R_EDI],
++             saved_ebp, c->r[R_EBP], saved_esp, c->r[R_ESP]);
+     if (g_return_observer)
+         g_return_observer(desc, c->r[R_EAX]);
+     LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
+@@ -582,6 +593,7 @@ void imports_init() {
      imports_register(g_kernel32_shims, g_kernel32_shim_count);
      kernel32_wide_register();
      oleaut32_register();
@@ -1593,7 +2167,7 @@ index d01eb0a..960cfd9 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..4323874 100644
+index 529d27d..5472f57 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
 @@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
@@ -1622,7 +2196,7 @@ index 529d27d..4323874 100644
  void k_GlobalLock(X86 *c) {
      set_eax(c, arg(c, 0));
  }
-@@ -935,6 +947,119 @@ void k_CloseHandle(X86 *c) {
+@@ -935,6 +947,214 @@ void k_CloseHandle(X86 *c) {
      set_eax(c, 1);
  }
  
@@ -1739,10 +2313,105 @@ index 529d27d..4323874 100644
 +    set_eax(c, 0);
 +}
 +
++// OFSTRUCT is an ANSI, 136-byte guest structure. Legacy opens use the same
++// handles and read/write overlay as CreateFile, including bare-name searches.
++// Prompt dialogs and timestamp verification remain explicitly unsupported.
++void k_OpenFile(X86 *c) {
++    uint32_t info = arg(c, 1), style = arg(c, 2);
++    if (!info || !gm_valid(info, 136)) {
++        set_last_error(87);
++        set_eax(c, 0xffffffff);
++        return;
++    }
++    std::string name;
++    if (style & 0x8000) {
++        const char *begin = reinterpret_cast<const char *>(g_mem + info + 8);
++        const char *end = static_cast<const char *>(memchr(begin, 0, 128));
++        if (end)
++            name.assign(begin, end);
++    } else {
++        name = gm_str(arg(c, 0));
++    }
++    memset(g_mem + info, 0, 136);
++    wr8(info, 136);
++    auto fail = [c, info](uint32_t error) {
++        wr16(info + 2, uint16_t(error));
++        set_last_error(error);
++        set_eax(c, 0xffffffff);
++    };
++    LOGV("OpenFile(\"%s\", %04x)", name.c_str(), style);
++    if ((style & ~0xdb73u) || (style & 3) == 3 || (style & 0x70) > 0x40) {
++        fail(50); // ERROR_NOT_SUPPORTED
++        return;
++    }
++    if (name.empty() || name.find_first_of("*?") != std::string::npos) {
++        fail(123); // ERROR_INVALID_NAME
++        return;
++    }
++    std::string full = full_path_named(name);
++    if (!(style & (0x100 | 0x1000)) && name.find_first_of("\\/:") == std::string::npos) {
++        uint32_t temp = heap_alloc(256, true);
++        if (!temp) {
++            fail(8);
++            return;
++        }
++        if (name.size() < 128) {
++            gm_put_str(temp, name.c_str(), 128);
++            uint32_t search_args[] = {0, temp, 0, 128, temp + 128, 0};
++            uint32_t found =
++                guest_call(c, imports_resolve("KERNEL32.dll", "SearchPathA"), search_args, 6);
++            if (found && found < 128)
++                full = gm_str(temp + 128);
++            else if (found >= 128) {
++                heap_free(temp);
++                fail(206); // ERROR_FILENAME_EXCED_RANGE
++                return;
++            }
++        }
++        heap_free(temp);
++    }
++    if (full.size() >= 128) {
++        fail(206);
++        return;
++    }
++    gm_put_str(info + 8, full.c_str(), 128);
++    if (style & 0x100) { // OF_PARSE does not touch the named file.
++        wr8(info + 1, 1);
++        set_eax(c, 0);
++        return;
++    }
++    if (style & 0x200) { // OF_DELETE
++        if (!guest_call(c, imports_resolve("KERNEL32.dll", "DeleteFileA"), info + 8))
++            fail(g_last_error);
++        else
++            set_eax(c, 1);
++        return;
++    }
++    uint32_t mode = style & 3, share_mode = style & 0x70;
++    uint32_t access = (style & 0x1000) ? 0xc0000000u
++                      : mode == 0      ? 0x80000000u
++                      : mode == 1      ? 0x40000000u
++                                       : 0xc0000000u;
++    uint32_t share = share_mode == 0x10 ? 0 : share_mode == 0x20 ? 1 : share_mode == 0x30 ? 2 : 3;
++    uint32_t args[] = {info + 8, access, share, 0, (style & 0x1000) ? 2u : 3u, 0, 0};
++    uint32_t handle = guest_call(c, imports_resolve("KERNEL32.dll", "CreateFileA"), args, 7);
++    if (handle == 0xffffffff) {
++        fail(g_last_error);
++        return;
++    }
++    if (style & 0x4000) { // OF_EXIST closes the temporary handle and returns one.
++        guest_call(c, imports_resolve("KERNEL32.dll", "CloseHandle"), handle);
++        set_eax(c, 1);
++    } else {
++        wr8(info + 1, 1);
++        set_eax(c, handle);
++    }
++}
++
  void k_FlushFileBuffers(X86 *c) {
      HObj *o = handle_get(arg(c, 0), H_FILE);
      if (o)
-@@ -1059,6 +1184,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
+@@ -1059,6 +1279,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
  std::string module_file_name(uint32_t hmod) {
      std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
      if (hmod && hmod != IMAGE_BASE) {
@@ -1752,7 +2421,7 @@ index 529d27d..4323874 100644
          for (const auto &kv : modules())
              if (kv.second == hmod) {
                  path = RECOMP_GUEST_ROOT "\\" + kv.first;
-@@ -1163,7 +1291,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1163,7 +1386,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
              memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
              m->attached = true;
              m->load_refs = 1;
@@ -1762,7 +2431,7 @@ index 529d27d..4323874 100644
                  call_dll_entry(c, *m, 0);    // failed attach still receives detach
                  m->attached = false;
                  m->load_refs = 0;
-@@ -1195,6 +1324,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1195,6 +1419,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
  void k_LoadLibraryA(X86 *c) {
      load_library_named(c, gm_str(arg(c, 0)));
  }
@@ -1789,7 +2458,7 @@ index 529d27d..4323874 100644
  
  void k_LoadLibraryW(X86 *c) {
      load_library_named(c, gm_wstr(arg(c, 0)));
-@@ -1306,6 +1455,47 @@ void win32_reset_command_line_for_test() {
+@@ -1306,6 +1550,47 @@ void win32_reset_command_line_for_test() {
      kernel32_wide_reset_command_line();
      g_cmdline_addr = 0;
  }
@@ -1837,7 +2506,7 @@ index 529d27d..4323874 100644
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1483,6 +1673,19 @@ void k_GetSystemDirectoryA(X86 *c) {
+@@ -1483,6 +1768,43 @@ void k_GetSystemDirectoryA(X86 *c) {
      memcpy(g_mem + buf, dir, len + 1);
      set_eax(c, len);
  }
@@ -1854,10 +2523,34 @@ index 529d27d..4323874 100644
 +    int result = gm_str(arg(c, 0)).compare(gm_str(arg(c, 1)));
 +    set_eax(c, uint32_t(result < 0 ? -1 : result > 0 ? 1 : 0));
 +}
++void k_lstrcmpiA(X86 *c) {
++    auto fold = [](uint8_t ch) -> uint8_t {
++        if ((ch >= 'A' && ch <= 'Z') || (ch >= 0xc0 && ch <= 0xd6) || (ch >= 0xd8 && ch <= 0xde))
++            return uint8_t(ch + 0x20);
++        if (ch == 0x8a || ch == 0x8c || ch == 0x8e)
++            return uint8_t(ch + 0x10);
++        return ch == 0x9f ? 0xff : ch;
++    };
++    // The exposed ANSI code page is Windows-1252. Fold its letters rather
++    // than using the host C locale, which differs across platforms. Ordering
++    // is lexical here; Windows linguistic collation is not yet implemented.
++    std::string a = gm_str(arg(c, 0)), b = gm_str(arg(c, 1));
++    int result = 0;
++    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
++        uint8_t x = fold(uint8_t(a[i])), y = fold(uint8_t(b[i]));
++        if (x != y) {
++            result = x < y ? -1 : 1;
++            break;
++        }
++    }
++    if (!result)
++        result = a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
++    set_eax(c, uint32_t(result));
++}
  
  void k_GetLogicalDriveStringsA(X86 *c) {
      logical_drive_strings(c, false);
-@@ -1753,6 +1956,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1753,6 +2075,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -1865,7 +2558,7 @@ index 529d27d..4323874 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -4742,6 +4946,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4742,6 +5065,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -1874,11 +2567,12 @@ index 529d27d..4323874 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +4964,12 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4758,6 +5083,13 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
 +    {"KERNEL32.dll", "_lopen", 2, k_lopen},
++    {"KERNEL32.dll", "OpenFile", 3, k_OpenFile},
 +    {"KERNEL32.dll", "_lread", 3, k_lread},
 +    {"KERNEL32.dll", "_llseek", 3, k_llseek},
 +    {"KERNEL32.dll", "_lclose", 1, k_lclose},
@@ -1887,16 +2581,17 @@ index 529d27d..4323874 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +4989,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4777,6 +5109,9 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
 +    {"KERNEL32.dll", "GetWindowsDirectoryA", 2, k_GetWindowsDirectoryA},
 +    {"KERNEL32.dll", "lstrcmpA", 2, k_lstrcmpA},
++    {"KERNEL32.dll", "lstrcmpiA", 2, k_lstrcmpiA},
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4785,6 +4999,7 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4785,6 +5120,7 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetModuleHandleA", 1, k_GetModuleHandleA},
      {"KERNEL32.dll", "GetModuleHandleW", 1, k_GetModuleHandleW},
      {"KERNEL32.dll", "LoadLibraryA", 1, k_LoadLibraryA},
@@ -1904,7 +2599,7 @@ index 529d27d..4323874 100644
      {"KERNEL32.dll", "LoadLibraryW", 1, k_LoadLibraryW},
      {"KERNEL32.dll", "LoadLibraryExW", 3, k_LoadLibraryExW},
      {"KERNEL32.dll", "FreeLibrary", 1, k_FreeLibrary},
-@@ -4935,6 +5150,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4935,6 +5271,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -2104,10 +2799,47 @@ index bfe336c..1ad8db4 100644
      std::vector<uint8_t> initial_image;
      std::vector<SectionInfo> sections;
 diff --git a/runtime/misc.cpp b/runtime/misc.cpp
-index 3c955d7..170b38e 100644
+index 3c955d7..99d0dd3 100644
 --- a/runtime/misc.cpp
 +++ b/runtime/misc.cpp
-@@ -963,13 +963,230 @@ void o_CoInitialize(X86 *c) {
+@@ -760,6 +760,36 @@ void a_RegQueryValueExA(X86 *c) {
+ void a_RegQueryValueExW(X86 *c) {
+     reg_query(c, gm_wstr(arg(c, 1)), true);
+ }
++// The legacy API names a subkey and reads its unnamed value. Existing keys
++// without an unnamed value expose an empty string; absent subkeys still fail.
++// Keep the shared buffer-size rules and never allocate a transient key handle.
++void reg_query_default(X86 *c, const std::string &sub, bool wide) {
++    std::string path = key_path(arg(c, 0), sub);
++    if (path.empty()) {
++        set_eax(c, 6);
++        return;
++    }
++    auto key = regstore().find(path);
++    if (key == regstore().end() && !(sub.empty() && hive_name(arg(c, 0)))) {
++        set_eax(c, 2);
++        return;
++    }
++    RegValue empty;
++    empty.type = 1;
++    const RegValue *value = &empty;
++    if (key != regstore().end()) {
++        auto found = key->second.find("");
++        if (found != key->second.end())
++            value = &found->second;
++    }
++    set_eax(c, reg_read_value(*value, wide, 0, arg(c, 2), arg(c, 3)));
++}
++void a_RegQueryValueA(X86 *c) {
++    reg_query_default(c, gm_str(arg(c, 1), 512), false);
++}
++void a_RegQueryValueW(X86 *c) {
++    reg_query_default(c, gm_wstr(arg(c, 1)), true);
++}
+ void a_RegSetValueExA(X86 *c) {
+     reg_set(c, gm_str(arg(c, 1), 256), false);
+ }
+@@ -963,13 +993,230 @@ void o_CoInitialize(X86 *c) {
  void o_CoUninitialize(X86 *c) {
      set_eax(c, 0);
  }
@@ -2341,7 +3073,7 @@ index 3c955d7..170b38e 100644
      set_eax(c, 0);
  }
  void o_IsEqualGUID(X86 *c) {
-@@ -1855,6 +2072,20 @@ void m_mciSendCommandA(X86 *c) {
+@@ -1855,6 +2102,20 @@ void m_mciSendCommandA(X86 *c) {
      log_once("mciSendCommandA", "mciSendCommandA(%08x): MCI is not implemented", arg(c, 1));
      set_eax(c, 266); // MCIERR_DEVICE_NOT_INSTALLED
  }
@@ -2362,7 +3094,20 @@ index 3c955d7..170b38e 100644
  
  } // namespace
  
-@@ -2036,8 +2267,15 @@ const ImportShim g_misc_shims[] = {
+@@ -2007,10 +2268,12 @@ const ImportShim g_misc_shims[] = {
+     {"ADVAPI32.dll", "RegCreateKeyA", 3, a_RegCreateKeyA},
+     {"ADVAPI32.dll", "RegCloseKey", 1, a_RegCloseKey},
+     {"ADVAPI32.dll", "RegQueryValueExA", 6, a_RegQueryValueExA},
++    {"ADVAPI32.dll", "RegQueryValueA", 4, a_RegQueryValueA},
+     {"ADVAPI32.dll", "RegSetValueExA", 6, a_RegSetValueExA},
+     {"ADVAPI32.dll", "RegOpenKeyExW", 5, a_RegOpenKeyExW},
+     {"ADVAPI32.dll", "RegCreateKeyExW", 9, a_RegCreateKeyExW},
+     {"ADVAPI32.dll", "RegQueryValueExW", 6, a_RegQueryValueExW},
++    {"ADVAPI32.dll", "RegQueryValueW", 4, a_RegQueryValueW},
+     {"ADVAPI32.dll", "RegSetValueExW", 6, a_RegSetValueExW},
+     {"ADVAPI32.dll", "RegEnumKeyExW", 8, a_RegEnumKeyExW},
+     {"ADVAPI32.dll", "RegEnumValueW", 8, a_RegEnumValueW},
+@@ -2036,8 +2299,15 @@ const ImportShim g_misc_shims[] = {
      {"ole32.dll", "OleInitialize", 1, o_CoInitialize},
      {"ole32.dll", "OleUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "CoInitializeEx", 2, o_CoInitialize},
@@ -2378,7 +3123,7 @@ index 3c955d7..170b38e 100644
      {"ole32.dll", "IsEqualGUID", 2, o_IsEqualGUID},
      {"ole32.dll", "CoUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "PropVariantClear", 1, o_PropVariantClear},
-@@ -2093,6 +2331,8 @@ const ImportShim g_misc_shims[] = {
+@@ -2093,6 +2363,8 @@ const ImportShim g_misc_shims[] = {
      {"WINMM.dll", "midiOutPrepareHeader", 3, m_midiOutPrepareHeader},
      {"WINMM.dll", "midiOutUnprepareHeader", 3, m_midiOutUnprepareHeader},
      {"WINMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
@@ -2387,7 +3132,7 @@ index 3c955d7..170b38e 100644
      // _inmm exposes the same WinMM ABI. Until CD-file playback is modeled,
      // report the actual unavailable MCI device with its proper stack cleanup.
      {"_INMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
-@@ -2273,3 +2513,18 @@ const ImportShim g_misc_shims[] = {
+@@ -2273,3 +2545,18 @@ const ImportShim g_misc_shims[] = {
      {"weanetr.dll", "?SendChat@MLDPlay@@QAEHKPAGKPAK@Z", 4, nullptr},
  };
  const size_t g_misc_shim_count = sizeof(g_misc_shims) / sizeof(g_misc_shims[0]);
@@ -3742,10 +4487,23 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..e5a5a4e 100644
+index cf0d171..9efc345 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
-@@ -237,6 +237,13 @@ static void test_drawing() {
+@@ -177,6 +177,12 @@ static void test_model() {
+           "RestoreDC relative level");
+     check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 2, 2}) == 0xff,
+           "window and viewport origins transform pixel coordinates");
++    check(call_import(&c, "GDI32.dll", "SetPixelV", {dc, 3, 3, 0}) == 1 &&
++              call_import(&c, "GDI32.dll", "GetPixel", {dc, 3, 3}) == 0,
++          "SetPixelV writes black and returns a Boolean success rather than a color");
++    check(call_import(&c, "GDI32.dll", "SetPixelV", {dc, 40, 40, 0xff}) == 0 &&
++              call_import(&c, "GDI32.dll", "SetPixelV", {0x12345, 0, 0, 0xff}) == 0,
++          "SetPixelV fails for an outside pixel or an invalid DC");
+     check(call_import(&c, "GDI32.dll", "RestoreDC", {dc, save}) == 0,
+           "restored levels are discarded");
+     check(call_import(&c, "GDI32.dll", "GetDeviceCaps", {dc, 12}) == 32 &&
+@@ -237,6 +243,13 @@ static void test_drawing() {
      wr32(s + 4, 1);
      wr32(s + 12, 0xff);
      uint32_t pen = call_import(&c, "GDI32.dll", "CreatePenIndirect", {s});
@@ -3759,7 +4517,7 @@ index cf0d171..e5a5a4e 100644
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "MoveToEx", {dc, 0, 16, 0});
      check(call_import(&c, "GDI32.dll", "LineTo", {dc, 16, 16}) == 1 &&
-@@ -380,7 +387,14 @@ static void test_dib_rows_and_regions() {
+@@ -380,7 +393,14 @@ static void test_dib_rows_and_regions() {
      uint32_t pen = call_import(&c, "GDI32.dll", "GetStockObject", {8});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "SetPixel", {dc, 11, 11, 0xff});
@@ -3774,7 +4532,7 @@ index cf0d171..e5a5a4e 100644
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 11, 11}) == 0xff,
-@@ -390,6 +404,49 @@ static void test_dib_rows_and_regions() {
+@@ -390,6 +410,49 @@ static void test_dib_rows_and_regions() {
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
@@ -3824,7 +4582,7 @@ index cf0d171..e5a5a4e 100644
  static void test_text() {
      X86 c;
      loader_init_context(&c);
-@@ -415,6 +472,29 @@ static void test_text() {
+@@ -415,6 +478,29 @@ static void test_text() {
                rd32(s + 340) == 16 && rd32(s + 344) == 16 && rd8(s + 375) == 0x30 &&
                rd8(s + 376) == 0,
            "TEXTMETRICW layout and scaled metrics");
@@ -3854,7 +4612,7 @@ index cf0d171..e5a5a4e 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -1070,11 +1150,31 @@ static void test_memory_truetype_font() {
+@@ -1070,11 +1156,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -3886,7 +4644,7 @@ index cf0d171..e5a5a4e 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,12 +1224,100 @@ static void test_windows_face_substitute() {
+@@ -1124,12 +1230,100 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -3993,7 +4751,7 @@ index cf0d171..e5a5a4e 100644
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
-@@ -1147,6 +1335,9 @@ int main(int argc, char **argv) {
+@@ -1147,6 +1341,9 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -4004,7 +4762,7 @@ index cf0d171..e5a5a4e 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..bf760e3 100644
+index 7016990..489f98f 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -4029,7 +4787,7 @@ index 7016990..bf760e3 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,989 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,1043 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -4061,6 +4819,22 @@ index 7016990..bf760e3 100644
 +    gm_put_wstr(b, "", 64);
 +    check(call_import(&c, "KERNEL32.dll", "lstrcmpW", {a, b}) == 0,
 +          "empty wide strings compare equal");
++    gm_put_str(a, "Picture.OCX", 64);
++    gm_put_str(b, "picture.ocx", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpiA", {a, b}) == 0,
++          "ANSI comparison folds ASCII DLL names with a two-argument ABI");
++    gm_put_str(a, "\xc9", 64);
++    gm_put_str(b, "\xe9", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpiA", {a, b}) == 0,
++          "ANSI comparison folds Latin-1 letters in Windows-1252");
++    gm_put_str(a, "\x8a\x8c\x8e\x9f", 64);
++    gm_put_str(b, "\x9a\x9c\x9e\xff", 64);
++    check(call_import(&c, "KERNEL32.dll", "lstrcmpiA", {a, b}) == 0,
++          "ANSI comparison folds extended Windows-1252 letter pairs");
++    gm_put_str(a, "A", 64);
++    gm_put_str(b, "ab", 64);
++    check(int32_t(call_import(&c, "KERNEL32.dll", "lstrcmpiA", {a, b})) < 0,
++          "case-insensitive ANSI ordering retains a shorter matching prefix");
 +}
 +
 +static void test_task_allocator() {
@@ -4462,7 +5236,45 @@ index 7016990..bf760e3 100644
 +                      {0, s + 0x500, s + 0x550, 260, s + 0x300, s + 0x560}) == path.size() &&
 +              gm_str(s + 0x300) == path && gm_str(rd32(s + 0x560)) == "recomp-legacy-contract.txt",
 +          "SearchPath appends an extension and returns a guest filename pointer");
-+    call_import(&c, "KERNEL32.dll", "DeleteFileA", {s});
++    uint32_t of = s + 0x600;
++    handle = call_import(&c, "KERNEL32.dll", "OpenFile", {s + 0x500, of, 0});
++    check(handle == 0xffffffff && rd16(of + 2) == 2,
++          "OpenFile does not invent an extension for a missing bare name");
++    gm_put_str(s + 0x500, "RECOMP-LEGACY-CONTRACT.TXT", 64);
++    handle = call_import(&c, "KERNEL32.dll", "OpenFile", {s + 0x500, of, 0});
++    check(handle != 0xffffffff && rd8(of) == 136 && rd8(of + 1) == 1 && rd16(of + 2) == 0 &&
++              call_import(&c, "KERNEL32.dll", "_lread", {handle, s + 0x200, 4}) == 4 &&
++              !memcmp(g_mem + s + 0x200, "abcd", 4),
++          "OpenFile searches case-insensitively and returns a usable legacy handle");
++    call_import(&c, "KERNEL32.dll", "_lclose", {handle});
++    handle = call_import(&c, "KERNEL32.dll", "OpenFile", {0, of, 0x8000});
++    check(handle != 0xffffffff && call_import(&c, "KERNEL32.dll", "GetFileSize", {handle, 0}) == 4,
++          "OF_REOPEN reads the path captured in OFSTRUCT before overwriting it");
++    call_import(&c, "KERNEL32.dll", "_lclose", {handle});
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s, of, 0x4000}) == 1 && rd16(of + 2) == 0,
++          "OF_EXIST succeeds without retaining an open handle");
++    gm_put_str(s + 0x500, "recomp-nonexistent-contract.txt", 64);
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s + 0x500, of, 0x100}) == 0 &&
++              gm_str(of + 8).find("recomp-nonexistent-contract.txt") != std::string::npos,
++          "OF_PARSE fills a full guest path without creating or opening a file");
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s, of, 0x400}) == 0xffffffff &&
++              rd16(of + 2) == 50,
++          "timestamp verification is rejected instead of silently succeeding");
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s, 0, 0}) == 0xffffffff,
++          "OpenFile requires a writable OFSTRUCT");
++    gm_put_str(s + 0x500, std::string(128, 'x').c_str(), 129);
++    wr32(of + 136, 0x5aa55aa5);
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s + 0x500, of, 0x100}) == 0xffffffff &&
++              rd16(of + 2) == 206 && rd32(of + 136) == 0x5aa55aa5,
++          "oversized legacy paths fail without overflowing OFSTRUCT");
++    handle = call_import(&c, "KERNEL32.dll", "OpenFile", {s, of, 0x1000});
++    check(handle != 0xffffffff && call_import(&c, "KERNEL32.dll", "GetFileSize", {handle, 0}) == 0,
++          "OF_CREATE truncates an existing file through the writable overlay");
++    call_import(&c, "KERNEL32.dll", "_lclose", {handle});
++    check(call_import(&c, "KERNEL32.dll", "OpenFile", {s, of, 0x200}) == 1 &&
++              call_import(&c, "KERNEL32.dll", "OpenFile", {s, of, 0x4000}) == 0xffffffff &&
++              rd16(of + 2) == 2,
++          "OF_DELETE removes the file and subsequent OF_EXIST reports the error");
 +    check(call_import(&c, "KERNEL32.dll", "GetShortPathNameA", {s, s + 0x300, 260}) == 0,
 +          "short-path lookup refuses a nonexistent file");
 +}
@@ -5019,7 +5831,7 @@ index 7016990..bf760e3 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1741,27 @@ static void test_loader() {
+@@ -755,18 +1795,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -5050,7 +5862,7 @@ index 7016990..bf760e3 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +4239,98 @@ static void test_scheduling(X86 *c) {
+@@ -3244,6 +4293,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -5149,7 +5961,49 @@ index 7016990..bf760e3 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -6078,6 +7165,16 @@ static void test_host_mouse_routing() {
+@@ -3782,6 +4923,41 @@ static void test_registry(X86 *c) {
+     uint32_t hk = rd32(phk);
+     check(rd32(pdisp) == 1, "the key was created, not opened");
+ 
++    uint32_t legacy_size = scratch_block(4), legacy_buf = scratch_block(128);
++    wr32(legacy_size, 128);
++    wr8(legacy_buf, 'x');
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueA", {hk, 0, legacy_buf, legacy_size}) == 0 &&
++              rd32(legacy_size) == 1 && rd8(legacy_buf) == 0,
++          "an existing key without a default value returns an empty legacy string");
++    uint32_t default_data = put_str("fixture default");
++    check(call_import(c, "ADVAPI32.dll", "RegSetValueExA", {hk, 0, 0, 1, default_data, 16}) == 0,
++          "set a default value in the profile registry");
++    wr32(legacy_size, 128);
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueA", {hk, 0, legacy_buf, legacy_size}) == 0 &&
++              rd32(legacy_size) == 16 && gm_str(legacy_buf) == "fixture default",
++          "RegQueryValueA reads the unnamed value including its terminator");
++    wr32(legacy_size, 1);
++    wr32(legacy_buf, 0x12345678);
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueA", {hk, 0, legacy_buf, legacy_size}) ==
++                  234 &&
++              rd32(legacy_size) == 16 && rd32(legacy_buf) == 0x12345678,
++          "a short legacy registry buffer reports its required size without overflowing");
++    wr32(legacy_size, 0);
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueA",
++                      {0x80000002u, put_str("SOFTWARE\\recomptests\\REGISTRY"), 0, legacy_size}) ==
++                  0 &&
++              rd32(legacy_size) == 16,
++          "legacy queries accept a subkey and a size-only request");
++    wr32(legacy_size, 128);
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueW", {hk, 0, legacy_buf, legacy_size}) == 0 &&
++              rd32(legacy_size) == 32 && gm_wstr(legacy_buf) == "fixture default",
++          "the wide legacy query reports UTF-16 bytes");
++    check(call_import(c, "ADVAPI32.dll", "RegQueryValueA",
++                      {hk, put_str("MissingSubkey"), 0, legacy_size}) == 2 &&
++              call_import(c, "ADVAPI32.dll", "RegQueryValueA", {0x12345678, 0, 0, legacy_size}) ==
++                  6,
++          "missing subkeys and invalid legacy query handles report real errors");
++
+     uint32_t vname = put_str("InstallPath");
+     uint32_t vdata = put_str(RECOMP_GUEST_ROOT);
+     check(call_import(c, "ADVAPI32.dll", "RegSetValueExA",
+@@ -6078,6 +7254,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -5166,7 +6020,7 @@ index 7016990..bf760e3 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7374,11 @@ static void test_user32_services() {
+@@ -6277,6 +7463,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -5178,7 +6032,7 @@ index 7016990..bf760e3 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7407,12 @@ static void test_user32_services() {
+@@ -6305,6 +7496,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -5191,7 +6045,7 @@ index 7016990..bf760e3 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7542,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7631,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -5213,7 +6067,7 @@ index 7016990..bf760e3 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7810,49 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7899,49 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
@@ -5264,7 +6118,7 @@ index 7016990..bf760e3 100644
      test_session_notification_service_unavailable();
      test_buffered_paint_unavailable();
 diff --git a/runtime/thunks.cpp b/runtime/thunks.cpp
-index 7ab10c7..d1a2530 100644
+index 7ab10c7..e851f42 100644
 --- a/runtime/thunks.cpp
 +++ b/runtime/thunks.cpp
 @@ -2,6 +2,7 @@
@@ -5275,10 +6129,19 @@ index 7ab10c7..d1a2530 100644
  
  extern "C" __attribute__((weak)) int recomp_thunk_target_kind(uint32_t) {
      return 0;
-@@ -20,11 +21,116 @@ bool thunk_bytes(uint32_t at, uint32_t size) {
+@@ -20,11 +21,127 @@ bool thunk_bytes(uint32_t at, uint32_t size) {
  struct StackWrite {
      uint32_t at, old;
  };
++
++// A translated helper can RET into another translated entry before reaching
++// this heap template's CALL continuation. Drive those returns locally: the
++// outer entry loop cannot resume the C++ portion of a generated ABI adapter.
++void call_template_helper(X86 *c, uint32_t helper, uint32_t continuation) {
++    recomp_call(c, helper);
++    while (recomp_resumable_stacks && c->eip != continuation && c->eip != GUEST_RETURN_SENTINEL)
++        recomp_call(c, c->eip);
++}
 +
 +// Native VB builds this fixed lazy-interface entry in the guest heap. Its
 +// translated resolver replaces the caller's this pointer; success tail-calls
@@ -5310,9 +6173,11 @@ index 7ab10c7..d1a2530 100644
 +    c->r[R_ECX] = helper;
 +    c->r[R_ESP] = sp - 16;
 +    c->eip = target + 18;
-+    recomp_call(c, helper);
++    call_template_helper(c, helper, target + 20);
 +    if (c->r[R_ESP] != sp - 4 || c->eip != target + 20) {
-+        LOGW("generated interface resolver %08x returned outside its two-argument ABI", helper);
++        LOGW("generated interface resolver %08x returned outside its two-argument ABI "
++             "(EIP=%08x expected=%08x ESP=%08x expected=%08x)",
++             helper, c->eip, target + 20, c->r[R_ESP], sp - 4);
 +        abort();
 +    }
 +    c->r[R_ECX] = rd32(sp - 4);
@@ -5369,7 +6234,7 @@ index 7ab10c7..d1a2530 100644
 +    wr32(sp - 16, target + 25);
 +    c->r[R_ESP] = sp - 16;
 +    c->eip = target + 22;
-+    recomp_call(c, rd32(c->r[R_EDX] + 4));
++    call_template_helper(c, rd32(c->r[R_EDX] + 4), target + 25);
 +    if (c->r[R_ESP] != sp - 8 || c->eip != target + 25) {
 +        LOGW("generated interface getter AddRef returned outside its one-argument ABI");
 +        abort();
@@ -5392,7 +6257,7 @@ index 7ab10c7..d1a2530 100644
      X86 trial = *c;
      StackWrite writes[16];
      unsigned nwrites = 0;
-@@ -102,5 +208,11 @@ extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
+@@ -102,5 +219,11 @@ extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
      char key[80];
      snprintf(key, sizeof key, "thunk:%s:%.23s", reason, bytes);
      log_once(key, "guest thunk %08x stopped at %08x (%s), bytes: %s", target, pc, reason, bytes);

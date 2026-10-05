@@ -13,11 +13,11 @@ executables have compiled and been probed. No other platform has been tested.
 - Pin exact executable hashes, entry points and profiles; original game inputs,
   generated source, binaries and logs remain ignored.
 - Export native listings using actual VB event/method pointers and direct x86
-  control-flow edges: 420 initial entries for Cult, 444 for Cult II.
-- RecompKit emits 549 native C functions / 606 dispatch entries for Cult and
-  587 functions / 655 dispatch entries for Cult II. It reports no instruction
+  control-flow edges: 421 initial entries for Cult, 446 for Cult II.
+- RecompKit emits 562 native C functions / 6,816 dispatch entries for Cult and
+  598 functions / 8,214 dispatch entries for Cult II. It reports no instruction
   failures, unmodelled instructions or unresolved jump tables in this pass.
-- Sixteen focused input/profile/report checks pass. Complete gameplay coverage
+- Eighteen focused input/profile/report checks pass. Complete gameplay coverage
   and numerical parity with the original games are unverified.
 - Both LLVM-MinGW headless native builds link with four statically translated
   supplied libraries on the locally patched kit. Probes enter the actual
@@ -30,10 +30,11 @@ The ongoing second pass adds four supplied dependencies as statically translated
 auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
 x86 interpretation is explicitly disabled. The local kit maps all DLLs before
 binding imports and initializes static dependencies before the executable.
-The real Cult image passes 463 loader/startup contract checks (zero failures,
+The real Cult image passes 487 loader/startup contract checks (zero failures,
 one resource-related skip). Decoder, switch, return-path and profile checks pass:
-257 focused translator/profile/build/private-input checks in the latest run.
-Both latest VB5 passes emit 23,270 discovered routines and 25,280 dispatch
+242 focused translator/configuration/build/private-input checks in the latest
+selected run.
+Both latest VB5 passes emit 23,270 discovered routines and 51,387 dispatch
 entries. PictureClip emits 580 routines.
 Branch-pruning fixes include regressions for split epilogues and listing gaps.
 The translator also preserves shared VB interface adjustors whose method body
@@ -41,7 +42,7 @@ has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
 dispatcher consumes the return address. Unknown indirect jumps now honor the
 interpreter-disable setting. Fixed generated heap callback templates dispatch
 the native interface resolver and reference-owning object getter through ABI
-adapters. The native GDI suite passes 173 checks, including region subtraction,
+adapters. The native GDI suite passes 175 checks, including region subtraction,
 clipping that retains holes, anisotropic picture mapping, plain ANSI text and
 matching ANSI/UTF-16 measurements from the selected font.
 The broader portable suite records 354 passes, 76 skips and three failures:
@@ -68,8 +69,11 @@ File-backed and in-memory PCM WAV effects now use the shared host audio service,
 including synchronous waits, asynchronous playback, loops and stop/NOSTOP.
 Both diagnostic probes submit three effects with nonzero samples. The smoke
 host does not open an audio device: audible output remains unverified.
-MIDI assets use `.dat` filenames; MCI music playback remains unfinished.
-The audio/graphics shim suite passes 141,181 checks with zero failures and one
+MIDI assets use `.dat` filenames; basic MCI sequencer command strings now use the
+shared SMF decoder and synth service. Quoted paths, aliases, play/stop/close
+and millisecond status queries pass native contracts. Audible device playback
+and the real game scores remain unverified.
+The audio/graphics shim suite passes 141,275 checks with zero failures and one
 explicit skip: the cursor-learning fixture requires two configured game globals
 that these profiles do not supply. PCM sound tests exercise stack arity, copied
 samples, file overlays, stop/NOSTOP, loops, synchronous completion and rejection
@@ -93,9 +97,24 @@ guest libraries and delegates to their translated `DllGetClassObject` exports.
 PictureClip returns an owned class factory, and OLE memory streams successfully
 read its picture data. GUID strings use the guest task allocator. RPC proxy
 factories and executable/remote activation remain explicitly unavailable.
-Both latest scripts complete, but fail validation at two uncovered VB callbacks
-(`0x74058f3a` and `0x7402edac`) followed by a guest access violation. Both callbacks
-are now translated and native rebuilds are ongoing. Cult's ListBox column-width
+The two VB callbacks (`0x74058f3a` and `0x7402edac`) now execute successfully.
+ANSI DLL-name comparison is implemented using Windows-1252 letter folding;
+full linguistic sort ordering is not implemented. Automation callback
+`0x653532c2` and Cult II cleanup `0x00449a37` now execute. Legacy OpenFile uses
+the guest overlay and searches case-insensitively. The supplied `StdOle2.tlb`
+is included beside both executables as guest data. Both short probes complete
+138 presented frames with no called missing imports, unknown transfers,
+VB errors or access violations. The longer probes complete 457 frames and
+render both main menus. They expose legacy RegQueryValueA; its ANSI and wide
+default-value implementations now pass contract tests. New Game and keyboard
+movement probes expose missing VB cleanup returns and corrupted call targets.
+The opt-in resumable-stack mode is enabled for both games and all four
+translated libraries. Its startup contract passes, and generated heap callback
+adapters now finish helper continuations locally before resuming their template.
+The exporter recognizes nearby PUSH-return/JMP-cleanup calls only when their
+return targets decode as straight-line returning epilogues. The latest main
+translations include those entries; gameplay probes remain required.
+Cult's ListBox column-width
 message is implemented with column painting, item rectangles, pointer selection
 and left/right navigation; those control checks pass. Gameplay remains unverified.
 Input evidence is recorded

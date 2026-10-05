@@ -14,6 +14,30 @@ from pathlib import Path
 from import_archives import GAMES, ROOT
 
 
+
+def cleanup_continuations(translator, image, instructions):
+    """Recover VB's PUSH-return/JMP-cleanup calls with a returning epilogue.
+
+    Ordinary PUSH data is excluded: both destinations must be executable and
+    ordered in the nearby forward cleanup region, and the return target must
+    decode as a straight-line register/frame epilogue ending in RET.
+    """
+    for push, jump in zip(instructions, instructions[1:]):
+        if push.mnem != "PUSH" or jump.mnem != "JMP" or not push.ops or not jump.ops:
+            continue
+        ret, cleanup = translator.parse_operand(push.ops[0]), translator.parse_operand(jump.ops[0])
+        if ret.kind != "imm" or cleanup.kind != "imm":
+            continue
+        if jump.addr != push.addr + 5 or not (jump.addr + 5 <= cleanup.imm < ret.imm < push.addr + 4096):
+            continue
+        if not image.is_exec(ret.imm) or not image.is_exec(cleanup.imm):
+            continue
+        epilogue = image.recover(ret.imm, set())
+        if (epilogue and epilogue[-1].mnem == "RET" and len(epilogue) <= 16
+                and all(i.mnem in {"MOV", "POP", "XOR", "ADD", "RET"} for i in epilogue)):
+            yield ret.imm, push.addr
+
+
 def export_game(kit, game_id):
     """Decode native entries and callees; preserve provenance for every seed."""
     spec = importlib.util.spec_from_file_location("kit_translate", kit / "tools/recomp/translate.py")
@@ -51,6 +75,11 @@ def export_game(kit, game_id):
         if not instructions:
             raise ValueError(f"No native instructions at {entry:08x}")
         decoded[entry] = instructions
+        for continuation, source in cleanup_continuations(translator, image, instructions):
+            if continuation not in seeds:
+                seeds.add(continuation)
+                provenance[continuation] = f"vb_cleanup_return:{source:08x}"
+                pending.append(continuation)
         for instruction in instructions:
             if instruction.mnem not in ("CALL", "JMP") or not instruction.ops:
                 continue
