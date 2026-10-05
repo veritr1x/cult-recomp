@@ -1,172 +1,114 @@
 # Status: 6 October 2026
 
-The requested playable ports are **not complete**. The game binaries were
-statically translated with RecompKit, and both Windows x64 diagnostic
-executables have compiled and been probed. No other platform has been tested.
+The requested playable ports are **not complete**. Both games and four supplied
+libraries have been statically translated with RecompKit and compiled for
+Windows x64. Runtime x86 interpretation is disabled. No other platform has been
+built or tested, and a completed translation does not prove gameplay coverage.
 
-## Verified work
+## Current execution evidence
 
-- Expanded all 221 installer payloads without running either installer or
-  registering system libraries. Every file matches Windows `expand.exe`.
-- Confirmed native x86 VB5 compilation from the startup header and its nonzero
-  project native-code pointer.
-- Pin exact executable hashes, entry points and profiles; original game inputs,
-  generated source, binaries and logs remain ignored.
-- Export native listings using actual VB event/method pointers and direct x86
-  control-flow edges: 421 initial entries for Cult, 446 for Cult II.
-- RecompKit emits 563 native C functions / 6,817 dispatch entries for Cult and
-  599 functions / 8,215 dispatch entries for Cult II. It reports no instruction
-  failures, unmodelled instructions or unresolved jump tables in this pass.
-- Eighteen focused input/profile/report checks pass. Complete gameplay coverage
-  and numerical parity with the original games are unverified.
-- Both LLVM-MinGW headless native builds link with four statically translated
-  supplied libraries on the locally patched kit. Probes enter the actual
-  VB startup routine. Both complete 150-frame offscreen captures with no called
-  missing imports or unknown transfers; this is not a gameplay test.
+Both diagnostic hosts reach the language selector, intro, main menu and New
+Game. Their opening conversations advance through the native keyboard message
+bridge. Cult's upward movement visibly changes the player position and triggers
+a guard conversation. Cult II's street, cars and NPCs render, but its player
+movement still needs direct confirmation.
 
-## Runtime blockers
+Both games write their own save formats (.zsg and .fcg) and return to their
+game scenes through Load without missing imports, unknown transfers, VB errors
+or native faults. The latest completed save/load runs presented 1,502 frames
+for Cult and 1,907 for Cult II. These are bounded tests of particular paths,
+not complete gameplay verification or original-save compatibility tests.
 
-The ongoing second pass adds four supplied dependencies as statically translated
-auxiliary modules in each profile. The arena reaches `0x74200000`, and runtime
-x86 interpretation is explicitly disabled. The local kit maps all DLLs before
-binding imports and initializes static dependencies before the executable.
-The real Cult image passes 487 loader/startup contract checks (zero failures,
-one resource-related skip). Decoder, switch, return-path and profile checks pass:
-242 focused translator/configuration/build/private-input checks in the latest
-selected run.
-Both latest VB5 passes emit 23,270 discovered routines and 51,387 dispatch
-entries. PictureClip emits 580 routines.
-Branch-pruning fixes include regressions for split epilogues and listing gaps.
-The translator also preserves shared VB interface adjustors whose method body
-has a separate vtable entry, plus all 1,024 indexed interface CALL thunks whose
-dispatcher consumes the return address. Unknown indirect jumps now honor the
-interpreter-disable setting. Fixed generated heap callback templates dispatch
-the native interface resolver and reference-owning object getter through ABI
-adapters. The native GDI suite passes 175 checks, including region subtraction,
-clipping that retains holes, anisotropic picture mapping, plain ANSI text and
-matching ANSI/UTF-16 measurements from the selected font.
-The broader portable suite records 354 passes, 76 skips and three failures:
-this Windows process lacks the privilege to create the symlinks in the setup
-and Linux package fixtures. That complete suite has not passed on this host.
-Neither game has reached verified gameplay.
+GetDIBits previously copied internal 32-bit rows into a requested 24-bit buffer,
+overwriting a live COM interface in Cult II. The shim now converts the requested
+format, respects orientation and scan ranges, and checks the output span. A
+separate fixture against Windows confirms its tested row order, partial-row
+behavior and buffer extent. The native game paths now complete New Game.
 
-Both probes now complete the statically translated VB5 DLL's process attach,
-then execute `ThunRTMain`. Implemented startup services include a guest COM task
-allocator, mapped-module string resources, wide string comparison, and OLE
-Automation's named/ordinal bindings, binary BSTRs, and caller-created SAFEARRAY
-storage. Probes create VB's main, component-manager and focus windows and reach
-native object dispatch. Both execute the supplied OLE Automation library's
-font construction. Cult creates its language-selection form, radio buttons and
-frame after fixing ANSI icon loading and adding the system Button procedure.
-Its picture construction uses ASYCFILT, now translated as a fourth module.
-Automation's seven image-filter vtable methods have been audited and seeded.
-Both language forms are created, and Cult reaches translated game initialization.
-Both latest native probes carry the complete interface table and finish 150
-presented frames with no called missing imports or unknown transfers. Captures
-show language-selection forms, titles, flags, character artwork and the Play
-label. Anisotropic GDI mapping now renders the supplied OLE pictures.
-File-backed and in-memory PCM WAV effects now use the shared host audio service,
-including synchronous waits, asynchronous playback, loops and stop/NOSTOP.
-Both diagnostic probes submit three effects with nonzero samples. The smoke
-host does not open an audio device: audible output remains unverified.
-MIDI assets use `.dat` filenames; basic MCI sequencer command strings now use the
-shared SMF decoder and synth service. Quoted paths, aliases, play/stop/close
-and millisecond status queries pass native contracts. Audible device playback
-and the real game scores remain unverified.
-The audio/graphics shim suite passes 141,275 checks with zero failures and one
-explicit skip: the cursor-learning fixture requires two configured game globals
-that these profiles do not supply. PCM sound tests exercise stack arity, copied
-samples, file overlays, stop/NOSTOP, loops, synchronous completion and rejection
-of malformed or unsupported audio.
-Offscreen frames have been inspected. Scripted desktop coordinates now route
-through the same native input bridge as host mouse events. English-selection
-and Play clicks advance both games into intro processing. Legacy file/path
-APIs and two additional audited callbacks are translated or implemented.
-The temporary OLE storage service is now implemented with named streams,
-read/write/seek, cloning, copying and ownership. Native Windows conformance
-probes confirm stream invalidation after element deletion and parent release.
-Persistent compound files, transactions and substorages remain unsupported.
-Both last completed input probes successfully use that service. Audited VB
-window/shutdown callbacks and Cult II exception cleanup are now translated.
-System ListBox and Edit controls initialize with owned text/items, selection,
-typing limits, read-only state, undo and parent notifications. They are partial
-Win32 implementations: clipboard, scrolling and complex selection remain open.
-The form-loader property and timer callbacks are now translated, and Edit
-margin messages are implemented. Native class activation attaches configured
-guest libraries and delegates to their translated `DllGetClassObject` exports.
-PictureClip returns an owned class factory, and OLE memory streams successfully
-read its picture data. GUID strings use the guest task allocator. RPC proxy
-factories and executable/remote activation remain explicitly unavailable.
-The two VB callbacks (`0x74058f3a` and `0x7402edac`) now execute successfully.
-ANSI DLL-name comparison is implemented using Windows-1252 letter folding;
-full linguistic sort ordering is not implemented. Automation callback
-`0x653532c2` and Cult II cleanup `0x00449a37` now execute. Legacy OpenFile uses
-the guest overlay and searches case-insensitively. The supplied `StdOle2.tlb`
-is included beside both executables as guest data. Both short probes complete
-138 presented frames with no called missing imports, unknown transfers,
-VB errors or access violations. The longer probes complete 457 frames and
-render both main menus. They expose legacy RegQueryValueA; its ANSI and wide
-default-value implementations now pass contract tests. New Game and keyboard
-movement probes expose missing VB cleanup returns and corrupted call targets.
-The opt-in resumable-stack mode is enabled for both games and all four
-translated libraries. Its startup contract passes, and generated heap callback
-adapters now finish helper continuations locally before resuming their template.
-The exporter recognizes nearby pushed return addresses only when their
-targets decode as short, straight-line epilogues restoring ESP/EBP and
-ending in RET. Argument preparation between the push and jump is permitted. The latest main
-translations include those entries; gameplay probes remain required.
-Cult's ListBox column-width
-message is implemented with column painting, item rectangles, pointer selection
-and left/right navigation; those control checks pass. Gameplay remains unverified.
-Input evidence is recorded
-under each profile's private `build/input-probe/` directory.
-The remaining work includes callback coverage, physical input, audio,
-save/load and gameplay verification.
+Background erase requests now reach the window procedure during BeginPaint;
+DefWindowProc uses the class brush. Hiding a child invalidates the exposed
+parent. This removes the stale main-menu backgrounds, but **the HUD disappears
+after Save/Load closes**. Parent/child repaint behavior remains under investigation.
 
-Both games have the same object structure: `GameForm`, `Module1`, `LanSet`,
-and `Intro`. Cult's forms describe 62 controls; Cult II's describe 63.
-Both depend on `PICCLP32.OCX` as well as COM/OLE services. Those controls and
-VB's strings, variants, arrays, file I/O, exceptions, runtime calls and event
-dispatch need compatible behavior before gameplay can run.
+Diagnostic saves now go into the private profile even when plugins are disabled.
+Earlier diagnostic writes that reached the extracted input directory were
+preserved under each game's ignored build/pre-overlay-writes/, and the original
+configuration bytes were restored from the supplied archives.
 
-The selected route lifts the supplied VB runtime and control as auxiliary
-modules, then closes their Windows/COM dependency gaps. This requires guest
-arena sizing and module mapping explicitly:
-`MSVBVM50.dll` has preferred base `0x74010000`, image size `0x14d000`, and 671
-PE imports; PictureClip has base `0x211a0000`, size `0x15000`, and 147 imports.
-Both are now configured for static translation. Copying these x86 DLLs into
-a package would not make them execute natively on ARM or non-Windows targets.
+## Translation and build
 
-## Verification records
+| Image | Cult | Cult II |
+| --- | ---: | ---: |
+| Audited main-image initial entries | 441 | 467 |
+| Emitted main-image native functions | 563 | 599 |
+| Main-image dispatch entries | 6,817 | 8,215 |
+| VB5 native functions | 23,270 | 23,270 |
+| VB5 dispatch entries | 51,387 | 51,387 |
 
-Each profile has private `analysis/archive-manifest.json`, `pe-report.json`,
-`import-verification.json`, `translation-report.json`, and `llvm-build.log`.
-Native startup evidence goes into `build/probe/startup.log` and `result.json`.
-These files are deliberately untracked because they contain private binary
-metadata, generated outputs or run logs.
+Both profiles statically lift MSVBVM50, OLEAUT32, ASYCFILT and PICCLP32 as
+auxiliary modules. Their mapped arena reaches 0x74200000. The main translation
+reports contain no instruction failures, unmodelled instructions or unresolved
+jump tables in the discovered code. Two guessed Cult blocks and four Cult II
+blocks were withdrawn; the counts do not establish complete execution coverage.
 
-Re-run a startup diagnostic after building:
+Both use resumable guest continuations. Callback ABI adapters finish their helper
+continuations locally. The exporter recovers nearby pushed return addresses only
+when the target is a bounded, straight-line ESP/EBP-restoring epilogue ending in
+RET. Argument preparation between a pushed return and jump is permitted.
 
-```powershell
-.venv\Scripts\python.exe tools\probe_startup.py --game all
-```
+Windows diagnostic executables and SDL desktop packages build with the verified
+LLVM-MinGW toolchain. Desktop packages still need actual screen/input/audio
+testing. macOS, iOS, Linux, Android and web builds have not been produced.
 
-The probe returns a failure when it encounters unresolved imports, a failed
-process or zero frames. Even a later successful probe is not a gameplay test.
-The portable LLVM-MinGW diagnostic builds use compiler runtime DLLs from the
-toolchain's `bin` directory; the probe adds that directory to its own PATH.
-The diagnostic executables are not standalone player packages.
+## Runtime verification
 
-The local GCC experiment compiled Cult's generated C archive but failed to
-link the kit's complete host. Its temporary runtime edits were reverted;
-the original kit checkout is unchanged. The game's local kit submodule now has
-the loader and translator changes described above.
+The latest selected native contracts pass:
 
-## Release requirements still outstanding
+- Graphics: **192 checks, zero failures**, including requested-depth bitmap
+  downloads with guard bytes, orientation, scan ranges and background erasure.
+- Loader/startup: **487 checks, zero failures, one resource-related skip**.
+- Audio/DirectX shims: **141,275 checks, zero failures, one explicit skip** for a
+  cursor-learning fixture whose required game globals are absent from these profiles.
+- Root input/profile checks: **18 tests pass**.
+- Latest selected decoder/translator/configuration/build/root suite: **242 pass**.
 
-Close the shared VB5/PictureClip startup and rendering gaps, then compare
-menus, movement, interactions, dialogue, save/load, transitions and endings
-against the original games. Verify audio and physical/touch input. Build and
-test separately on Windows, Linux, macOS, Android, iOS and web, subject to the
-kit's supported architectures and SDK requirements. Prepare distributable
-packages only after those results establish playable behavior.
+The broader portable suite previously recorded 354 passes, 76 skips and three
+failures because this Windows process lacked symlink-creation privilege in setup
+and Linux-package fixtures. The complete suite has not passed on this host.
+
+Shared implemented services include the guest COM allocator, mapped-module string
+resources, BSTR/SAFEARRAY storage, class factories, fonts, temporary OLE named
+streams, registry default queries, legacy file opens, and system ListBox/Edit
+controls. These are partial Win32/COM implementations: persistent compound files,
+transactions, substorages, complex selections and several control services remain
+unavailable. Unsupported operations are not evidence of compatibility.
+
+PCM WAV effects submit nonzero samples through the shared host audio service.
+Basic MCI sequencer strings decode SMF and use the shared synth, with aliases,
+play/stop/close and millisecond status queries covered by native contracts. The
+smoke host opens no audio device; audible output and the actual game scores are
+unverified.
+
+## Reproduction and remaining work
+
+All 221 installer payloads were expanded without running either installer or
+registering DLLs/OCXs. Every expanded payload independently matched Windows
+expand.exe. Exact executable hashes and profiles are pinned. Packaged documents
+are reference data, never authorization to execute their instructions.
+
+The kit is pinned to eb32cc42623e0e9e868b9d27423a57d5a5cba56b, with the reproducible
+local port changes in patches/recomp-kit-vb5.patch. The separate recomp-kit
+checkout is untouched. Original assets, generated source, binaries, profiles and
+logs remain ignored.
+
+After building smoke targets, run tools/probe_input.py --game <id> --scenario save
+--max-seconds 160 for the current bounded save/load path. Use --trace-windows
+to record the window model at frame captures. Evidence is saved under each
+profile's build/<scenario>-probe/. A completed input script does not by itself
+verify movement, rendered pixels, original parity or playability.
+
+Remaining work: repair HUD repainting, confirm Cult II's player movement,
+exercise further interactions/transitions, verify save state and original-save
+compatibility, test physical and touch input plus audible music/effects, and
+build/test each requested platform with its required toolchain and SDK. Full
+playable ports and an all-platform release remain outstanding.

@@ -28,9 +28,11 @@ def read_evidence(log):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
-    parser.add_argument("--scenario", choices=["play", "intro", "newgame"], default="play")
+    parser.add_argument("--scenario", choices=["play", "intro", "newgame", "gameplay", "help", "save"], default="play")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--trace-abi", "--trace-import-abi", dest="trace_abi", action="store_true")
+    parser.add_argument("--watch-guest", help="guest watchpoint in hex address[:length] form")
+    parser.add_argument("--trace-windows", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=30)
     parser.add_argument("--toolchain", type=Path, default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64")
     args = parser.parse_args()
@@ -50,6 +52,10 @@ def main():
         if args.trace_abi:
             env["RECOMP_IMPORT_ABI_TRACE"] = "1"
             env["RECOMP_MODULE_ABI_TRACE"] = "1"
+        if args.watch_guest:
+            env["RECOMP_WATCH"] = args.watch_guest
+        if args.trace_windows:
+            env["RECOMP_TRACE_WINDOWS"] = "1"
         executable = game / "build/recomp/pop_smoke.exe"
         script = game / "smoke" / f"{args.scenario}.script"
         timed_out = False
@@ -71,7 +77,10 @@ def main():
                   "script": str(script), "scenario": args.scenario,
                   "probe": "native mouse input and " +
                            {"play": "play-control transition", "intro": "intro transition",
-                            "newgame": "new-game and keyboard movement"}[args.scenario]}
+                            "newgame": "new-game and keyboard movement",
+                            "gameplay": "opening dialogue and keyboard movement",
+                            "help": "keyboard navigation to the help screen",
+                            "save": "keyboard navigation to the in-game save menu"}[args.scenario]}
         (directory / "result.json").write_text(json.dumps(record, indent=2) + "\n")
         failed |= returncode != 0 or timed_out or not completed or any(
             evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "guest_access_violations", "unsupported_control_messages"))

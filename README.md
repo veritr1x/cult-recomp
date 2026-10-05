@@ -11,8 +11,11 @@ Both have completed bounded language-screen captures without called missing
 imports or unknown transfers. Titles, flags, character artwork and the Play
 label render, and native mouse clicks advance into intro processing.
 Longer probes now reach and render both main menus.
-New Game currently fails in guest cleanup/return paths. Work continues on
-those paths, input, save controls and audio.
+Both enter their opening scenes and clear their opening conversations. Cult's
+arrow-key input moves the player and triggers a guard conversation. Both write
+save files and return to game scenes through Load. Rendering still needs work:
+the HUD disappears after closing Save/Load. Audible device output, physical
+input, complete gameplay and other platforms still require verification.
 Runtime x86 interpretation is disabled
 for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
@@ -119,8 +122,11 @@ through OLE memory streams. The uncovered VB, Automation and cleanup callbacks
 now execute. DLL-name comparison and legacy file opens are implemented, and the
 standard OLE type library is included as guest-readable data. Both short probes
 finish with no called missing imports, unknown transfers, VB errors or access
-violations. Longer probes render both main menus; a legacy registry query is
-implemented and the next probes exercise New Game and keyboard movement.
+violations. Longer probes exercise New Game, dialogue, movement and Save/Load.
+GetDIBits now honors the caller's pixel depth and row count, fixing a buffer
+overrun that corrupted Cult II's interface objects. Background erasure removes
+retained menu pixels. Save/load probes use a writable private profile even with
+plugins disabled. The returned scenes still lose their HUD and need repaint work.
 Both probes submit three WAV effects with nonzero audio samples. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
