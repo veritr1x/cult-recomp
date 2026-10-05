@@ -102,6 +102,21 @@ class ProfileTests(unittest.TestCase):
 
 
 class InputProbeTests(unittest.TestCase):
+    def test_save_roundtrip_requires_fresh_matching_state(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from probe_input import save_roundtrip
+        with TemporaryDirectory() as directory:
+            profile = Path(directory)
+            self.assertFalse(save_roundtrip(profile, ".zsg", 0)["verified"])
+            for name in ("P1", "P2"):
+                (profile / (name + ".zsg")).write_bytes(b"1\n3\n10\n20\nDown\n100\n")
+            (profile / "P3.zsg").write_bytes(b"1\n3\n10\n30\nDown\n100\n")
+            self.assertTrue(save_roundtrip(profile, ".zsg", 0)["verified"])
+            self.assertFalse(save_roundtrip(profile, ".zsg", 1e20)["verified"])
+            (profile / "P2.zsg").write_bytes(b"different saved state")
+            self.assertFalse(save_roundtrip(profile, ".zsg", 0)["verified"])
+
     def test_completed_script_retains_guest_errors(self):
         from probe_input import read_evidence
         result = read_evidence("script: 5 of 5 steps\npresented frames: 180\n"

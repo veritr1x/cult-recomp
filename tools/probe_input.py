@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from import_archives import GAMES, ROOT
@@ -25,6 +26,27 @@ def read_evidence(log):
     }
 
 
+def save_roundtrip(profile, extension, started):
+    """Only fresh saves from this run can establish a serialized-state round trip."""
+    paths = [profile / (name + extension) for name in ("P1", "P2", "P3")]
+    if not all(p.is_file() and 0 < p.stat().st_size < 65536 for p in paths):
+        return {"verified": False, "reason": "The three nonempty save files were not written"}
+    fresh = all(p.stat().st_mtime >= started for p in paths)
+    equal = paths[0].read_bytes() == paths[1].read_bytes()
+    try:
+        # Both supplied save formats store the audited X/Y integers in lines 3/4.
+        positions = [[int(v) for v in p.read_text().splitlines()[2:4]] for p in paths]
+        moved = all(len(pos) == 2 for pos in positions) and positions[0] != positions[2]
+    except ValueError:
+        positions, moved = [], False
+    verified = fresh and equal and moved
+    return {"verified": verified, "fresh_writes": fresh,
+            "same_serialized_state": equal,
+            "player_position_changed": moved, "positions_before_restored_changed": positions,
+            "reason": "Fresh saves match after movement and reload" if verified else
+                      "Stale saves, different restored state or unverified movement"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game", choices=[*GAMES, "all"], default="all")
@@ -33,6 +55,7 @@ def main():
     parser.add_argument("--trace-abi", "--trace-import-abi", dest="trace_abi", action="store_true")
     parser.add_argument("--watch-guest", help="guest watchpoint in hex address[:length] form")
     parser.add_argument("--trace-windows", action="store_true")
+    parser.add_argument("--trace-gdi", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=30)
     parser.add_argument("--toolchain", type=Path, default=ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64")
     args = parser.parse_args()
@@ -56,9 +79,12 @@ def main():
             env["RECOMP_WATCH"] = args.watch_guest
         if args.trace_windows:
             env["RECOMP_TRACE_WINDOWS"] = "1"
+        if args.trace_gdi:
+            env["RECOMP_TRACE_GDI"] = "1"
         executable = game / "build/recomp/pop_smoke.exe"
         script = game / "smoke" / f"{args.scenario}.script"
         timed_out = False
+        started = time.time()
         try:
             result = subprocess.run([str(executable), "--script", str(script)], cwd=directory,
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -80,12 +106,18 @@ def main():
                             "newgame": "new-game and keyboard movement",
                             "gameplay": "opening dialogue and keyboard movement",
                             "help": "keyboard navigation to the help screen",
-                            "save": "keyboard navigation to the in-game save menu"}[args.scenario]}
+                            "save": "save, movement, load and serialized-state round trip"}[args.scenario]}
+        if args.scenario == "save":
+            record["save_roundtrip"] = save_roundtrip(directory / "profile",
+                                                    ".zsg" if game_id == "cult" else ".fcg", started)
+            failed |= not record["save_roundtrip"]["verified"]
         (directory / "result.json").write_text(json.dumps(record, indent=2) + "\n")
         failed |= returncode != 0 or timed_out or not completed or any(
             evidence[key] for key in ("missing_imports_called", "unknown_transfers", "runtime_errors", "guest_access_violations", "unsupported_control_messages"))
         print(f"{game_id}: exit={returncode}, timeout={timed_out}, script_completed={completed}, missing={missing}, unknown={len(unknown)}, runtime_errors={evidence['runtime_errors']}")
         print(f"Evidence: {directory / 'result.json'}")
+        if "save_roundtrip" in record:
+            print(f"Save round trip: {record['save_roundtrip']}")
     return int(failed)
 
 

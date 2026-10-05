@@ -13,9 +13,10 @@ label render, and native mouse clicks advance into intro processing.
 Longer probes now reach and render both main menus.
 Both enter their opening scenes and clear their opening conversations. Cult's
 arrow-key input moves the player and triggers a guard conversation. Both write
-save files and return to game scenes through Load. Rendering still needs work:
-the HUD disappears after closing Save/Load. Audible device output, physical
-input, complete gameplay and other platforms still require verification.
+save files and return to game scenes through Load. Both tests also verify
+that loading restores the complete serialized state after movement. Audible
+device output, physical input, complete gameplay and other platforms still
+require verification; Cult II's player and inventory still have rendering issues.
 Runtime x86 interpretation is disabled
 for both profiles. A playable run is still outstanding.
 The deadline requested was 6 October 2026; an all-platform playable release
@@ -125,8 +126,10 @@ finish with no called missing imports, unknown transfers, VB errors or access
 violations. Longer probes exercise New Game, dialogue, movement and Save/Load.
 GetDIBits now honors the caller's pixel depth and row count, fixing a buffer
 overrun that corrupted Cult II's interface objects. Background erasure removes
-retained menu pixels. Save/load probes use a writable private profile even with
-plugins disabled. The returned scenes still lose their HUD and need repaint work.
+retained menu pixels. Paints clip to accumulated update rectangles, preserving
+the HUD when dialogs close. Hidden helper controls no longer draw into visible
+parent surfaces. Save/load probes use a writable private profile even with
+plugins disabled, and reject stale files or an unchanged test position.
 Both probes submit three WAV effects with nonzero audio samples. These are diagnostic builds;
 gameplay, audio, save/load and other platforms remain unverified.
 
