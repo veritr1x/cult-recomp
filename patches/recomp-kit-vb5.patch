@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..43b1b94 100644
+index 20fdc15..3505f37 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,125 @@
+@@ -2,6 +2,128 @@
  
  ## Unreleased
  
++- Enable the available Android Vulkan surface extension, and give Gradle the
++  native build's NDK so its APK symbol stripping uses the matching toolchain.
++
 +- Separate queued keyboard presses from their matching releases by a guest turn,
 +  matching the mouse batching rule so fast taps remain observable to polling code.
 +
@@ -1125,6 +1128,23 @@ index 71c41d8..add93cd 100644
          candidate = l.developer ? l.checkout_root + "/" + candidate : std::string();
      OsStat st;
      if (!candidate.empty() && os_stat(candidate.c_str(), &st) == 0) {
+diff --git a/host/gpu/vulkan/vulkan_device.cpp b/host/gpu/vulkan/vulkan_device.cpp
+index e0ea1c5..4e4d24f 100644
+--- a/host/gpu/vulkan/vulkan_device.cpp
++++ b/host/gpu/vulkan/vulkan_device.cpp
+@@ -84,9 +84,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
+         inst_ext.push_back("VK_KHR_portability_enumeration");
+         inst_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+     }
+-    for (const char *s :
+-         {"VK_KHR_surface", "VK_EXT_metal_surface", "VK_KHR_win32_surface", "VK_KHR_xlib_surface",
+-          "VK_KHR_xcb_surface", "VK_KHR_wayland_surface", "VK_KHR_get_physical_device_properties2"})
++    for (const char *s : {"VK_KHR_surface", "VK_EXT_metal_surface", "VK_KHR_win32_surface",
++                          "VK_KHR_xlib_surface", "VK_KHR_xcb_surface", "VK_KHR_wayland_surface",
++                          "VK_KHR_android_surface", "VK_KHR_get_physical_device_properties2"})
+         if (has_inst(s))
+             inst_ext.push_back(s);
+     std::vector<const char *> layers;
 diff --git a/host/gpu/vulkan/vulkan_swapchain.cpp b/host/gpu/vulkan/vulkan_swapchain.cpp
 index fe40a38..020f8ea 100644
 --- a/host/gpu/vulkan/vulkan_swapchain.cpp
@@ -1519,6 +1539,22 @@ index 8bc24e5..de0d90b 100644
      test_fullscreen_edge_presentation();
      test_native_frame_metrics();
      test_wide_cursor_bound();
+diff --git a/platform/android/app/build.gradle.kts.in b/platform/android/app/build.gradle.kts.in
+index 6e666fd..15dbf0b 100644
+--- a/platform/android/app/build.gradle.kts.in
++++ b/platform/android/app/build.gradle.kts.in
+@@ -6,6 +6,11 @@ android {
+     namespace = "@bundle_id@"
+     compileSdk = 36
+     buildToolsVersion = "37.0.0"
++    // Reuse the native build's NDK rather than selecting AGP's default version.
++    if ("@ndk_path@".isNotEmpty()) {
++        ndkPath = "@ndk_path@"
++        ndkVersion = "@ndk_version@"
++    }
+ 
+     defaultConfig {
+         applicationId = "@bundle_id@"
 diff --git a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java b/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
 index 4c2fa4e..f474f76 100644
 --- a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
@@ -9618,7 +9654,7 @@ index b59ecac..9b49f72 100644
  // Installs the host's event-loop pump. GetMessageA calls it each time round
  // its wait, and the contract is deliberately narrow:
 diff --git a/tests/test_build_py.py b/tests/test_build_py.py
-index b57433e..67008fa 100644
+index b57433e..50d6a91 100644
 --- a/tests/test_build_py.py
 +++ b/tests/test_build_py.py
 @@ -3,6 +3,7 @@
@@ -9629,10 +9665,32 @@ index b57433e..67008fa 100644
  import unittest
  from unittest.mock import patch
  
-@@ -12,6 +13,34 @@ spec.loader.exec_module(build_py)
+@@ -12,6 +13,56 @@ spec.loader.exec_module(build_py)
  
  
  class BuildPyTests(unittest.TestCase):
++    def test_android_project_reuses_native_ndk_with_escaped_paths(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            gen = root / "cmake"
++            gen.mkdir()
++            ndk = root / "custom ndk $toolchain"
++            ndk.mkdir()
++            (ndk / "source.properties").write_text("Pkg.Revision = 99.3.1\n")
++            toolchain = ndk / "build/cmake/android.toolchain.cmake"
++            (gen / "CMakeCache.txt").write_text(
++                "CMAKE_TOOLCHAIN_FILE:FILEPATH=" + toolchain.as_posix() + "\n")
++            cfg = {"game": {"app_name": "Test", "bundle_id": "dev.recompkit.test", "id": "test"}}
++            out = build_py.android_project(root / "build", cfg, gen_dir=gen)
++            script = (out / "app/build.gradle.kts").read_text()
++            expected = ndk.resolve().as_posix().replace("$", r"\$")
++            self.assertIn('ndkPath = "' + expected + '"', script)
++            self.assertIn('ndkVersion = "99.3.1"', script)
++            self.assertNotIn("@ndk_path@", script)
++            (gen / "CMakeCache.txt").unlink()
++            build_py.android_project(root / "build", cfg, gen_dir=gen)
++            self.assertIn('if ("".isNotEmpty())', (out / "app/build.gradle.kts").read_text())
++
 +    def test_android_runtime_assets_include_bank_and_notice_without_unrelated_data(self):
 +        with tempfile.TemporaryDirectory() as temporary:
 +            root = Path(temporary)
@@ -9700,10 +9758,34 @@ index 4f45372..e9d41f1 100644
              game = Path(tmp) / "g"
              game.mkdir()
 diff --git a/tools/build.py b/tools/build.py
-index 6c3d908..4ef7156 100644
+index 6c3d908..6c24fd7 100644
 --- a/tools/build.py
 +++ b/tools/build.py
-@@ -203,6 +203,22 @@ def android_stage_core_assets(out, game_dir):
+@@ -165,6 +165,23 @@ def android_project(build_root, cfg, *, gen_dir):
+                     ignore=shutil.ignore_patterns(".gradle", "build", ".gitignore", "local.properties"))
+     values = {key: cfg["game"][key] for key in ("app_name", "bundle_id", "id")}
+     values["sdl_java_dir"] = (Path(gen_dir).resolve() / "_deps/sdl3-src/android-project/app/src/main/java").as_posix()
++    # Gradle packages CMake's library, so use that build's NDK for symbol
++    # stripping too. Otherwise AGP can silently retain enormous debug sections.
++    values["ndk_path"] = ""
++    values["ndk_version"] = ""
++    cache = Path(gen_dir) / "CMakeCache.txt"
++    if cache.is_file():
++        for line in cache.read_text().splitlines():
++            if line.startswith("CMAKE_TOOLCHAIN_FILE:FILEPATH="):
++                toolchain = Path(line.partition("=")[2])
++                if toolchain.name == "android.toolchain.cmake":
++                    ndk = toolchain.resolve().parents[2]
++                    values["ndk_path"] = ndk.as_posix()
++                    for property_line in (ndk / "source.properties").read_text().splitlines():
++                        if property_line.partition("=")[0].strip() == "Pkg.Revision":
++                            values["ndk_version"] = property_line.partition("=")[2].strip()
++                    if not values["ndk_version"]:
++                        raise ValueError("Native NDK source.properties has no Pkg.Revision")
+     for original in template.rglob("*.in"):
+         source = out / original.relative_to(template)
+         text = source.read_text()
+@@ -203,6 +220,22 @@ def android_stage_core_assets(out, game_dir):
      copy_core_mods(game_dir, Path(out) / "app/src/main/assets/mods/core")
  
  
@@ -9726,7 +9808,7 @@ index 6c3d908..4ef7156 100644
  def android_apk(build_root, cfg, *, gen_dir, game_dir):
      """Stage the native libraries beside the SDL activity and assemble a debug APK."""
      library = Path(gen_dir) / "host/libmain.so"
-@@ -234,8 +250,10 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+@@ -234,8 +267,10 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
          notice.unlink(missing_ok=True)
      android_stage_layout_assets(out, game_dir)
      android_stage_core_assets(out, game_dir)

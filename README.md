@@ -204,7 +204,8 @@ language screens through WebGPU and initialize the packaged MIDI bank. A runtime
 mouse-state fix lets ordinary Play clicks start both games. Keyboard input reaches
 the opening scenes and advances their conversations. Later movement/menu input
 can leave blank or stale frames; browser save/load and full gameplay remain
-unverified. The guest arena extends
+unverified. Gray rectangles on the initial menu also occur in Windows diagnostic
+frames and need a shared rendering fix. The guest arena extends
 to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
 cross-origin isolated page and a WebGPU-capable browser.
@@ -216,9 +217,13 @@ repository's associated license text matches its accepted agreement apart from
 whitespace. It refuses changed terms or unexpected package checksums. Android
 configuration and APK assembly succeeded for both games. `tools/package_android.py`
 checks the ARM64 library and required runtime assets, then copies the APKs and
-notices into `build/player/android/`. Both install and load their libraries on an
-isolated emulator using ARM64 translation. Its Vulkan driver lacks dynamic
-rendering, so startup stops at the launcher before gameplay. Physical ARM64
+notices into `build/player/android/`. Gradle uses the native build's NDK and version
+for symbol stripping; the packages are about 654 MB and 658 MB. Optional
+`--with-emulator` stages stable emulator 37.2.12 in the private SDK folder.
+Both games install and load their libraries on an isolated emulator using ARM64
+translation. The original software GPU lacked dynamic rendering. Host GPU testing
+exposed a missing Android Vulkan surface extension, now enabled in the runtime,
+but the emulator failed or lost its device connection after launch. Physical ARM64
 device execution, touch input and audible output remain unverified.
 
 ## Metadata references

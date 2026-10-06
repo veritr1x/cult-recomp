@@ -99,9 +99,12 @@ screens through WebGPU and initialize their MIDI banks. GetKeyState now retains
 the retrieved mouse message's button state, so an early physical release no longer
 erases a windowless control's press. Ordinary Play clicks start both games;
 keyboard input reaches their opening scenes and advances the conversations.
-Later movement/menu input can leave blank or stale frames. Browser save/load,
+Later movement/menu input can leave blank or stale frames. Gray initial-menu
+rectangles also appear in saved Windows diagnostic frames, so this rendering
+defect is shared. Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
-The four mouse-state regressions pass; the keyboard gate and queued-input checks have 78 checks with zero
+The four mouse-state regressions pass; the keyboard gate and queued-input checks
+have 78 checks with zero
 failures. A broader runtime run has 1,602 checks, 25 failures and one skip, including
 unavailable PE helpers and game-specific fixture contracts; it is not a full pass.
 Windows-hosted Android
@@ -111,8 +114,16 @@ the repository's associated agreement matches the already accepted installed
 SDK agreement after whitespace normalization. No new agreement was accepted.
 Android configuration and APK assembly succeeded for both games. Private debug
 APKs are under build/player/android/. Both install and load their ARM64 libraries
-on an isolated emulator using libndk_translation. Its Vulkan driver lacks dynamic
-rendering, so both stop at their launchers before gameplay. Physical ARM64
+on an isolated emulator using libndk_translation. Its original software Vulkan
+driver lacks dynamic rendering. Switching to the host GPU creates a device but
+exposed an omitted VK_KHR_android_surface extension, now enabled when available.
+The original emulator then failed in WHPX MMIO emulation. Checksum-pinned stable
+emulator 37.2.12 boots in the same isolated AVD, but its device connection becomes
+unavailable after launch. Neither test verifies Android gameplay.
+Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
+to strip symbols with AGP's different default NDK. This reduces Cult II's APK
+from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build
+contracts pass 16 tests. Physical ARM64
 hardware, touch input and audible output remain unverified.
 
 Browser and Android packaging previously omitted the host's General MIDI bank.

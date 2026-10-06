@@ -1,5 +1,6 @@
 """Stage pinned Windows Android packages using the already accepted SDK agreement."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ PACKAGES = {
     "platforms;android-36": ("platform-36_r02.zip", "2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576", "platforms/android-36"),
     "build-tools;37.0.0": ("build-tools_r37_windows.zip", "e9c97e26b5b5678002e9d3fed632c841ae62d99f", "build-tools/37.0.0"),
 }
+EMULATOR = ("emulator-windows_x64-16428233.zip", "488ed747e82de7e9bb5247becd1ac043c7e5e85d", "emulator")
 
 
 def digest(path):
@@ -30,6 +32,9 @@ def normalized(text):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--with-emulator", action="store_true", help="Also stage the pinned stable Windows emulator")
+    args = parser.parse_args()
     if os.name != "nt":
         raise SystemExit("This bootstrap stages the Windows-hosted Android toolchain")
     installed = Path(os.environ["LOCALAPPDATA"]) / "Android/Sdk"
@@ -48,8 +53,14 @@ def main():
     downloads.mkdir(parents=True, exist_ok=True)
     (downloads / "repository.xml").write_bytes(data)
     records = []
-    for package_id, (filename, checksum, relative) in PACKAGES.items():
-        package = next(item for item in document if item.attrib.get("path") == package_id)
+    packages = dict(PACKAGES)
+    if args.with_emulator:
+        packages["emulator"] = EMULATOR
+    for package_id, (filename, checksum, relative) in packages.items():
+        # A stable and preview emulator share a package ID. Select the pinned
+        # archive before checking its agreement, so a preview is never substituted.
+        package = next(item for item in document if item.attrib.get("path") == package_id and
+                       any(child.tag.split("}")[-1] == "url" and child.text == filename for child in item.iter()))
         license_ref = next(item.attrib["ref"] for item in package.iter() if item.tag.split("}")[-1] == "uses-license")
         if license_ref != "android-sdk-license":
             raise ValueError(f"{package_id} requires a different agreement")
