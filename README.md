@@ -13,7 +13,7 @@ new child-window stacking and sibling-clipping checks pass, and fresh
 movement/save/load round trips still succeed for both games.
 Save/load names now repaint through the control procedure, and GetWindowTextA
 retrieves their text. Both Windows diagnostic save tests pass again with no
-missing imports or unknown transfers. The latest GDI suite passes 233 checks
+missing imports or unknown transfers. The latest GDI suite passes 240 checks
 on Windows and Linux, including paint priority and timer deadline order.
 Cult II's player and inventory now render immediately after startup Load in
 the corrected Windows, Linux and browser builds. Cult II's browser also writes
@@ -68,6 +68,17 @@ by a fresh browser save changing coordinates from (407,160) to (477,170).
 The user also confirms Cult's held-key movement down its starting path.
 The current browser checks also cover opening scenes, menu input and save/load
 in both games. Full playthroughs remain unverified.
+
+The 6 October performance update removes software long-double work from ordinary
+GDI pixel mappings and copies 32-bit images directly into window surfaces while
+preserving clipping. In Cult II's saved street scene, completed StretchBlt calls
+averaged 23.35 ms before the update and 0.32 ms afterwards; BitBlt averaged
+1.95 ms and 0.20 ms. These are inclusive import wall times from approximately
+30-second samples, not game FPS or a general speed guarantee. Both games' local
+Windows, Linux and browser players include the changes. Save before reloading a
+running browser game, then use the clean URLs without diagnostic query options;
+verbose traces add overhead. The updated GDI suite passes 240 checks on each
+desktop system, including copy equivalence, clipping, scaling and overflow.
 
 RecompKit is pinned as the `kit/` submodule to
 `eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.

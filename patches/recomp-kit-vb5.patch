@@ -1,11 +1,19 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..3a6af63 100644
+index 20fdc15..b6d8cc8 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,176 @@
+@@ -2,6 +2,184 @@
  
  ## Unreleased
  
++- Map equal GDI window/viewport extents with saturated integer translation,
++  avoiding per-pixel software long-double arithmetic in browser raster draws.
++  Copy opaque 32-bit DIBs directly into separate window surfaces for SRCCOPY,
++  preserving clipping, source bounds and orientation. Keep other raster
++  operations and scaled coordinate mappings on the general paths. Optional
++  `RECOMP_IMPORT_TIMING=1` reports cumulative inclusive wall times for completed
++  imports every five seconds; nested callbacks and waits are included.
++
 +- Show a keyboard focus hint in browser players. Diagnose host key transitions
 +  and the first key-state query in each state with `RECOMP_TRACE_KEYS=1`.
 +
@@ -2267,7 +2275,7 @@ index 06d5e2b..c2683c7 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..bd4e7a5 100644
+index 13ba56f..e13f36c 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
 @@ -6,6 +6,7 @@
@@ -2530,13 +2538,17 @@ index 13ba56f..bd4e7a5 100644
      {"GDI32.dll", "SetTextColor", 2, g_SetTextColor},
      {"GDI32.dll", "SetBkColor", 2, g_SetBkColor},
      {"GDI32.dll", "SetBkMode", 2, g_SetBkMode},
-@@ -861,8 +869,13 @@ Surface *surface_of(DeviceContext &dc) {
+@@ -861,8 +869,17 @@ Surface *surface_of(DeviceContext &dc) {
      return &s;
  }
  void offset(DeviceContext &dc, int64_t *x, int64_t *y) {
 -    *x += int64_t(dc.viewport_x) - dc.org_x;
 -    *y += int64_t(dc.viewport_y) - dc.org_y;
 +    auto mapped = [](int64_t p, int32_t origin, int32_t viewport, int32_t window, int32_t extent) {
++        // The usual MM_TEXT mapping is an integer translation. In particular,
++        // avoid software long-double arithmetic for every blitted pixel on Wasm.
++        if (window == extent && p >= INT_MIN && p <= INT_MAX)
++            return std::clamp<int64_t>(p - origin + viewport, INT_MIN, INT_MAX);
 +        long double value =
 +            std::round((static_cast<long double>(p) - origin) * extent / window) + viewport;
 +        return int64_t(std::clamp<long double>(value, INT_MIN, INT_MAX));
@@ -2546,7 +2558,7 @@ index 13ba56f..bd4e7a5 100644
      if (dc.window && dc.window != dc.surface) {
          int32_t wx = 0, wy = 0, sx = 0, sy = 0;
          user32::client_origin(dc.window, &wx, &wy);
-@@ -886,7 +899,7 @@ Rect client_bounds(DeviceContext &dc, int w, int h) {
+@@ -886,7 +903,7 @@ Rect client_bounds(DeviceContext &dc, int w, int h) {
      for (size_t hop = 0; current && current != dc.surface && hop < user32::windows().size();
           ++hop) {
          auto *window = user32::find_window(current);
@@ -2555,15 +2567,67 @@ index 13ba56f..bd4e7a5 100644
              return {};
          int32_t x = 0, y = 0;
          user32::client_origin(current, &x, &y);
-@@ -1058,6 +1071,31 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
+@@ -1058,6 +1075,83 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
  bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p, bool blend) {
      return pixel(dc, x, y, &p, true, blend);
  }
++bool copy_dib_to_window(uint32_t dst, uint32_t src, Rect area, int32_t x, int32_t y, int32_t w,
++                        int32_t h, int32_t sx, int32_t sy, int32_t sw, int32_t sh) {
++    auto *dest = dc_of(dst), *source = dc_of(src);
++    auto identity = [](const DeviceContext *dc) {
++        return dc && dc->window_ext_x == dc->viewport_ext_x &&
++               dc->window_ext_y == dc->viewport_ext_y && !dc->org_x && !dc->org_y &&
++               !dc->viewport_x && !dc->viewport_y;
++    };
++    if (!identity(dest) || !identity(source) || dest->bitmap || !source->bitmap ||
++        source->clipped || (source->window && source->window != source->surface) || w <= 0 ||
++        h <= 0 || sw <= 0 || sh <= 0)
++        return false;
++    auto *dib = dib_in_dc(src);
++    auto *surface = surface_of(*dest);
++    if (!dib || !surface || dib->bpp != 32 || dib->compression != 0)
++        return false;
++    const int64_t rows = std::abs(int64_t(dib->height));
++    const uint64_t bytes = uint64_t(dib->stride) * rows;
++    if (bytes > UINT32_MAX || !gm_valid(dib->bits, uint32_t(bytes)))
++        return false;
++    int64_t ox = 0, oy = 0;
++    offset(*dest, &ox, &oy);
++    const Rect bounds = client_bounds(*dest, surface->w, surface->h);
++    bool wrote = false;
++    // Guest DIB memory and host window pixels cannot alias. Read once and write
++    // directly, preserving the generic path's opaque reads and all window clips.
++    for (int64_t yy = area.t; yy < area.b; ++yy) {
++        const int64_t py = int64_t(sy) + (yy - y) * sh / h, dy = yy + oy;
++        if (py < 0 || py >= rows || dy < bounds.t || dy >= bounds.b)
++            continue;
++        const uint32_t row =
++            dib->bits + uint32_t(dib->height > 0 ? rows - 1 - py : py) * dib->stride;
++        for (int64_t xx = area.l; xx < area.r; ++xx) {
++            const int64_t px = int64_t(sx) + (xx - x) * sw / w, dx = xx + ox;
++            if (px < 0 || px >= dib->width || dx < bounds.l || dx >= bounds.r ||
++                (dest->clipped && std::none_of(
++                                      dest->clip.begin(), dest->clip.end(),
++                                      [&](Rect r) { return contains(r, dx, dy); })) ||
++                std::any_of(
++                    dest->excluded.begin(), dest->excluded.end(),
++                    [&](Rect r) { return contains(r, dx, dy); }))
++                continue;
++            surface->argb[size_t(dy) * surface->w + dx] =
++                rd32(row + uint32_t(px) * 4) | 0xff000000u;
++            wrote = true;
++        }
++    }
++    surface->dirty |= wrote;
++    return true;
++}
 +bool mapping_point(uint32_t hdc, int64_t *x, int64_t *y) {
 +    auto *dc = dc_of(hdc);
 +    if (!dc)
 +        return false;
 +    auto mapped = [](int64_t p, int32_t origin, int32_t viewport, int32_t window, int32_t extent) {
++        if (window == extent && p >= INT_MIN && p <= INT_MAX)
++            return std::clamp<int64_t>(p - origin + viewport, INT_MIN, INT_MAX);
 +        long double value =
 +            std::round((static_cast<long double>(p) - origin) * extent / window) + viewport;
 +        return int64_t(std::clamp<long double>(value, INT_MIN, INT_MAX));
@@ -2587,7 +2651,7 @@ index 13ba56f..bd4e7a5 100644
  bool drawable(uint32_t dc, int64_t x, int64_t y) {
      uint32_t p;
      return read_pixel(dc, x, y, &p);
-@@ -1084,6 +1122,8 @@ Rect clip_box(uint32_t hdc) {
+@@ -1084,6 +1178,8 @@ Rect clip_box(uint32_t hdc) {
          return {};
      auto &dc = *dc_of(hdc);
      Rect r = dc.bitmap ? Rect{0, 0, w, h} : client_bounds(dc, w, h);
@@ -2596,7 +2660,7 @@ index 13ba56f..bd4e7a5 100644
      if (dc.clipped) {
          Rect bound{INT_MAX, INT_MAX, INT_MIN, INT_MIN};
          for (Rect p : dc.clip) {
-@@ -1099,10 +1139,29 @@ Rect clip_box(uint32_t hdc) {
+@@ -1099,10 +1195,29 @@ Rect clip_box(uint32_t hdc) {
      }
      int64_t x = 0, y = 0;
      offset(dc, &x, &y);
@@ -2628,7 +2692,7 @@ index 13ba56f..bd4e7a5 100644
      Rect clip = clip_box(dc);
      for (int64_t y = std::max(r.t, clip.t); y < std::min(r.b, clip.b); ++y)
          for (int64_t x = std::max(r.l, clip.l); x < std::min(r.r, clip.r); ++x)
-@@ -1136,6 +1195,35 @@ std::vector<Rect> clipped_children(uint32_t hwnd, uint32_t surface) {
+@@ -1136,6 +1251,35 @@ std::vector<Rect> clipped_children(uint32_t hwnd, uint32_t surface) {
      }
      return out;
  }
@@ -2664,7 +2728,7 @@ index 13ba56f..bd4e7a5 100644
  } // namespace
  uint32_t gdi_window_dc(uint32_t hwnd) {
      DeviceContext dc;
-@@ -1154,6 +1242,7 @@ uint32_t gdi_window_dc(uint32_t hwnd) {
+@@ -1154,6 +1298,7 @@ uint32_t gdi_window_dc(uint32_t hwnd) {
          }
          dc.surface = w->hwnd;
          dc.excluded = clipped_children(hwnd, dc.surface);
@@ -2672,7 +2736,7 @@ index 13ba56f..bd4e7a5 100644
      }
      uint32_t handle = g_next_dc++;
      dcs()[handle] = dc;
-@@ -1293,6 +1382,9 @@ bool presented_pixels(PresentedSurface &s) {
+@@ -1293,6 +1438,9 @@ bool presented_pixels(PresentedSurface &s) {
  }
  } // namespace
  
@@ -2682,7 +2746,7 @@ index 13ba56f..bd4e7a5 100644
  void gdi_present_windows(bool refresh) {
      auto surfaces = visible_surfaces();
      auto &presented = presented_surface();
-@@ -1480,6 +1572,21 @@ void brush_indirect(X86 *c) {
+@@ -1480,6 +1628,21 @@ void brush_indirect(X86 *c) {
  void pen_indirect(X86 *c) {
      indirect_object(c, true);
  }
@@ -2704,7 +2768,7 @@ index 13ba56f..bd4e7a5 100644
  void stock_object(X86 *c) {
      uint32_t i = arg(c, 0);
      set_eax(c, i <= 19 ? 0x4f100 + i : 0);
-@@ -1494,6 +1601,10 @@ void set_pixel(X86 *c) {
+@@ -1494,6 +1657,10 @@ void set_pixel(X86 *c) {
                     ? arg(c, 3) & 0xffffff
                     : 0xffffffff);
  }
@@ -2715,7 +2779,7 @@ index 13ba56f..bd4e7a5 100644
  void save_dc(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      if (!dc) {
-@@ -1579,6 +1690,61 @@ void get_stretch_mode(X86 *c) {
+@@ -1579,6 +1746,61 @@ void get_stretch_mode(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      set_eax(c, dc ? dc->stretch_mode : 0);
  }
@@ -2777,7 +2841,7 @@ index 13ba56f..bd4e7a5 100644
  void rop2(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      int v = int(arg(c, 1));
-@@ -1589,6 +1755,10 @@ void rop2(X86 *c) {
+@@ -1589,6 +1811,10 @@ void rop2(X86 *c) {
      set_eax(c, dc->rop2);
      dc->rop2 = v;
  }
@@ -2788,7 +2852,7 @@ index 13ba56f..bd4e7a5 100644
  void flush(X86 *c) {
      set_eax(c, 1);
  }
-@@ -1642,12 +1812,20 @@ void gdi_model_register() {
+@@ -1642,12 +1868,20 @@ void gdi_model_register() {
      static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                         G("CreateBrushIndirect", 1, brush_indirect),
                                         G("CreatePenIndirect", 1, pen_indirect),
@@ -2809,7 +2873,7 @@ index 13ba56f..bd4e7a5 100644
                                         G("GetWindowOrgEx", 2, get_window_org),
                                         G("SetViewportOrgEx", 4, viewport_org),
                                         G("SetBrushOrgEx", 4, brush_org),
-@@ -1657,6 +1835,7 @@ void gdi_model_register() {
+@@ -1657,6 +1891,7 @@ void gdi_model_register() {
                                         G("SetStretchBltMode", 2, stretch_mode),
                                         G("GetStretchBltMode", 1, get_stretch_mode),
                                         G("SetROP2", 2, rop2),
@@ -2817,7 +2881,7 @@ index 13ba56f..bd4e7a5 100644
                                         G("GdiFlush", 0, flush),
                                         G("UnrealizeObject", 1, unrealize),
                                         G("ResizePalette", 2, resize_palette),
-@@ -1671,10 +1850,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+@@ -1671,10 +1906,12 @@ Rect to_device(uint32_t hdc, Rect r) {
      auto *dc = dc_of(hdc);
      if (!dc)
          return {};
@@ -2832,7 +2896,7 @@ index 13ba56f..bd4e7a5 100644
  }
  } // namespace gdi
  namespace {
-@@ -1741,6 +1922,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+@@ -1741,6 +1978,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
  }
  void create_section(X86 *c) {
      Dib d;
@@ -2840,7 +2904,7 @@ index 13ba56f..bd4e7a5 100644
      uint32_t out = arg(c, 3);
      if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
          !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
-@@ -1825,6 +2007,87 @@ struct DibDc {
+@@ -1825,6 +2063,87 @@ struct DibDc {
          dibs().erase(bitmap);
      }
  };
@@ -2928,7 +2992,7 @@ index 13ba56f..bd4e7a5 100644
  void set_dibits(X86 *c) {
      auto *dest = dib_of(arg(c, 1));
      Dib src;
-@@ -1864,6 +2127,12 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1864,6 +2183,12 @@ void dib_to_device(X86 *c, bool stretch) {
          set_eax(c, 0);
          return;
      }
@@ -2941,7 +3005,7 @@ index 13ba56f..bd4e7a5 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1882,11 +2151,23 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1882,11 +2207,23 @@ void dib_to_device(X86 *c, bool stretch) {
      src.size = count * src.stride;
      DibDc input(src);
      if (stretch) {
@@ -2967,7 +3031,7 @@ index 13ba56f..bd4e7a5 100644
          for (int i = 10; i >= 0; --i) {
              c->r[R_ESP] -= 4;
              wr32(c->r[R_ESP], values[i]);
-@@ -1927,17 +2208,48 @@ void stretch_dibits(X86 *c) {
+@@ -1927,17 +2264,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -3022,7 +3086,7 @@ index 13ba56f..bd4e7a5 100644
      imports_register(shims, sizeof(shims) / sizeof(shims[0]));
  }
 diff --git a/runtime/gdi32_draw.cpp b/runtime/gdi32_draw.cpp
-index c22dc11..f46098c 100644
+index c22dc11..6a71964 100644
 --- a/runtime/gdi32_draw.cpp
 +++ b/runtime/gdi32_draw.cpp
 @@ -11,6 +11,7 @@
@@ -3059,7 +3123,18 @@ index c22dc11..f46098c 100644
      int dw, dh, srcw, srch;
      if (!dc_size(dst, &dw, &dh) || !dc_size(src, &srcw, &srch) || !w || !h || !sw || !sh)
          return false;
-@@ -133,6 +153,29 @@ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src
+@@ -74,6 +94,10 @@ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src
+         return true;
+     if (uint64_t(right - left) * (bottom - top) > GUEST_SIZE / 4)
+         return false;
++    if (!mask && ((rop >> 16) & 255) == 0xcc &&
++        copy_dib_to_window(dst, src, {int32_t(left), int32_t(top), int32_t(right), int32_t(bottom)},
++                           x, y, w, h, sx, sy, sw, sh))
++        return true;
+     struct Sample {
+         uint32_t p = 0;
+         bool valid = false;
+@@ -133,6 +157,29 @@ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src
          }
      return true;
  }
@@ -3089,7 +3164,7 @@ index c22dc11..f46098c 100644
  // Window blits target an active DirectDraw primary. Its seam pairs the write
  // with the existing readback, mutation recorder and present machinery.
  void blit_shim(X86 *c, int mode) {
-@@ -161,6 +204,20 @@ void blit_shim(X86 *c, int mode) {
+@@ -161,6 +208,20 @@ void blit_shim(X86 *c, int mode) {
                     mode == 2 ? arg(c, 8) : 0, mode == 2 ? si(c, 9) : 0, mode == 2 ? si(c, 10) : 0);
      if (primary)
          ddraw_gdi_end_primary(primary);
@@ -3110,7 +3185,7 @@ index c22dc11..f46098c 100644
      // A refused blit is an anomaly worth naming: the guest asked for a draw and
      // got nothing, and the usual cause is a device context with no bitmap
      // behind it, which the geometry below makes obvious. RECOMP_TRACE_GDI=1
-@@ -181,6 +238,16 @@ void blit_shim(X86 *c, int mode) {
+@@ -181,6 +242,16 @@ void blit_shim(X86 *c, int mode) {
                      : mode == 2 ? 11
                                  : 8),
               blit_ret);
@@ -3127,7 +3202,7 @@ index c22dc11..f46098c 100644
          if (!ok) {
              // Who asked for it. A frame whose locals were never initialised
              // says the routine was entered past its own setup, which the
-@@ -452,6 +519,7 @@ void set_region(X86 *c) {
+@@ -452,6 +523,7 @@ void set_region(X86 *c) {
          return;
      }
      it->second.rect = rectangle(c);
@@ -3135,7 +3210,7 @@ index c22dc11..f46098c 100644
      set_eax(c, 1);
  }
  void region_box(X86 *c) {
-@@ -466,7 +534,75 @@ void region_box(X86 *c) {
+@@ -466,7 +538,75 @@ void region_box(X86 *c) {
      wr32(p + 4, r.t);
      wr32(p + 8, r.r);
      wr32(p + 12, r.b);
@@ -3212,7 +3287,7 @@ index c22dc11..f46098c 100644
  }
  void frame_region(X86 *c) {
      auto it = objects().find(arg(c, 1));
-@@ -477,6 +613,10 @@ void frame_region(X86 *c) {
+@@ -477,6 +617,10 @@ void frame_region(X86 *c) {
          set_eax(c, 0);
          return;
      }
@@ -3223,7 +3298,7 @@ index c22dc11..f46098c 100644
      Rect r = it->second.rect, clip = intersection(r, clip_box(arg(c, 0)));
      for (int64_t y = clip.t; y < clip.b; ++y)
          for (int64_t x = clip.l; x < clip.r; ++x)
-@@ -561,6 +701,15 @@ void line(uint32_t dc, int32_t x, int32_t y, int32_t x1, int32_t y1) {
+@@ -561,6 +705,15 @@ void line(uint32_t dc, int32_t x, int32_t y, int32_t x1, int32_t y1) {
      auto *d = dc_of(dc);
      if (!d)
          return;
@@ -3239,7 +3314,7 @@ index c22dc11..f46098c 100644
      auto pen = objects().find(d->pen);
      if (pen == objects().end() || pen->second.style == 5)
          return;
-@@ -632,6 +781,7 @@ void register_draw() {
+@@ -632,6 +785,7 @@ void register_draw() {
                                         G("CreateRectRgn", 4, create_region),
                                         G("SetRectRgn", 5, set_region),
                                         G("GetRgnBox", 2, region_box),
@@ -3248,7 +3323,7 @@ index c22dc11..f46098c 100644
                                         G("IntersectClipRect", 5, intersect_clip),
                                         G("ExcludeClipRect", 5, exclude_clip),
 diff --git a/runtime/gdi32_internal.h b/runtime/gdi32_internal.h
-index d70b9d1..41ddd71 100644
+index d70b9d1..8bfba8e 100644
 --- a/runtime/gdi32_internal.h
 +++ b/runtime/gdi32_internal.h
 @@ -6,6 +6,23 @@
@@ -3303,10 +3378,14 @@ index d70b9d1..41ddd71 100644
  };
  std::map<uint32_t, DeviceContext> &dcs();
  DeviceContext *dc_of(uint32_t dc);
-@@ -59,6 +79,10 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *pixel, bool preserv
+@@ -59,6 +79,14 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *pixel, bool preserv
  // (x, y) is inside it. A set bit selects the foreground raster operation.
  bool mask_bit(uint32_t bitmap, int64_t x, int64_t y, bool *set);
  bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t pixel, bool blend = false);
++// SRCCOPY from an untransformed 32-bit DIB into separate window storage.
++// False means the general blitter must handle this combination.
++bool copy_dib_to_window(uint32_t dst, uint32_t src, Rect area, int32_t x, int32_t y, int32_t w,
++                        int32_t h, int32_t sx, int32_t sy, int32_t sw, int32_t sh);
 +// Map logical coordinates to device coordinates within the DC's client.
 +bool mapping_point(uint32_t dc, int64_t *x, int64_t *y);
 +// Borrowed backing and clipping, with coordinates already mapped to pixels.
@@ -3314,7 +3393,7 @@ index d70b9d1..41ddd71 100644
  Rect clip_box(uint32_t dc);
  bool drawable(uint32_t dc, int64_t x, int64_t y);
  void fill(uint32_t dc, Rect r, uint32_t pixel);
-@@ -83,4 +107,7 @@ uint32_t gdi_new_dc();
+@@ -83,4 +111,7 @@ uint32_t gdi_new_dc();
  
  // Called only with the guest baton. A present owns the composed pixel copy.
  void gdi_present_windows(bool refresh = false);
@@ -3571,7 +3650,7 @@ index a6dd8fa..d62f5d6 100644
                                         G("EnumFontsW", 4, enumerate),
                                         G("EnumFontFamiliesExW", 5, enumerate),
 diff --git a/runtime/imports.cpp b/runtime/imports.cpp
-index ec1d2b1..08d9886 100644
+index ec1d2b1..d2b3171 100644
 --- a/runtime/imports.cpp
 +++ b/runtime/imports.cpp
 @@ -1,4 +1,5 @@
@@ -3580,7 +3659,68 @@ index ec1d2b1..08d9886 100644
  #include "gdi32_internal.h"
  #include "user32_internal.h"
  #include "kernel32_internal.h"
-@@ -436,7 +437,29 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -392,6 +393,52 @@ ImportCallObserver imports_set_call_observer_get(void) {
+ // Copy dispatch metadata before calling a shim, then restore EIP/ESP according to its calling convention.
+ namespace {
+ uint64_t g_import_calls = 0;
++struct ImportTiming {
++    uint64_t calls = 0, ns = 0, max_ns = 0;
++};
++std::vector<ImportTiming> &import_timings() {
++    static auto *rows = new std::vector<ImportTiming>();
++    return *rows;
++}
++bool import_timing_enabled() {
++    static const bool enabled = [] {
++        const char *value = recomp_env("IMPORT_TIMING");
++        return value && !strcmp(value, "1");
++    }();
++    return enabled;
++}
++// Completed import wall times include scheduling, nested callbacks and host
++// waits. Guest calls can grow the trampoline table or unwind an exception, so
++// only POD timestamps cross them; reacquire every table entry after return.
++void note_import_time(uint32_t idx, uint64_t start) {
++    const uint64_t now = os_monotonic_ns();
++    auto &rows = import_timings();
++    if (rows.size() <= idx)
++        rows.resize(idx + 1);
++    auto &row = rows[idx];
++    const uint64_t elapsed = now - start;
++    ++row.calls;
++    row.ns += elapsed;
++    row.max_ns = std::max(row.max_ns, elapsed);
++    static uint64_t last_report = now;
++    if (now - last_report < 5000000000ull)
++        return;
++    last_report = now;
++    std::vector<uint32_t> order;
++    for (uint32_t i = 0; i < rows.size(); ++i)
++        if (rows[i].calls)
++            order.push_back(i);
++    std::sort(order.begin(), order.end(),
++              [&rows](uint32_t a, uint32_t b) { return rows[a].ns > rows[b].ns; });
++    fprintf(stderr, "import timing: cumulative inclusive wall times; completed calls only\n");
++    for (size_t i = 0; i < order.size() && i < 12; ++i) {
++        const uint32_t key = order[i];
++        const auto &value = rows[key];
++        fprintf(stderr, "import timing: %s calls=%llu total_ms=%.3f mean_ms=%.3f max_ms=%.3f\n",
++                tramps()[key].desc.c_str(), (unsigned long long)value.calls, value.ns / 1e6,
++                value.ns / 1e6 / value.calls, value.max_ns / 1e6);
++    }
++}
+ } // namespace
+ uint64_t imports_call_count() {
+     return g_import_calls;
+@@ -403,6 +450,7 @@ void imports_call_leaves_surfaces() {
+ bool imports_dispatch(X86 *c, uint32_t target) {
+     if (!imports_is_trampoline(target))
+         return false;
++    const uint64_t timing_start = import_timing_enabled() ? os_monotonic_ns() : 0;
+     // A bounded scheduling checkpoint. Cooperative threads must not depend on
+     // the guest happening to call a blocking API: the frame limiter spins on
+     // GetTickCount and would otherwise starve the service threads for as long
+@@ -436,7 +484,29 @@ bool imports_dispatch(X86 *c, uint32_t target) {
      ++g_import_calls;
  
      uint32_t ret_addr = rd32(c->r[R_ESP]);
@@ -3611,7 +3751,7 @@ index ec1d2b1..08d9886 100644
      recomp_seh_validate_chain(c, "import enter", desc);
  
      // The arguments as they are NOW, before the shim runs: a stdcall shim pops
-@@ -466,10 +489,24 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -466,10 +536,24 @@ bool imports_dispatch(X86 *c, uint32_t target) {
          log_once(desc, "unimplemented import %s: returning 0", desc);
          set_eax(c, 0);
      }
@@ -3637,7 +3777,16 @@ index ec1d2b1..08d9886 100644
  
      uint32_t pop = 4;
      if (argc == ARGC_CDECL) {
-@@ -537,8 +574,28 @@ void recomp_callback_return(X86 *c) {
+@@ -488,6 +572,8 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+     c->r[R_ESP] += pop;
+     c->eip = ret_addr;
+     recomp_seh_validate_chain(c, "import leave", desc);
++    if (timing_start)
++        note_import_time(idx, timing_start);
+     return true;
+ }
+ 
+@@ -537,8 +623,28 @@ void recomp_callback_return(X86 *c) {
      // live guest_call. Match the guest return slot as well: a completing SEH
      // landing may RET to an older callback's identical sentinel, in which
      // case intercept must finish that function through its SEH checkpoint.
@@ -3668,7 +3817,7 @@ index ec1d2b1..08d9886 100644
      mods_hooks_unwind_to_esp(call->return_sp);
      recomp_profile_truncate(call->profile_depth);
      longjmp(call->env, 1);
-@@ -582,6 +639,7 @@ void imports_init() {
+@@ -582,6 +688,7 @@ void imports_init() {
      imports_register(g_kernel32_shims, g_kernel32_shim_count);
      kernel32_wide_register();
      oleaut32_register();
@@ -6259,10 +6408,18 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..5abb037 100644
+index cf0d171..ec876df 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
-@@ -177,6 +177,12 @@ static void test_model() {
+@@ -11,6 +11,7 @@
+ #include <cstdarg>
+ #include <cstring>
+ #include <vector>
++#include <climits>
+ static int g_checks = 0, g_failures = 0;
+ static bool check(bool ok, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+ static bool check(bool ok, const char *fmt, ...) {
+@@ -177,6 +178,12 @@ static void test_model() {
            "RestoreDC relative level");
      check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 2, 2}) == 0xff,
            "window and viewport origins transform pixel coordinates");
@@ -6275,7 +6432,7 @@ index cf0d171..5abb037 100644
      check(call_import(&c, "GDI32.dll", "RestoreDC", {dc, save}) == 0,
            "restored levels are discarded");
      check(call_import(&c, "GDI32.dll", "GetDeviceCaps", {dc, 12}) == 32 &&
-@@ -237,6 +243,13 @@ static void test_drawing() {
+@@ -237,6 +244,13 @@ static void test_drawing() {
      wr32(s + 4, 1);
      wr32(s + 12, 0xff);
      uint32_t pen = call_import(&c, "GDI32.dll", "CreatePenIndirect", {s});
@@ -6289,7 +6446,7 @@ index cf0d171..5abb037 100644
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "MoveToEx", {dc, 0, 16, 0});
      check(call_import(&c, "GDI32.dll", "LineTo", {dc, 16, 16}) == 1 &&
-@@ -330,6 +343,41 @@ static void test_drawing() {
+@@ -330,6 +344,41 @@ static void test_drawing() {
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
@@ -6331,7 +6488,7 @@ index cf0d171..5abb037 100644
  static void test_dib_rows_and_regions() {
      X86 c;
      loader_init_context(&c);
-@@ -337,7 +385,7 @@ static void test_dib_rows_and_regions() {
+@@ -337,7 +386,7 @@ static void test_dib_rows_and_regions() {
      uint32_t hwnd = make_test_window(&c, s, 16, 16),
               dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
      uint32_t child = call_import(&c, "USER32.dll", "CreateWindowExW",
@@ -6340,7 +6497,7 @@ index cf0d171..5abb037 100644
      uint32_t child_dc = call_import(&c, "USER32.dll", "GetDC", {child});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 0, 0, 0xff});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 2, 0, 0xff});
-@@ -380,7 +428,14 @@ static void test_dib_rows_and_regions() {
+@@ -380,7 +429,14 @@ static void test_dib_rows_and_regions() {
      uint32_t pen = call_import(&c, "GDI32.dll", "GetStockObject", {8});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "SetPixel", {dc, 11, 11, 0xff});
@@ -6355,7 +6512,7 @@ index cf0d171..5abb037 100644
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 11, 11}) == 0xff,
-@@ -390,6 +445,49 @@ static void test_dib_rows_and_regions() {
+@@ -390,6 +446,49 @@ static void test_dib_rows_and_regions() {
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
@@ -6405,7 +6562,7 @@ index cf0d171..5abb037 100644
  static void test_text() {
      X86 c;
      loader_init_context(&c);
-@@ -415,6 +513,29 @@ static void test_text() {
+@@ -415,6 +514,29 @@ static void test_text() {
                rd32(s + 340) == 16 && rd32(s + 344) == 16 && rd8(s + 375) == 0x30 &&
                rd8(s + 376) == 0,
            "TEXTMETRICW layout and scaled metrics");
@@ -6435,7 +6592,7 @@ index cf0d171..5abb037 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -877,9 +998,59 @@ static void test_static_control() {
+@@ -877,9 +999,59 @@ static void test_static_control() {
      call_import(&c, "USER32.dll", "DestroyWindow", {child});
      call_import(&c, "USER32.dll", "DestroyWindow", {parent});
  }
@@ -6498,7 +6655,7 @@ index cf0d171..5abb037 100644
  static void test_clip_children() {
      X86 c;
      loader_init_context(&c);
-@@ -911,11 +1082,77 @@ static void test_clip_children() {
+@@ -911,11 +1083,77 @@ static void test_clip_children() {
      check(pixel(parent, 0, 0) == 0xff && pixel(child, 1, 1) == 0,
            "a WS_CLIPCHILDREN parent paints around its visible child, not over it");
      call_import(&c, "USER32.dll", "ShowWindow", {child, 0});
@@ -6577,7 +6734,7 @@ index cf0d171..5abb037 100644
  // DrawThemeParentBackground: the parent paints into the child's DC, shifted so
  // its own coordinates land on the child, with WM_ERASEBKGND then
  // WM_PRINTCLIENT. It is how a transparent VCL control shows the form behind it.
-@@ -1070,11 +1307,31 @@ static void test_memory_truetype_font() {
+@@ -1070,11 +1308,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -6609,7 +6766,7 @@ index cf0d171..5abb037 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,15 +1381,313 @@ static void test_windows_face_substitute() {
+@@ -1124,15 +1382,379 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -6629,11 +6786,63 @@ index cf0d171..5abb037 100644
 +    check(w == 96, "a fixed-pitch face keeps the 8x16 cells (%u)", w);
 +    w = width("RecompUnknown", 400);
 +    check(w == 96, "an unknown face keeps the 8x16 cells (%u)", w);
-     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
- }
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
 +// OLE pictures draw in HIMETRIC coordinates. A scaled 2x2 source must cover
 +// every device pixel, and a negative viewport extent must invert the image.
++static void test_window_copy_equivalence() {
++    X86 c;
++    loader_init_context(&c);
++    const uint32_t s = 0x00347000;
++    uint32_t first = make_test_window(&c, s, 16, 16);
++    uint32_t second = make_test_window(&c, s, 16, 16);
++    uint32_t out = call_import(&c, "USER32.dll", "GetDC", {first});
++    uint32_t reference = call_import(&c, "USER32.dll", "GetDC", {second});
++    uint32_t read_first = call_import(&c, "USER32.dll", "GetDC", {first});
++    uint32_t read_second = call_import(&c, "USER32.dll", "GetDC", {second});
++    uint32_t source = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
++    uint32_t slow = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
++    uint32_t bitmap = call_import(&c, "GDI32.dll", "CreateBitmap", {4, 3, 1, 32, 0});
++    call_import(&c, "GDI32.dll", "SelectObject", {source, bitmap});
++    call_import(&c, "GDI32.dll", "SelectObject", {slow, bitmap});
++    for (uint32_t y = 0; y < 3; ++y)
++        for (uint32_t x = 0; x < 4; ++x)
++            call_import(&c, "GDI32.dll", "SetPixel", {source, x, y, 0x10203u * (1 + y * 4 + x)});
++    // A full source clip forces the general blitter with identical valid pixels.
++    call_import(&c, "GDI32.dll", "IntersectClipRect", {slow, 0, 0, 4, 3});
++    for (uint32_t dc : {out, reference}) {
++        call_import(&c, "GDI32.dll", "IntersectClipRect", {dc, 1, 1, 15, 15});
++        call_import(&c, "GDI32.dll", "ExcludeClipRect", {dc, 4, 3, 7, 6});
++    }
++    for (auto origin : {-2, 2}) {
++        call_import(&c, "GDI32.dll", "StretchBlt",
++                    {out, uint32_t(origin), 1, 12, 9, source, uint32_t(-1), 0, 6, 3, 0x00cc0020});
++        call_import(
++            &c, "GDI32.dll", "StretchBlt",
++            {reference, uint32_t(origin), 1, 12, 9, slow, uint32_t(-1), 0, 6, 3, 0x00cc0020});
++        bool equal = true;
++        for (uint32_t y = 0; y < 16; ++y)
++            for (uint32_t x = 0; x < 16; ++x)
++                equal &= call_import(&c, "GDI32.dll", "GetPixel", {read_first, x, y}) ==
++                         call_import(&c, "GDI32.dll", "GetPixel", {read_second, x, y});
++        check(equal,
++              "window copy matches general blit with scaling, outside source pixels and clip holes "
++              "(%d)",
++              origin);
++    }
++    check(call_import(&c, "GDI32.dll", "GetPixel", {out, 8, 7}) != 0,
++          "equivalent window copies actually draw source pixels");
++    call_import(&c, "GDI32.dll", "DeleteDC", {source});
++    call_import(&c, "GDI32.dll", "DeleteDC", {slow});
++    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
++    call_import(&c, "USER32.dll", "ReleaseDC", {first, out});
++    call_import(&c, "USER32.dll", "ReleaseDC", {second, reference});
++    call_import(&c, "USER32.dll", "ReleaseDC", {first, read_first});
++    call_import(&c, "USER32.dll", "ReleaseDC", {second, read_second});
++    call_import(&c, "USER32.dll", "DestroyWindow", {first});
++    call_import(&c, "USER32.dll", "DestroyWindow", {second});
++}
 +static void test_anisotropic_picture_mapping() {
 +    X86 c;
 +    loader_init_context(&c);
@@ -6683,6 +6892,20 @@ index cf0d171..5abb037 100644
 +    call_import(&c, "GDI32.dll", "GetWindowExtEx", {dc, s + 0x100});
 +    check(rd32(s + 0x100) == 1000 && rd32(s + 0x104) == 1000,
 +          "invalid extent leaves the previous mapping intact");
++    // Equal extents translate exactly, including negative extents and origins
++    // whose difference exceeds 32 bits. The saturated result must not wrap.
++    call_import(&c, "GDI32.dll", "SetWindowExtEx", {dc, uint32_t(-7), 9, 0});
++    call_import(&c, "GDI32.dll", "SetViewportExtEx", {dc, uint32_t(-7), 9, 0});
++    call_import(&c, "GDI32.dll", "SetWindowOrgEx", {dc, uint32_t(INT_MIN), INT_MAX, 0});
++    call_import(&c, "GDI32.dll", "SetViewportOrgEx", {dc, INT_MAX, uint32_t(INT_MIN), 0});
++    int64_t px = 0, py = 0;
++    check(gdi::mapping_point(dc, &px, &py) && px == INT_MAX && py == INT_MIN,
++          "equal extents saturate translated coordinates without integer wrap");
++    call_import(&c, "GDI32.dll", "SetWindowOrgEx", {dc, 3, 4, 0});
++    call_import(&c, "GDI32.dll", "SetViewportOrgEx", {dc, 5, 6, 0});
++    call_import(&c, "GDI32.dll", "SetPixel", {dc, 0, 0, 0x123456});
++    check(call_import(&c, "GDI32.dll", "GetPixel", {reader, 2, 2}) == 0x123456,
++          "pixel drawing with equal negative extents preserves origin translation");
 +    call_import(&c, "GDI32.dll", "DeleteDC", {source});
 +    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
 +    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, reader});
@@ -6774,9 +6997,9 @@ index cf0d171..5abb037 100644
 +            red += a == 0x0000ff;
 +        }
 +    check(same && red > 0, "ANSI text leaves visible pixels matching its decoded wide text");
-+    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-+    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
-+}
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
 +// Retained window pixels require a real erase pass; validation and a non-erasing
 +// invalidation must preserve drawings instead of clearing every paint.
 +static void test_background_erasing() {
@@ -6929,7 +7152,7 @@ index cf0d171..5abb037 100644
  int main(int argc, char **argv) {
      mem_init();
      imports_init();
-@@ -1147,8 +1702,17 @@ int main(int argc, char **argv) {
+@@ -1147,8 +1769,18 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -6939,6 +7162,7 @@ index cf0d171..5abb037 100644
 +        test_paint_timer_priority();
 +        test_region_boolean_operations();
 +        test_anisotropic_picture_mapping();
++        test_window_copy_equivalence();
 +        test_plain_ansi_text();
          test_static_control();
          test_clip_children();

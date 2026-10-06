@@ -12,6 +12,21 @@ experiments are retained as diagnostic evidence, not required deliverables.
 
 ## Current execution evidence
 
+The browser performance fix uses integer translation for equal GDI extents and
+an opaque 32-bit SRCCOPY path into separate window surfaces. In the same saved
+Cult II street scene, roughly 30-second samples show mean completed StretchBlt
+wall time falling from 23.35 ms to 0.32 ms and BitBlt from 1.95 ms to 0.20 ms.
+Import measurements include nested callbacks and scheduling; they are not FPS
+or CPU percentages. Raw logs and comparison metadata are under ignored
+build/browser-import-timing-{before,after}.json and
+build/browser-performance-comparison.json. The optional runtime diagnostic is
+RECOMP_IMPORT_TIMING=1. It is disabled in ordinary players. The GDI suite passes
+240 checks on Windows and Linux. Player files were refreshed for both games on
+Windows, Linux and browser; use clean browser URLs to avoid old trace options.
+Both refreshed Windows and Linux players pass five-second startup checks with
+rendered frames, device PCM and clean exits. The clean browser players restore
+Cult's D save and Cult II's B save with matching scenes and inventory.
+
 Both diagnostic hosts reach the language selector, intro, main menu and New
 Game. Their opening conversations advance through the native keyboard message
 bridge. Cult's upward movement visibly changes the player position and triggers
