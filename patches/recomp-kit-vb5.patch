@@ -1,8 +1,8 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..5538ad1 100644
+index 20fdc15..fb2e310 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,151 @@
+@@ -2,6 +2,153 @@
  
  ## Unreleased
  
@@ -10,6 +10,8 @@ index 20fdc15..5538ad1 100644
 +  `RECOMP_TRACE_IMPORTS=0`, and include string resource IDs in LoadString traces.
 +  Include bounded guest stack samples in exception traces and optional ReadFile
 +  byte samples through `RECOMP_TRACE_FILE_BYTES=1`.
++  Sample guest frame arguments at a selected SEH prologue through
++  `RECOMP_TRACE_SEH_AT=<hex address>`.
 +
 +- Emit live exception checkpoints for SEH prologues that push a proven register
 +  copy of FS:[0], including Visual Basic and MSVC frames; reject mutated copies
@@ -1638,15 +1640,16 @@ index 10a5e39..4499b0c 100644
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
 diff --git a/runtime/README.md b/runtime/README.md
-index 85b7a4b..29cbd78 100644
+index 85b7a4b..919940c 100644
 --- a/runtime/README.md
 +++ b/runtime/README.md
-@@ -217,6 +217,8 @@ paths resolve against the guest current directory, which starts at
+@@ -217,6 +217,9 @@ paths resolve against the guest current directory, which starts at
  | variable | effect |
  | --- | --- |
  | `RECOMP_LOG` | `0` silent, `1` warnings and one-shot notices (default), `2` traces every import call and returned EAX |
 +| `RECOMP_TRACE_IMPORTS=0` | suppress import call/return traces while retaining verbose subsystem diagnostics |
 +| `RECOMP_TRACE_FILE_BYTES=1` | log up to 256 hexadecimal bytes per successful ReadFile for parser diagnostics |
++| `RECOMP_TRACE_SEH_AT=<hex address>` | sample the frame arguments and bounded BSTR payloads at one translated SEH prologue |
  | `RECOMP_REGISTRY` | registry backing file (default `build/recomp/registry.json`) |
  | `RECOMP_CREATETHREAD=skip` | record `CreateThread` without running the thread body |
  | `RECOMP_CREATETHREAD=sync` | run a thread body to completion inside `CreateThread` (pre-scheduler behaviour, for bisection) |
@@ -4794,16 +4797,26 @@ index d746097..3dc3b0d 100644
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
 diff --git a/runtime/seh.cpp b/runtime/seh.cpp
-index ac94a12..f58763f 100644
+index ac94a12..30181e1 100644
 --- a/runtime/seh.cpp
 +++ b/runtime/seh.cpp
-@@ -1,4 +1,4 @@
+@@ -1,5 +1,6 @@
 -// x86 registration-chain dispatch and host checkpoints for Delphi frames.
 +// x86 registration-chain dispatch and host checkpoints for guest SEH frames.
  #include "seh.h"
++#include "../platform/os.h"
  #include "imports.h"
  #include "memory.h"
-@@ -117,6 +117,22 @@ void validate_registration(X86 *c, uint32_t reg, uint32_t target) {
+ #include "mods_seam.h"
+@@ -8,6 +9,7 @@
+ void sched_atomic_unwind_to_esp(uint32_t esp);
+ #include <cstdlib>
+ #include <cstdio>
++#include <algorithm>
+ #include <map>
+ #include <vector>
+ 
+@@ -117,6 +119,22 @@ void validate_registration(X86 *c, uint32_t reg, uint32_t target) {
          invalid_chain(c, reg, target, "registration outside guest stack");
  }
  
@@ -4826,7 +4839,7 @@ index ac94a12..f58763f 100644
  // Trivial automatic storage only: a handler can leave this walk by longjmp.
  struct ChainWalk {
      uint32_t visited[MAX_LINKS];
-@@ -176,6 +192,8 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+@@ -176,6 +194,8 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
           rd32(d->record + 4));
      uint32_t args[] = {d->record, reg, d->context, 0};
      uint32_t disposition = guest_call(c, handler, args, 4);
@@ -4835,7 +4848,7 @@ index ac94a12..f58763f 100644
      if (disposition == 0) {
          LOGW("ExceptionContinueExecution requested; not supported (record=%08x code=%08x "
               "registration=%08x handler=%08x)",
-@@ -191,6 +209,13 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+@@ -191,6 +211,13 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
  }
  } // namespace
  
@@ -4849,7 +4862,51 @@ index ac94a12..f58763f 100644
  extern "C" {
  
  // Inspection only: do not repair or dereference an invalid link. Retain the
-@@ -282,6 +307,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -257,6 +284,43 @@ jmp_buf *recomp_seh_frame_enter(X86 *c) {
+     state.frames.push_back(f); // individually allocated: growing the vector cannot move env
+     LOGV("SEH enter: registration=%08x established=%08x ESP=%08x handler=%08x", f->registration,
+          f->establishing_eip, c->r[R_ESP], rd32(f->registration + 4));
++    // Select one translated prologue without flooding the console with every
++    // call. The sample is diagnostic only; all addresses remain guest addresses.
++    const char *trace_at = recomp_env("TRACE_SEH_AT");
++    if (trace_at && strtoul(trace_at, nullptr, 16) == f->establishing_eip &&
++        gm_valid(c->r[R_EBP], 16)) {
++        uint32_t bp = c->r[R_EBP];
++        LOGW("SEH frame sample: established=%08x EBP=%08x caller=%08x args=%08x %08x",
++             f->establishing_eip, bp, rd32(bp + 4), rd32(bp + 8), rd32(bp + 12));
++        for (uint32_t i = 0; i < 2; ++i) {
++            uint32_t p = rd32(bp + 8 + i * 4);
++            if (!p || !gm_valid(p, 16))
++                continue;
++            LOGW("SEH argument sample: index=%u address=%08x words=%08x %08x %08x %08x", i, p,
++                 rd32(p), rd32(p + 4), rd32(p + 8), rd32(p + 12));
++            // A by-value or by-reference BSTR VARIANT is common at language
++            // boundaries. Preserve a bounded byte sample of its string payload.
++            uint16_t vt = rd16(p);
++            if (vt != 8 && vt != 0x4008 && vt != 0x8008)
++                continue;
++            uint32_t str = rd32(p + 8);
++            if ((vt & 0x4000) && gm_valid(str, 4))
++                str = rd32(str);
++            if (str < 4 || !gm_valid(str - 4, 4))
++                continue;
++            uint32_t bytes = std::min(rd32(str - 4), 64u);
++            if (!gm_valid(str, bytes))
++                continue;
++            std::string sample;
++            for (uint32_t j = 0; j < bytes; ++j) {
++                char hex[4];
++                snprintf(hex, sizeof hex, " %02x", rd8(str + j));
++                sample += hex;
++            }
++            LOGW("SEH BSTR sample: index=%u address=%08x bytes=%u:%s", i, str, bytes,
++                 sample.c_str());
++        }
++    }
+     return &f->env;
+ }
+ 
+@@ -282,6 +346,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
          if (f->registration < c->r[R_ESP] || chain_head(c) != f->registration)
              return nullptr;
          f->orphan = false;
@@ -4857,7 +4914,7 @@ index ac94a12..f58763f 100644
          f->profile_depth = recomp_profile_depth();
          f->dispatch_depth = state.dispatches.size();
          LOGV("SEH adopt: registration=%08x established=%08x EIP=%08x ESP=%08x", f->registration,
-@@ -291,13 +317,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -291,13 +356,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
      return nullptr;
  }
  

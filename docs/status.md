@@ -144,9 +144,19 @@ argument) and exits the guest with code zero. The saved scene does not render;
 a successful browser startup Load has not been established. A concise trace
 preserves the error after verbose import traffic had displaced it from the
 browser console. Import tracing can now be suppressed independently of other
-verbose diagnostics through RECOMP_TRACE_IMPORTS=0.
+verbose diagnostics through RECOMP_TRACE_IMPORTS=0. A bounded ReadFile byte
+trace confirms that all 124 browser input bytes equal the exported P4 file.
+The exception stack reports a failed picture-control method (offset 0x280);
+its underlying cause remains under investigation.
 The corrected Cult II diagnostics repeat the 2,510-frame movement/save/load
 round trip on Windows and Linux, restoring identical save bytes.
+Cult likewise repeats its 2,055-frame round trip on both systems after the
+callback correction. A fresh Windows startup Load of P4 presents 603 frames
+and restores the street. Linux also restores P4 from the startup menu with
+real time and concise logging: all eleven input steps complete, 1,592 frames
+are presented and the guest exits cleanly. The preserved pinned-clock run
+stalled; a verbose real-time run had not finished its intro when input arrived.
+Those earlier probes do not establish a Linux startup-Load failure.
 Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
@@ -157,10 +167,11 @@ skips, including file overlay, version/image resources, timing fixtures and
 translation metadata contracts; it is not a full pass. Its window-model checks
 pass.
 All four Windows/Linux player packages include the control text changes,
-checkpoint lifetime fix and callback ownership correction. The previous
+checkpoint lifetime fix and callback ownership correction. The latest
 five-second Windows launcher probes render and exit cleanly
-with running audio devices: Cult captures 227,328 PCM frames and Cult II captures
-233,472, both with peak 17,341 PCM16. Audible output is still unverified.
+with running audio devices: Cult captures 232,448 PCM frames and Cult II captures
+229,376, both with peak 17,341 PCM16 and zero late or starved pulls. Audible
+output is still unverified.
 Cult's refreshed Linux player completes twenty seconds with 927,672 PCM frames,
 peak 17,341, zero late or starved pulls and a clean exit.
 Cult II's newest Linux player exits cleanly in a twenty-second startup and
@@ -193,6 +204,13 @@ gameplay. This owned test emulator was stopped after logs were captured.
 Both Android ARM64 APKs have now been rebuilt and packaged with the child-window
 and control-text fixes. The package checks verify the native ELF ABI and named runtime resources;
 they do not verify device gameplay.
+Cult II's newest APK also contains the checkpoint lifetime and callback ownership
+corrections, confirmed in its ARM64 library. Its SHA-256 is
+36450bc92a6ed77ffae5c780e666333b86b970681cfc9747207e0a6a970071d2.
+Cult's corresponding rebuild is also packaged; its SHA-256 is
+06bb5110a440833568a09d384c768682cf26ce782d1bce77c6b56ebc9a42b625.
+Android gameplay remains
+blocked on the tested software Vulkan device's missing dynamic-rendering support.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
 from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build
