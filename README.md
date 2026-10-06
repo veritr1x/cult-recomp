@@ -252,10 +252,12 @@ translation. The original software GPU lacked dynamic rendering. Host GPU testin
 exposed a missing Android Vulkan surface extension, now enabled in the runtime,
 but the emulator failed or lost its device connection after launch. A legacy
 Vulkan render-pass fallback now creates the software device and swapchain;
-the emulator's ARM native bridge still faults while uploading launcher pixels.
+both ARM64 and native x86_64 emulator builds still fault while uploading launcher pixels.
 Both Windows and Linux packages launch with the fallback, render frames,
 capture audio and exit cleanly. Physical ARM64
 device execution, touch input and audible output remain unverified.
+Android and Apple ports are deferred; the immediate target is Windows, Linux
+and browser, as agreed with the user.
 
 ## Metadata references
 

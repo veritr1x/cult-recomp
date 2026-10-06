@@ -1,11 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..7cb30d5 100644
+index 20fdc15..c5e323e 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,169 @@
+@@ -2,6 +2,173 @@
  
  ## Unreleased
  
++- Build Android x86_64 APKs with `--android-abi x86_64` for native emulator
++  testing. Keep their CMake and Gradle output separate from ARM64, and package
++  the configured ABI rather than silently labeling every library ARM64.
++
 +- Use legacy single-subpass Vulkan render passes when dynamic rendering is not
 +  supported or enabled. Retain framebuffers until command completion and retire
 +  them before referenced image views. `RECOMP_VULKAN_LEGACY_RENDER_PASSES=1`
@@ -172,8 +176,25 @@ index 20fdc15..7cb30d5 100644
  - Allow native game adapters to place their own cursors at absolute touch
    positions in logical game pixels. Placement can discard pending DirectInput
    X/Y movement without losing button, wheel or keyboard input.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index e1e1d88..0c07a4b 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -28,6 +28,12 @@ portable tests and mod examples. Open an issue before a large architecture chang
+ Windows; `--regenerate` runs the Python translator on each. Only the iOS
+ packager (`--target ios`, including `--stub`) requires macOS.
+ 
++Android builds default to ARM64. For a native x86_64 emulator test use
++`tools/build.py --target android --android-abi x86_64 --no-install`.
++These builds use separate `build/cmake/android-x86_64/` and
++`build/android-x86_64/` directories and preserve existing ARM64 packages.
++Building or installing an APK alone does not verify gameplay or touch input.
++
+ ## Prepare a game installation
+ 
+ Building the app, running it, the game-backed suites and regenerating the
 diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
-index 2735492..a656211 100644
+index 2735492..196eba3 100644
 --- a/cmake/Dependencies.cmake
 +++ b/cmake/Dependencies.cmake
 @@ -22,10 +22,12 @@ set(SDL_GPU OFF CACHE BOOL "" FORCE)
@@ -190,6 +211,25 @@ index 2735492..a656211 100644
  FetchContent_MakeAvailable(SDL3)
  
  # glslang compiles the Direct3D 9 renderer's GLSL to SPIR-V at run time
+@@ -132,9 +134,16 @@ if(RECOMP_VIDEO)
+     # API-29 wrapper so configure and every FFmpeg probe target Android 10.
+     get_filename_component(RECOMP_FFMPEG_TOOLCHAIN_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+     get_filename_component(RECOMP_FFMPEG_SYSROOT "${RECOMP_FFMPEG_TOOLCHAIN_BIN}/../sysroot" ABSOLUTE)
++    if(ANDROID_ABI STREQUAL "x86_64")
++      set(RECOMP_FFMPEG_ANDROID_ARCH x86_64)
++      set(RECOMP_FFMPEG_ANDROID_TRIPLE x86_64-linux-android)
++    else()
++      set(RECOMP_FFMPEG_ANDROID_ARCH aarch64)
++      set(RECOMP_FFMPEG_ANDROID_TRIPLE aarch64-linux-android)
++    endif()
+     list(APPEND RECOMP_FFMPEG_CONFIGURE
+-      --enable-cross-compile --target-os=android --arch=aarch64
+-      --cc=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/aarch64-linux-android29-clang
++      --enable-cross-compile --target-os=android --arch=${RECOMP_FFMPEG_ANDROID_ARCH}
++      --cc=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/${RECOMP_FFMPEG_ANDROID_TRIPLE}29-clang
+       --ar=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-ar
+       --nm=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-nm
+       --ranlib=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-ranlib
 diff --git a/docs/testing.md b/docs/testing.md
 index bb8776b..e6e75fd 100644
 --- a/docs/testing.md
@@ -2061,7 +2101,7 @@ index 8bc24e5..3ef4019 100644
      test_native_frame_metrics();
      test_wide_cursor_bound();
 diff --git a/platform/android/app/build.gradle.kts.in b/platform/android/app/build.gradle.kts.in
-index 6e666fd..15dbf0b 100644
+index 6e666fd..d901371 100644
 --- a/platform/android/app/build.gradle.kts.in
 +++ b/platform/android/app/build.gradle.kts.in
 @@ -6,6 +6,11 @@ android {
@@ -2076,6 +2116,15 @@ index 6e666fd..15dbf0b 100644
  
      defaultConfig {
          applicationId = "@bundle_id@"
+@@ -14,7 +19,7 @@ android {
+         versionCode = 1
+         versionName = "1.0"
+         ndk {
+-            abiFilters += "arm64-v8a"
++            abiFilters += "@android_abi@"
+         }
+         resValue("string", "app_name", "@app_name@")
+         resValue("string", "game_id", "@id@")
 diff --git a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java b/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
 index 4c2fa4e..f474f76 100644
 --- a/platform/android/app/src/main/java/dev/recompkit/RecompActivity.java
@@ -11215,12 +11264,52 @@ index 4f45372..e9d41f1 100644
              game = Path(tmp) / "g"
              game.mkdir()
 diff --git a/tools/build.py b/tools/build.py
-index 6c3d908..51c8fa2 100644
+index 6c3d908..070ac66 100644
 --- a/tools/build.py
 +++ b/tools/build.py
-@@ -165,6 +165,23 @@ def android_project(build_root, cfg, *, gen_dir):
+@@ -69,8 +69,10 @@ def build_root_for(game_dir, root=ROOT):
+         return game_dir / "build"
+ 
+ 
+-def build_dir_for(build_root, preset):
++def build_dir_for(build_root, preset, android_abi=None):
+     """The CMake binary directory: what the presets name inside the kit, beside the game outside it."""
++    if android_abi == "x86_64" and preset in {"android", "android-stub"}:
++        preset = preset.replace("android", "android-x86_64", 1)
+     return Path(build_root) / "cmake" / preset
+ 
+ 
+@@ -153,6 +155,19 @@ def install_and_launch(app, bundle_id, device, console):
+     subprocess.run(launch, check=True)
+ 
+ 
++def android_build_abi(gen_dir):
++    """Use the configured native ABI for packaging; old caches default to ARM64."""
++    abi = "arm64-v8a"
++    cache = Path(gen_dir) / "CMakeCache.txt"
++    if cache.is_file():
++        for line in cache.read_text().splitlines():
++            if line.startswith("ANDROID_ABI:"):
++                abi = line.partition("=")[2]
++    if abi not in {"arm64-v8a", "x86_64"}:
++        raise ValueError("Unsupported Android ABI: %s" % abi)
++    return abi
++
++
+ def android_project(build_root, cfg, *, gen_dir):
+     """Render the Gradle project without building it; gen_dir is the CMake binary directory.
+ 
+@@ -160,11 +175,30 @@ def android_project(build_root, cfg, *, gen_dir):
+     only packages the native library built by CMake, never invokes CMake.
+     """
+     template = ROOT / "platform/android"
+-    out = Path(build_root) / "android"
++    abi = android_build_abi(gen_dir)
++    out = Path(build_root) / ("android" if abi == "arm64-v8a" else "android-x86_64")
+     shutil.copytree(template, out, dirs_exist_ok=True,
                      ignore=shutil.ignore_patterns(".gradle", "build", ".gitignore", "local.properties"))
      values = {key: cfg["game"][key] for key in ("app_name", "bundle_id", "id")}
++    values["android_abi"] = abi
      values["sdl_java_dir"] = (Path(gen_dir).resolve() / "_deps/sdl3-src/android-project/app/src/main/java").as_posix()
 +    # Gradle packages CMake's library, so use that build's NDK for symbol
 +    # stripping too. Otherwise AGP can silently retain enormous debug sections.
@@ -11242,7 +11331,7 @@ index 6c3d908..51c8fa2 100644
      for original in template.rglob("*.in"):
          source = out / original.relative_to(template)
          text = source.read_text()
-@@ -203,6 +220,22 @@ def android_stage_core_assets(out, game_dir):
+@@ -203,6 +237,22 @@ def android_stage_core_assets(out, game_dir):
      copy_core_mods(game_dir, Path(out) / "app/src/main/assets/mods/core")
  
  
@@ -11265,7 +11354,16 @@ index 6c3d908..51c8fa2 100644
  def android_apk(build_root, cfg, *, gen_dir, game_dir):
      """Stage the native libraries beside the SDL activity and assemble a debug APK."""
      library = Path(gen_dir) / "host/libmain.so"
-@@ -234,8 +267,10 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+@@ -211,7 +261,7 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+         if not path.is_file():
+             raise FileNotFoundError("Android CMake build input is missing: %s" % path)
+     out = android_project(build_root, cfg, gen_dir=gen_dir)
+-    jni = out / "app/src/main/jniLibs/arm64-v8a"
++    jni = out / "app/src/main/jniLibs" / android_build_abi(gen_dir)
+     jni.mkdir(parents=True, exist_ok=True)
+     shutil.copy2(library, jni / "libmain.so")
+     # Read the configured option, not leftover installed libraries: switching
+@@ -234,8 +284,10 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
          notice.unlink(missing_ok=True)
      android_stage_layout_assets(out, game_dir)
      android_stage_core_assets(out, game_dir)
@@ -11277,7 +11375,7 @@ index 6c3d908..51c8fa2 100644
      apk = out / "app/build/outputs/apk/debug/app-debug.apk"
      if not apk.is_file():
          raise FileNotFoundError("No APK after assembleDebug: %s" % apk)
-@@ -264,6 +299,10 @@ def android_push_game(command, cfg, build_root):
+@@ -264,6 +316,10 @@ def android_push_game(command, cfg, build_root):
      subprocess.run(command + ["shell", "mkdir", "-p", destination], check=True)
      # Push game/ into its parent on every run: never create game/game/.
      subprocess.run(command + ["push", str(staged), destination + "/"], check=True)
@@ -11288,6 +11386,33 @@ index 6c3d908..51c8fa2 100644
  
  
  def android_install_and_launch(apk, bundle_id, device=None, console=False, *, game_cfg=None, build_root=None):
+@@ -416,10 +472,14 @@ def parse_args(argv, system=None):
+     parser.add_argument("--team", default=os.environ.get("RECOMP_IOS_TEAM", ""),
+                         help="Apple team id for automatic signing (ios target; default $RECOMP_IOS_TEAM)")
+     parser.add_argument("--no-install", action="store_true", help="Build the mobile app without installing it")
++    parser.add_argument("--android-abi", choices=("arm64-v8a", "x86_64"), default=None,
++                        help="Android native ABI (default: arm64-v8a); x86_64 builds separately for emulators")
+     parser.add_argument("--push-game", action="store_true",
+                         help="Android: push the configured game install minus [bundle].exclude before launch")
+     parser.add_argument("--console", action="store_true", help="After launching on the device, stream its console")
+     args = parser.parse_args(argv)
++    if args.android_abi is not None and args.target != "android":
++        parser.error("--android-abi requires --target android")
+     if args.push_game and (args.target != "android" or args.no_install):
+         parser.error("--push-game requires --target android without --no-install")
+     if args.target == "ios" and not args.stub and not args.team:
+@@ -450,8 +510,10 @@ def main():
+     if args.regenerate and not cfg["developer_exe_path"].is_file():
+         parser.error("Prepare your own game installation with tools/setup.py first")
+     preset = preset_name(args.preset, args.config, stub=args.stub, target=args.target)
+-    build_dir = build_dir_for(args.build_root, preset)
++    build_dir = build_dir_for(args.build_root, preset, args.android_abi)
+     defines = game_defines(args.game_dir, args.build_root)
++    if args.target == "android":
++        defines.append("-DANDROID_ABI=" + (args.android_abi or "arm64-v8a"))
+     try:
+         # The lock lives at <build root>/recomp/.lock: BuildLock joins build/recomp/.lock onto its argument.
+         with buildlock.BuildLock(args.build_root.parent, "tools/build.py"):
 diff --git a/tools/game_config.py b/tools/game_config.py
 index 20838eb..dd42c54 100644
 --- a/tools/game_config.py
@@ -12133,10 +12258,73 @@ index 0aea3f4..a0adf75 100644
              run([sys.executable, "-m", "pytest", "-q"] + PORTABLE_TESTS, env)
      except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError, TimeoutError) as error:
 diff --git a/tools/tests/test_build.py b/tools/tests/test_build.py
-index 4e1f116..85e9b25 100644
+index 4e1f116..5ffb0e3 100644
 --- a/tools/tests/test_build.py
 +++ b/tools/tests/test_build.py
-@@ -182,8 +182,9 @@ def test_android_push_stages_only_included_game_files(tmp_path, monkeypatch):
+@@ -48,6 +48,62 @@ def test_android_templates_render(tmp_path):
+     assert app.find("activity").get(android + "screenOrientation") == "fullUser"
+ 
+ 
++@pytest.mark.parametrize("abi, folder", [("arm64-v8a", "android"), ("x86_64", "android-x86_64")])
++def test_android_template_uses_native_abi_and_separate_project(tmp_path, abi, folder):
++    gen = tmp_path / "gen"
++    gen.mkdir()
++    (gen / "CMakeCache.txt").write_text("ANDROID_ABI:STRING=" + abi + "\n")
++    cfg = {"game": {"app_name": "StubRecomp", "bundle_id": "dev.recompkit.stub", "id": "stub"}}
++    out = build.android_project(tmp_path, cfg, gen_dir=gen)
++    assert out == tmp_path / folder
++    assert 'abiFilters += "' + abi + '"' in (out / "app/build.gradle.kts").read_text()
++    assert "@android_abi@" not in (out / "app/build.gradle.kts").read_text()
++
++
++def test_android_packaging_rejects_unsupported_abi(tmp_path):
++    (tmp_path / "CMakeCache.txt").write_text("ANDROID_ABI:STRING=../bad\n")
++    with pytest.raises(ValueError, match="Unsupported Android ABI"):
++        build.android_build_abi(tmp_path)
++
++
++@pytest.mark.parametrize("abi, folder", [("arm64-v8a", "android"), ("x86_64", "android-x86_64")])
++def test_android_apk_stages_library_under_matching_abi(tmp_path, monkeypatch, abi, folder):
++    gen = tmp_path / "gen"
++    library = gen / "host/libmain.so"
++    library.parent.mkdir(parents=True)
++    library.write_bytes(b"native-" + abi.encode())
++    java = gen / "_deps/sdl3-src/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java"
++    java.parent.mkdir(parents=True)
++    java.write_text("// fixture")
++    (gen / "CMakeCache.txt").write_text("ANDROID_ABI:STRING=" + abi + "\nRECOMP_VIDEO:BOOL=OFF\n")
++    cfg = {"game": {"app_name": "StubRecomp", "bundle_id": "dev.recompkit.stub", "id": "stub"}}
++    for name in ("android_stage_layout_assets", "android_stage_core_assets", "android_stage_runtime_assets"):
++        monkeypatch.setattr(build, name, lambda *args: None)
++
++    def assemble(command, cwd, **kwargs):
++        assert cwd == tmp_path / folder
++        jni = cwd / "app/src/main/jniLibs"
++        assert [p.name for p in jni.iterdir()] == [abi]
++        assert (jni / abi / "libmain.so").read_bytes() == library.read_bytes()
++        assert 'abiFilters += "' + abi + '"' in (cwd / "app/build.gradle.kts").read_text()
++        apk = cwd / "app/build/outputs/apk/debug/app-debug.apk"
++        apk.parent.mkdir(parents=True)
++        apk.write_bytes(b"fixture")
++
++    monkeypatch.setattr(build.subprocess, "run", assemble)
++    apk = build.android_apk(tmp_path, cfg, gen_dir=gen, game_dir=tmp_path / "game")
++    assert apk == tmp_path / folder / "app/build/outputs/apk/debug/app-debug.apk"
++
++
++def test_android_emulator_build_preserves_arm64_directory():
++    root = Path("build")
++    assert build.build_dir_for(root, "android", "x86_64") == root / "cmake/android-x86_64"
++    assert build.build_dir_for(root, "android-stub", "x86_64") == root / "cmake/android-x86_64-stub"
++    assert build.build_dir_for(root, "android", "arm64-v8a") == root / "cmake/android"
++    with pytest.raises(SystemExit):
++        build.parse_args(["--target", "app", "--android-abi", "x86_64"])
++
++
+ def test_android_core_assets_replace_stale_manifests_without_shipping_binaries(tmp_path):
+     game = tmp_path / "game"
+     core = game / "mods/core/display"
+@@ -182,8 +238,9 @@ def test_android_push_stages_only_included_game_files(tmp_path, monkeypatch):
      monkeypatch.setattr(build.subprocess, "run", run)
      build.android_install_and_launch(output / "app-debug.apk", "dev.recompkit.stub",
                                       game_cfg=cfg, build_root=output)

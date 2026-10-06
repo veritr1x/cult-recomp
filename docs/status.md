@@ -6,6 +6,10 @@ Windows x64. Both Linux x86_64 diagnostic executables also build and pass
 the bounded movement/save/load path under Ubuntu in WSL. Runtime x86
 interpretation is disabled; a completed translation does not prove gameplay coverage.
 
+The user narrowed the immediate target to Windows, Linux and browser.
+Apple ports and physical Android verification are deferred. Android emulator
+experiments are retained as diagnostic evidence, not required deliverables.
+
 ## Current execution evidence
 
 Both diagnostic hosts reach the language selector, intro, main menu and New
@@ -267,6 +271,15 @@ causes the emulator's own SurfaceFlinger to abort; those test emulators were
 stopped after logs were captured. Disabling VirtioGpuNext preserves a healthy
 emulator boot but the same app upload still faults. An explicit mapping size
 also faults and was reverted. Android gameplay remains unverified.
+The new native x86_64 Android build also faults in libc while writing the same
+launcher upload, without the ARM native bridge. The failure therefore does not
+require ARM translation; its cause remains unresolved. ABI-specific CMake and
+Gradle outputs are separated, and 46 build/packaging tests pass. Video is disabled
+in these test builds. Further Android investigation is deferred at the user's request.
+Both x86_64 APKs are privately packaged under build/player/android-x86_64/;
+Cult is 189,633,821 bytes and Cult II is 190,545,229 bytes. Their ELF machine
+types and runtime assets are checked. Cult's x86_64 device execution was not tested
+before the scope changed.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
 from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build
