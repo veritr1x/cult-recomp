@@ -90,19 +90,37 @@ found one cleanup waiting in SDL's PulseAudio thread. A fetched-source patch now
 holds the PulseAudio mainloop lock while updating write accounting; it fixes a
 data race, but its relationship to the hangs is unproven. The launcher therefore
 uses the tested WSL settings. Vulkan acquisition also rebuilds and retries once
-after a recoverable out-of-date swapchain. macOS, iOS, Android and web binaries
-have not been produced. Both browser builds are compiling with Emscripten
-6.0.11 after successful WebGPU/pthreads configuration. Windows-hosted Android
+after a recoverable out-of-date swapchain. macOS and iOS binaries
+have not been produced. Both browser builds linked with Emscripten
+6.0.11 and are packaged under ignored build/player/web/. Debug metadata was
+stripped without changing executable WebAssembly sections. Both original data
+sets imported into private browser storage; both games render their language
+screens through WebGPU and initialize their MIDI banks. GetKeyState now retains
+the retrieved mouse message's button state, so an early physical release no longer
+erases a windowless control's press. Ordinary Play clicks start both games;
+keyboard input reaches their opening scenes and advances the conversations.
+Later movement/menu input can leave blank or stale frames. Browser save/load,
+sustained gameplay and physical/touch device compatibility remain unverified.
+The four mouse-state regressions pass; the keyboard gate and queued-input checks have 78 checks with zero
+failures. A broader runtime run has 1,602 checks, 25 failures and one skip, including
+unavailable PE helpers and game-specific fixture contracts; it is not a full pass.
+Windows-hosted Android
 NDK r30, API 36 revision 2 and Build Tools 37.0.0 are staged under ignored
 build/toolchains/android-sdk/. Their archives matched pinned upstream checksums;
 the repository's associated agreement matches the already accepted installed
 SDK agreement after whitespace normalization. No new agreement was accepted.
-Android compilation remains pending.
+Android configuration and APK assembly succeeded for both games. Private debug
+APKs are under build/player/android/. Both install and load their ARM64 libraries
+on an isolated emulator using libndk_translation. Its Vulkan driver lacks dynamic
+rendering, so both stop at their launchers before gameplay. Physical ARM64
+hardware, touch input and audible output remain unverified.
 
 Browser and Android packaging previously omitted the host's General MIDI bank.
-The pending platform builds now stage it and its license. Android also stages
+The browser builds include it and its license, and Cult initializes TinySoundFont
+from the packaged bank. Both Android APKs also stage
 display modes and the optional symbol index, with Java copying only those named
-runtime files into the app's data root. Platform execution still needs checking.
+runtime files into the app's data root. APK contents are verified; full platform
+execution still needs checking.
 Windows packages now include LLVM-MinGW's shared C++ runtimes and their notices.
 Both packaged executables reach command-line argument handling with a PATH
 containing only Windows system directories. This checks loading dependencies;
@@ -190,6 +208,9 @@ The assembled Play.cmd and Play.sh launchers also pass five-second startup
 checks for both games, with device PCM, rendered frames and clean exits. Repeat
 with tools/probe_desktop.py --game all --seconds 5 --player. Launcher evidence
 is kept in the platform's desktop-probe/player/ subdirectory.
+After the mouse-state fix, updated Windows launchers pass 20-second checks with
+nonzero captured device PCM; updated Linux launchers pass five-second checks
+with nonzero PCM. These checks verify startup and clean exits, not gameplay.
 
 Remaining work: investigate Cult II's inventory redraw immediately after loading,
 exercise further interactions/transitions, verify original-save

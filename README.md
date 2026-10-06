@@ -178,9 +178,10 @@ forwards `--target app`, `android`, `ios` or `web` to RecompKit.
 macOS and iOS require Apple tooling on a Mac; Android requires its SDK/NDK;
 web requires Emscripten and the kit's WebGPU/browser requirements.
 Other CPU architectures need their own native builds and gameplay verification.
-No macOS, iOS, Android or web binaries have been produced here.
+No macOS or iOS binaries have been produced here yet. Both Android ARM64 debug
+APKs build and are packaged privately under `build/player/android/`.
 
-The browser builds are compiling with Emscripten 6.0.11 on Linux x86_64.
+Both browser builds linked with Emscripten 6.0.11 on Linux x86_64.
 The local emsdk checkout is pinned to
 `96c657fc60920d2a6a82318aa50e0abf82749604`, whose SDK release revision is
 `f6264d4a4dd9ba24a9f0a5702835a44d1463de13`. It stays under ignored
@@ -195,8 +196,16 @@ build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult" --ta
 build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult2" --target web --jobs 3
 ```
 
-The WebGPU/pthreads configuration has succeeded for both; browser execution
-remains unverified. The guest arena extends to 0x74200000, so its browser memory
+`tools/package_browser.py` assembles both private players under
+`build/player/web/`, including local ZIP copies for importing the supplied data.
+It strips only WebAssembly debug metadata and checks that every executable
+section remains unchanged. Both games import their supplied data, reach their
+language screens through WebGPU and initialize the packaged MIDI bank. A runtime
+mouse-state fix lets ordinary Play clicks start both games. Keyboard input reaches
+the opening scenes and advances their conversations. Later movement/menu input
+can leave blank or stale frames; browser save/load and full gameplay remain
+unverified. The guest arena extends
+to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
 cross-origin isolated page and a WebGPU-capable browser.
 
@@ -205,7 +214,12 @@ Android API 36 revision 2 and Build Tools 37.0.0 under ignored build/toolchains/
 It requires the existing installed Android API 35 package and verifies that the
 repository's associated license text matches its accepted agreement apart from
 whitespace. It refuses changed terms or unexpected package checksums. Android
-builds and device execution remain pending.
+configuration and APK assembly succeeded for both games. `tools/package_android.py`
+checks the ARM64 library and required runtime assets, then copies the APKs and
+notices into `build/player/android/`. Both install and load their libraries on an
+isolated emulator using ARM64 translation. Its Vulkan driver lacks dynamic
+rendering, so startup stops at the launcher before gameplay. Physical ARM64
+device execution, touch input and audible output remain unverified.
 
 ## Metadata references
 

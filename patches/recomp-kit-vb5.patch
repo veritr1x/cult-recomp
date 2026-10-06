@@ -1,11 +1,21 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..94b4158 100644
+index 20fdc15..43b1b94 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,115 @@
+@@ -2,6 +2,125 @@
  
  ## Unreleased
  
++- Separate queued keyboard presses from their matching releases by a guest turn,
++  matching the mouse batching rule so fast taps remain observable to polling code.
++
++- Retain retrieved mouse-message button states for GetKeyState so a quick
++  physical release cannot erase the press a windowless control is processing.
++  GetAsyncKeyState still reports current host input, and focus loss clears snapshots.
++
++- Resolve the Android Gradle wrapper from the staged project so Windows-hosted
++  APK assembly can start when the caller runs outside that directory.
++
 +- Package the host's General MIDI bank and notice for web and Android targets;
 +  unpack named Android runtime resources without pruning profiles or game data.
 +
@@ -1137,7 +1147,7 @@ index fe40a38..020f8ea 100644
      if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
          return {};
 diff --git a/host/input.cpp b/host/input.cpp
-index 091660f..eace5b3 100644
+index 091660f..979aef2 100644
 --- a/host/input.cpp
 +++ b/host/input.cpp
 @@ -511,9 +511,9 @@ void host_input_motion(int32_t x, int32_t y, int32_t dx, int32_t dy) {
@@ -1153,8 +1163,16 @@ index 091660f..eace5b3 100644
      notify_input_changed();
  }
  
+@@ -527,6 +527,7 @@ void host_input_wheel(int32_t dz) {
+ }
+ 
+ void host_input_release_all() {
++    host_reset_message_key_state();
+     for (int i = 0; i < 8; ++i) {
+         if (i < 8)
+             g.buttons[i] = 0;
 diff --git a/host/input_gate.cpp b/host/input_gate.cpp
-index 2dd011b..1ae71d5 100644
+index 2dd011b..4c9657a 100644
 --- a/host/input_gate.cpp
 +++ b/host/input_gate.cpp
 @@ -52,8 +52,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1188,6 +1206,53 @@ index 2dd011b..1ae71d5 100644
  }
  
  // The modifier bit a scan code contributes: either side counts, which is what
+@@ -562,16 +561,17 @@ bool host_gate_key(uint16_t mac, bool down) {
+ uint32_t host_input_batch_limit(const HostInputStep *steps, uint32_t count) {
+     if (!steps || count == 0)
+         return 0;
+-    uint8_t pressed = 0;
++    bool pressed[259] = {}; // three mouse buttons, then 256 host key codes
+     for (uint32_t i = 0; i < count; ++i) {
+-        if (!steps[i].is_button || steps[i].button > 2)
++        const auto &step = steps[i];
++        if (!((step.kind == 1 && step.code < 3) || (step.kind == 2 && step.code < 256)))
+             continue;
+-        const uint8_t bit = uint8_t(1u << steps[i].button);
+-        if (steps[i].down) {
+-            pressed |= bit;
++        const uint32_t id = step.code + (step.kind == 2 ? 3u : 0u);
++        if (step.down) {
++            pressed[id] = true;
+             continue;
+         }
+-        if (pressed & bit)
++        if (pressed[id])
+             return i; // its press is in this batch: the release waits a turn
+     }
+     return count;
+diff --git a/host/input_gate.h b/host/input_gate.h
+index 9211514..7296ba1 100644
+--- a/host/input_gate.h
++++ b/host/input_gate.h
+@@ -129,14 +129,14 @@ void host_gate_reset(void);
+ // host_pointer_motion and host_gate_pointer_event retain the relative-motion
+ // One queued input event, reduced to what the batching rule needs to know.
+ struct HostInputStep {
+-    uint8_t is_button; // a press or a release, rather than motion or a wheel
+-    uint8_t button;    // 0 left, 1 right, 2 middle
+-    uint8_t down;      // 1 press, 0 release
++    uint8_t kind;  // 0 other, 1 mouse button, 2 keyboard key
++    uint16_t code; // mouse: 0 left, 1 right, 2 middle; keyboard: host key code
++    uint8_t down;  // 1 press, 0 release
+ };
+ 
+ // How many of a queued batch may be applied in one guest turn.
+ //
+-// A guest that polls its buttons cannot see a press and its release applied
++// A guest that polls its buttons or keys cannot see a press and its release applied
+ // between two polls: it reads the state once and finds the button up again, so
+ // the click never happened. That is what the DirectInput shim's buffered
+ // events are built from, and what a window's click handling comes down to. The
 diff --git a/host/script.cpp b/host/script.cpp
 index 19d5522..8ec9ab7 100644
 --- a/host/script.cpp
@@ -1214,7 +1279,7 @@ index 19d5522..8ec9ab7 100644
      if (view) {
          const uint32_t observed = view();
 diff --git a/host/sdl/main.cpp b/host/sdl/main.cpp
-index d983f15..39b2084 100644
+index d983f15..b7ea940 100644
 --- a/host/sdl/main.cpp
 +++ b/host/sdl/main.cpp
 @@ -137,8 +137,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1227,7 +1292,24 @@ index d983f15..39b2084 100644
          return;
      }
      uint32_t hwnd = host_main_window();
-@@ -1278,6 +1277,18 @@ controls::Screen controls_screen() {
+@@ -328,9 +327,13 @@ void deliver_pending_input() {
+     // is in input_gate.cpp, where it is tested without a window.
+     std::vector<HostInputStep> steps;
+     steps.reserve(batch.size());
+-    for (const PendingInput &e : batch)
+-        steps.push_back(
+-            {uint8_t(e.kind == PendingInput::BUTTON), uint8_t(e.button), uint8_t(e.down ? 1 : 0)});
++    for (const PendingInput &e : batch) {
++        const uint8_t kind = e.kind == PendingInput::BUTTON ? 1
++                             : e.kind == PendingInput::KEY  ? 2
++                                                            : 0;
++        steps.push_back({kind, uint16_t(e.kind == PendingInput::KEY ? e.key : e.button),
++                         uint8_t(e.down ? 1 : 0)});
++    }
+     const uint32_t limit = host_input_batch_limit(steps.data(), uint32_t(steps.size()));
+     // Applied outside the lock, in arrival order. Order is the whole point: a
+     // focus loss sits in this queue among the presses it must follow, so
+@@ -1278,6 +1281,18 @@ controls::Screen controls_screen() {
  
  // The housekeeping every turn does once the events are in.
  void after_events() {
@@ -1306,7 +1388,7 @@ index 9525259..c5dcf13 100644
              break; // consumed
          host_input_key(m.mac, step.down != 0);
 diff --git a/host/tests/host_tests.cpp b/host/tests/host_tests.cpp
-index 8bc24e5..9bddf5f 100644
+index 8bc24e5..de0d90b 100644
 --- a/host/tests/host_tests.cpp
 +++ b/host/tests/host_tests.cpp
 @@ -869,6 +869,7 @@ static void test_script_parsing() {
@@ -1327,7 +1409,24 @@ index 8bc24e5..9bddf5f 100644
  
      // Five malformed forms for each of the five verbs. The categories the
      // brief names are missing operand, non-integer, unknown enum, extra token
-@@ -7098,6 +7102,9 @@ static void test_input_gate() {
+@@ -6754,6 +6758,16 @@ static void test_input_batch_limit() {
+     // Two clicks: only the first release matters, the rest waits its turn.
+     const HostInputStep two[] = {down, up, right_down, right_up};
+     CHECK_EQ(host_input_batch_limit(two, 4), 1u);
++
++    const HostInputStep key_down{2, 0, 1}, key_up{2, 0, 0};
++    const HostInputStep key_tap[] = {motion, key_down, key_up};
++    CHECK_EQ(host_input_batch_limit(key_tap, 3), 2u);
++    const HostInputStep repeat[] = {key_down, key_down, key_up};
++    CHECK_EQ(host_input_batch_limit(repeat, 3), 2u);
++    const HostInputStep separate_namespaces[] = {key_down, up, motion};
++    CHECK_EQ(host_input_batch_limit(separate_namespaces, 3), 3u);
++    const HostInputStep different_key[] = {key_down, {2, 1, 0}, key_up};
++    CHECK_EQ(host_input_batch_limit(different_key, 3), 2u);
+ }
+ 
+ static void test_script_input_hold_frames() {
+@@ -7098,6 +7112,9 @@ static void test_input_gate() {
      uint32_t wp = 0;
      CHECK(gate_next_message(&ctx, &wp) == 0x0100); // 4. WM_KEYDOWN
      CHECK(wp == m.vk);
@@ -1337,7 +1436,7 @@ index 8bc24e5..9bddf5f 100644
      CHECK(gate_next_message(&ctx, &wp) == 0x0102); //    and its WM_CHAR
      CHECK(wp == 'G');
      CHECK(gate_next_message(&ctx, nullptr) == 0);
-@@ -9758,6 +9765,54 @@ static void test_d3d9_gpu_renderer() {
+@@ -9758,6 +9775,54 @@ static void test_d3d9_gpu_renderer() {
      host_d9_texture_drop(DEPTH);
  }
  
@@ -1392,7 +1491,7 @@ index 8bc24e5..9bddf5f 100644
  int main(int argc, char **argv) {
      if (argc == 2 && !strcmp(argv[1], "--dumpat-only")) {
          test_dumpat_present_and_seal();
-@@ -9818,6 +9873,26 @@ int main(int argc, char **argv) {
+@@ -9818,6 +9883,27 @@ int main(int argc, char **argv) {
          }
      }
      mem_init();
@@ -1410,6 +1509,7 @@ index 8bc24e5..9bddf5f 100644
 +        return g_failures ? 1 : 0;
 +    }
 +    if (argc == 2 && !strcmp(argv[1], "--key-gate-only")) {
++        test_input_batch_limit();
 +        test_input_gate();
 +        test_input_gate_modifiers();
 +        printf("keyboard gate: %d checks, %d failures\n", g_checks, g_failures);
@@ -5672,7 +5772,7 @@ index cf0d171..ea1dbc8 100644
          test_clip_children();
          test_draw_theme_parent_background();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..2860335 100644
+index 7016990..6910a83 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -6913,7 +7013,37 @@ index 7016990..2860335 100644
      uint32_t vname = put_str("InstallPath");
      uint32_t vdata = put_str(RECOMP_GUEST_ROOT);
      check(call_import(c, "ADVAPI32.dll", "RegSetValueExA",
-@@ -6078,6 +7254,16 @@ static void test_host_mouse_routing() {
+@@ -5952,6 +7128,29 @@ static void test_user32_window_model() {
+     host_set_cursor_pos(55, 89);
+     check(call_import(&c, "USER32.dll", "GetMessagePos", {}) == ((34u << 16) | 21u),
+           "GetMessagePos retains the retrieved message coordinates");
++    host_set_key_state(1, false);
++    host_set_key_state(2, false);
++    host_set_key_state(4, false);
++    host_post_message(hwnd, 0x201, 0x13, 0);
++    call_import(&c, "USER32.dll", "PeekMessageW", {msg, hwnd, 0x201, 0x201, 1});
++    check(call_import(&c, "USER32.dll", "GetKeyState", {1}) == 0xff80 &&
++              call_import(&c, "USER32.dll", "GetKeyState", {2}) == 0xff80 &&
++              call_import(&c, "USER32.dll", "GetKeyState", {4}) == 0xff80 &&
++              call_import(&c, "USER32.dll", "GetAsyncKeyState", {1}) == 0,
++          "retrieved mouse press survives a physical release without changing asynchronous state");
++    host_post_message(hwnd, 0x8002, 0, 0);
++    call_import(&c, "USER32.dll", "PeekMessageW", {msg, hwnd, 0x8002, 0x8002, 1});
++    check(call_import(&c, "USER32.dll", "GetKeyState", {1}) == 0xff80,
++          "non-input messages retain the last retrieved mouse state");
++    host_post_message(hwnd, 0x202, 0x12, 0);
++    call_import(&c, "USER32.dll", "GetMessageA", {msg, hwnd, 0x202, 0x202});
++    check(call_import(&c, "USER32.dll", "GetKeyState", {1}) == 0 &&
++              call_import(&c, "USER32.dll", "GetKeyState", {2}) == 0xff80,
++          "retrieving a release changes only its mouse button");
++    host_reset_message_key_state();
++    check(call_import(&c, "USER32.dll", "GetKeyState", {2}) == 0 &&
++              call_import(&c, "USER32.dll", "GetKeyState", {4}) == 0,
++          "focus reset invalidates retrieved mouse snapshots");
+     gm_put_str(s + 0x700, "unsafe queued text", 32);
+     check(call_import(&c, "USER32.dll", "PostMessageA", {hwnd, 0xc, 0, s + 0x700}) == 0,
+           "posted text pointers are rejected instead of escaping a synchronous call");
+@@ -6078,6 +7277,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -6930,7 +7060,7 @@ index 7016990..2860335 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7463,11 @@ static void test_user32_services() {
+@@ -6277,6 +7486,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -6942,7 +7072,7 @@ index 7016990..2860335 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7496,12 @@ static void test_user32_services() {
+@@ -6305,6 +7519,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -6955,7 +7085,7 @@ index 7016990..2860335 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7631,21 @@ static void test_dll_lifetime() {
+@@ -6434,6 +7654,21 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
@@ -6977,7 +7107,7 @@ index 7016990..2860335 100644
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7899,49 @@ int main(int argc, char **argv) {
+@@ -6687,14 +7922,49 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
@@ -7180,7 +7310,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..eed070c 100644
+index 2ef5486..96ea383 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -7202,7 +7332,34 @@ index 2ef5486..eed070c 100644
  
  uint32_t g_next_hwnd = 0x00020004;
  uint32_t g_next_gdi = 0x00028004;
-@@ -105,6 +110,11 @@ void store_msg(uint32_t p, const Msg &m) {
+@@ -47,6 +52,12 @@ bool g_clipped = false;
+ bool (*g_message_waiter)() = nullptr;
+ void (*g_window_shown)(uint32_t) = nullptr;
+ uint8_t g_key_state[256] = {0};
++// A fast physical release can arrive while a mouse press is still queued.
++// GetKeyState follows the receiving thread's retrieved input, whereas
++// GetAsyncKeyState continues to read the host's current state.
++uint32_t g_message_key_generation = 1;
++thread_local uint32_t g_mouse_key_generation = 0;
++thread_local uint32_t g_message_mouse_buttons = 0;
+ 
+ // WS_VISIBLE: a window created with it is shown as part of creation.
+ const uint32_t WS_VISIBLE = 0x10000000u;
+@@ -98,6 +109,13 @@ static void post_geometry(uint32_t hwnd, const Window *w, bool moved, bool sized
+ void store_msg(uint32_t p, const Msg &m) {
+     if (!p)
+         return;
++    if (m.message >= 0x200 && m.message <= 0x209) {
++        g_message_mouse_buttons = m.wparam & 0x13; // MK_LBUTTON, MK_RBUTTON, MK_MBUTTON
++        g_mouse_key_generation = g_message_key_generation;
++    }
++    if (recomp_env("TRACE_POINTER") && m.message >= 0x200 && m.message <= 0x209)
++        LOGW("pointer MSG store %08x: hwnd=%08x msg=%04x lp=%08x pt=(%d,%d)", p, m.hwnd, m.message,
++             m.lparam, int32_t(m.ptx), int32_t(m.pty));
+     wr32(p + 0, m.hwnd);
+     wr32(p + 4, m.message);
+     wr32(p + 8, m.wparam);
+@@ -105,6 +123,11 @@ void store_msg(uint32_t p, const Msg &m) {
      wr32(p + 16, m.time);
      wr32(p + 20, m.ptx);
      wr32(p + 24, m.pty);
@@ -7214,7 +7371,7 @@ index 2ef5486..eed070c 100644
  }
  
  } // namespace user32
-@@ -147,6 +157,8 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
+@@ -147,12 +170,19 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
          win->w = w;
          win->h = h;
          win->update_pending = true;
@@ -7223,7 +7380,18 @@ index 2ef5486..eed070c 100644
      }
  }
  void host_set_key_state(int vk, bool down) {
-@@ -163,6 +175,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
+     if (vk >= 0 && vk < 256)
+         g_key_state[vk] = down ? 0x80 : 0x00;
+ }
++void host_reset_message_key_state() {
++    // Focus loss invalidates every receiving thread's snapshot. Host input
++    // mutations hold the guest baton, so this generation needs no host lock.
++    ++g_message_key_generation;
++}
+ void host_set_cursor_pos(int32_t x, int32_t y) {
+     g_cursor_x = x;
+     g_cursor_y = y;
+@@ -163,6 +193,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
      host_set_cursor_pos(int32_t(uint32_t(x) + uint32_t(origin_x)),
                          int32_t(uint32_t(y) + uint32_t(origin_y)));
  }
@@ -7242,7 +7410,7 @@ index 2ef5486..eed070c 100644
  void host_set_message_waiter(bool (*fn)()) {
      g_message_waiter = fn;
  }
-@@ -198,8 +222,98 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
+@@ -198,8 +240,98 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
      return guest_call(c, proc, hwnd, msg, wparam, lparam);
  }
  
@@ -7341,7 +7509,7 @@ index 2ef5486..eed070c 100644
  // ---------------------------------------------------------------------------
  // Classes and windows
  // ---------------------------------------------------------------------------
-@@ -358,6 +472,8 @@ void create_window_body(X86 *c, bool wide) {
+@@ -358,6 +490,8 @@ void create_window_body(X86 *c, bool wide) {
              nw->visible = true;
              nw->shown = true;
              nw->update_pending = true;
@@ -7350,7 +7518,7 @@ index 2ef5486..eed070c 100644
              if (g_window_shown)
                  g_window_shown(hwnd);
          }
-@@ -390,6 +506,8 @@ static void became_visible(Window *w, bool to_top) {
+@@ -390,6 +524,8 @@ static void became_visible(Window *w, bool to_top) {
      if (to_top)
          reorder_window(w->hwnd, 0);
      w->update_pending = true;
@@ -7359,7 +7527,7 @@ index 2ef5486..eed070c 100644
      if (!w->shown) {
          w->shown = true;
          post_geometry(w->hwnd, w, false, true);
-@@ -427,6 +545,11 @@ void u_ShowWindow(X86 *c) {
+@@ -427,6 +563,11 @@ void u_ShowWindow(X86 *c) {
      set_eax(c, was ? 1 : 0);
      if (!was && w->visible)
          became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
@@ -7371,7 +7539,7 @@ index 2ef5486..eed070c 100644
  }
  
  // UpdateWindow sends WM_PAINT directly to the window procedure, synchronously,
-@@ -467,7 +590,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -467,7 +608,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
          w->w = cx;
          w->h = cy;
          if (!(flags & 0x0008)) // SWP_NOREDRAW
@@ -7380,7 +7548,7 @@ index 2ef5486..eed070c 100644
      } // SWP_NOSIZE
      LOGV("SetWindowPos(%08x): %dx%d at %d,%d, flags=%08x changed=%d/%d", w->hwnd, w->w, w->h, w->x,
           w->y, flags, moved, sized);
-@@ -481,6 +604,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -481,6 +622,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
      } else if ((flags & 0x0080) && w->visible) {
          w->visible = false;
          w->style &= ~WS_VISIBLE;
@@ -7392,7 +7560,7 @@ index 2ef5486..eed070c 100644
      }
      if (moved || sized) {
          // SetWindowPos sends this before returning. VCL updates its cached
-@@ -506,6 +634,21 @@ void u_SetWindowPos(X86 *c) {
+@@ -506,6 +652,21 @@ void u_SetWindowPos(X86 *c) {
                         int32_t(arg(c, 5)), arg(c, 6));
      set_eax(c, 1);
  }
@@ -7414,7 +7582,17 @@ index 2ef5486..eed070c 100644
  // The bounds a window had before a display took it over, by handle.
  std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
      static std::map<uint32_t, std::array<int32_t, 4>> m;
-@@ -617,12 +760,19 @@ void u_SetRect(X86 *c) {
+@@ -572,6 +733,9 @@ void u_AdjustWindowRectEx(X86 *c) {
+ void u_ScreenToClient(X86 *c) {
+     Window *w = find_window(arg(c, 0));
+     uint32_t p = arg(c, 1);
++    if (recomp_env("TRACE_POINTER"))
++        LOGW("pointer ScreenToClient hwnd=%08x p=%08x pt=(%d,%d) ret=%08x EBP=%08x", arg(c, 0), p,
++             int32_t(rd32(p)), int32_t(rd32(p + 4)), rd32(c->r[R_ESP]), c->r[R_EBP]);
+     if (p && w) {
+         LOGV("ScreenToClient(%08x): (%d,%d) through a window at %d,%d", arg(c, 0), (int32_t)rd32(p),
+              (int32_t)rd32(p + 4), w->x, w->y);
+@@ -617,12 +781,19 @@ void u_SetRect(X86 *c) {
  // A null hwnd invalidates every window, which is what Windows does.
  void u_InvalidateRect(X86 *c) {
      uint32_t hwnd = arg(c, 0);
@@ -7438,7 +7616,7 @@ index 2ef5486..eed070c 100644
      set_eax(c, 1);
  }
  
-@@ -911,6 +1061,15 @@ void u_TranslateMessage(X86 *c) {
+@@ -911,6 +1082,15 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
@@ -7454,7 +7632,17 @@ index 2ef5486..eed070c 100644
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
          uint32_t ch = 0;
          if (vk >= 0x30 && vk <= 0x5a)
-@@ -969,6 +1128,16 @@ void u_PostMessageA(X86 *c) {
+@@ -943,6 +1123,9 @@ void dispatch_message(X86 *c) {
+     }
+     uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
+     uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
++    if (recomp_env("TRACE_POINTER") && msg >= 0x200 && msg <= 0x209)
++        LOGW("pointer MSG dispatch %08x: hwnd=%08x msg=%04x lp=%08x pt=(%d,%d)", p, hwnd, msg, lp,
++             int32_t(rd32(p + 20)), int32_t(rd32(p + 24)));
+     if (msg == 0x113 && lp)
+         set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
+     else
+@@ -969,6 +1152,16 @@ void u_PostMessageA(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -7471,7 +7659,7 @@ index 2ef5486..eed070c 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1160,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -991,9 +1184,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -7495,7 +7683,7 @@ index 2ef5486..eed070c 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1196,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1015,8 +1220,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -7514,7 +7702,7 @@ index 2ef5486..eed070c 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1240,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1050,20 +1264,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -7553,7 +7741,7 @@ index 2ef5486..eed070c 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1426,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1226,8 +1450,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -7565,7 +7753,7 @@ index 2ef5486..eed070c 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1437,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1235,15 +1461,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -7615,7 +7803,7 @@ index 2ef5486..eed070c 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,13 +1498,28 @@ void u_DestroyIcon(X86 *c) {
+@@ -1268,20 +1522,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -7645,7 +7833,31 @@ index 2ef5486..eed070c 100644
  void u_SetCursorPos(X86 *c) {
      g_cursor_x = (int32_t)arg(c, 0);
      g_cursor_y = (int32_t)arg(c, 1);
-@@ -1398,6 +1643,18 @@ void u_MessageBoxA(X86 *c) {
++    if (recomp_env("TRACE_POINTER"))
++        LOGW("cursor: SetCursorPos(%d,%d)", g_cursor_x, g_cursor_y);
+     set_eax(c, 1);
+ }
+ void u_GetCursorPos(X86 *c) {
+     uint32_t p = arg(c, 0);
++    if (recomp_env("TRACE_POINTER"))
++        LOGW("cursor: GetCursorPos(%08x) -> (%d,%d)", p, g_cursor_x, g_cursor_y);
+     if (p) {
+         wr32(p, (uint32_t)g_cursor_x);
+         wr32(p + 4, (uint32_t)g_cursor_y);
+@@ -1300,7 +1573,11 @@ void u_GetAsyncKeyState(X86 *c) {
+ }
+ void u_GetKeyState(X86 *c) {
+     uint32_t vk = arg(c, 0);
+-    set_eax(c, vk < 256 && g_key_state[vk] ? 0xff80 : 0);
++    uint32_t mouse_bit = vk == 1 ? 1u : vk == 2 ? 2u : vk == 4 ? 0x10u : 0u;
++    bool down = vk < 256 && g_key_state[vk];
++    if (mouse_bit && g_mouse_key_generation == g_message_key_generation)
++        down = (g_message_mouse_buttons & mouse_bit) != 0;
++    set_eax(c, down ? 0xff80 : 0);
+ }
+ void u_ShowCursor(X86 *c) {
+     g_cursor_show += arg(c, 0) ? 1 : -1;
+@@ -1398,6 +1675,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -7664,7 +7876,7 @@ index 2ef5486..eed070c 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +1952,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +1984,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -7672,7 +7884,7 @@ index 2ef5486..eed070c 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1716,15 +1974,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1716,15 +2006,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -7691,7 +7903,7 @@ index 2ef5486..eed070c 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +2002,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1741,6 +2034,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -9351,7 +9563,7 @@ index ff9b21d..a92baa6 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index b59ecac..ee21e56 100644
+index b59ecac..9b49f72 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,12 @@
@@ -9397,6 +9609,14 @@ index b59ecac..ee21e56 100644
  uint32_t host_main_window();              // first created top-level HWND, or 0
  uint32_t host_window_proc(uint32_t hwnd); // guest WNDPROC address, or 0
  bool host_window_rect(uint32_t hwnd, int32_t *x, int32_t *y, int32_t *w, int32_t *h);
+@@ -359,6 +376,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
+ // Host input is in client pixels; GetCursorPos/MSG.pt are screen pixels.
+ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y);
+ void host_set_key_state(int vk, bool down); // feeds GetAsyncKeyState
++void host_reset_message_key_state();        // focus loss drops retrieved mouse-button snapshots
+ void host_set_cursor_pos(int32_t x, int32_t y);
+ // Installs the host's event-loop pump. GetMessageA calls it each time round
+ // its wait, and the contract is deliberately narrow:
 diff --git a/tests/test_build_py.py b/tests/test_build_py.py
 index b57433e..67008fa 100644
 --- a/tests/test_build_py.py
@@ -9480,7 +9700,7 @@ index 4f45372..e9d41f1 100644
              game = Path(tmp) / "g"
              game.mkdir()
 diff --git a/tools/build.py b/tools/build.py
-index 6c3d908..7ca62ff 100644
+index 6c3d908..4ef7156 100644
 --- a/tools/build.py
 +++ b/tools/build.py
 @@ -203,6 +203,22 @@ def android_stage_core_assets(out, game_dir):
@@ -9506,14 +9726,18 @@ index 6c3d908..7ca62ff 100644
  def android_apk(build_root, cfg, *, gen_dir, game_dir):
      """Stage the native libraries beside the SDL activity and assemble a debug APK."""
      library = Path(gen_dir) / "host/libmain.so"
-@@ -234,6 +250,7 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
+@@ -234,8 +250,10 @@ def android_apk(build_root, cfg, *, gen_dir, game_dir):
          notice.unlink(missing_ok=True)
      android_stage_layout_assets(out, game_dir)
      android_stage_core_assets(out, game_dir)
 +    android_stage_runtime_assets(out, build_root)
      wrapper = "gradlew.bat" if platform.system() == "Windows" else "./gradlew"
-     subprocess.run([wrapper, "assembleDebug"], cwd=out, check=True)
+-    subprocess.run([wrapper, "assembleDebug"], cwd=out, check=True)
++    # Windows resolves the executable before applying the child's cwd.
++    subprocess.run([str((out / wrapper).resolve()), "assembleDebug"], cwd=out, check=True)
      apk = out / "app/build/outputs/apk/debug/app-debug.apk"
+     if not apk.is_file():
+         raise FileNotFoundError("No APK after assembleDebug: %s" % apk)
 diff --git a/tools/game_config.py b/tools/game_config.py
 index 20838eb..dd42c54 100644
 --- a/tools/game_config.py
