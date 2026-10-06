@@ -1,13 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..bc04f1c 100644
+index 20fdc15..5538ad1 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,149 @@
+@@ -2,6 +2,151 @@
  
  ## Unreleased
  
 +- Allow verbose subsystem diagnostics with import traffic suppressed through
 +  `RECOMP_TRACE_IMPORTS=0`, and include string resource IDs in LoadString traces.
++  Include bounded guest stack samples in exception traces and optional ReadFile
++  byte samples through `RECOMP_TRACE_FILE_BYTES=1`.
 +
 +- Emit live exception checkpoints for SEH prologues that push a proven register
 +  copy of FS:[0], including Visual Basic and MSVC frames; reject mutated copies
@@ -1636,14 +1638,15 @@ index 10a5e39..4499b0c 100644
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
 diff --git a/runtime/README.md b/runtime/README.md
-index 85b7a4b..7b2048d 100644
+index 85b7a4b..29cbd78 100644
 --- a/runtime/README.md
 +++ b/runtime/README.md
-@@ -217,6 +217,7 @@ paths resolve against the guest current directory, which starts at
+@@ -217,6 +217,8 @@ paths resolve against the guest current directory, which starts at
  | variable | effect |
  | --- | --- |
  | `RECOMP_LOG` | `0` silent, `1` warnings and one-shot notices (default), `2` traces every import call and returned EAX |
 +| `RECOMP_TRACE_IMPORTS=0` | suppress import call/return traces while retaining verbose subsystem diagnostics |
++| `RECOMP_TRACE_FILE_BYTES=1` | log up to 256 hexadecimal bytes per successful ReadFile for parser diagnostics |
  | `RECOMP_REGISTRY` | registry backing file (default `build/recomp/registry.json`) |
  | `RECOMP_CREATETHREAD=skip` | record `CreateThread` without running the thread body |
  | `RECOMP_CREATETHREAD=sync` | run a thread body to completion inside `CreateThread` (pre-scheduler behaviour, for bisection) |
@@ -3147,7 +3150,7 @@ index d01eb0a..658e274 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..b9c7d48 100644
+index 529d27d..8239797 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
 @@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
@@ -3176,7 +3179,27 @@ index 529d27d..b9c7d48 100644
  void k_GlobalLock(X86 *c) {
      set_eax(c, arg(c, 0));
  }
-@@ -935,6 +947,214 @@ void k_CloseHandle(X86 *c) {
+@@ -827,6 +839,19 @@ void k_ReadFile(X86 *c) {
+     int64_t n = os_fd_read(o->fd, g_mem + buf, want);
+     if (recomp_env("TRACE_FILES"))
+         LOGW("file: read handle=%08x want=%u got=%lld", arg(c, 0), want, (long long)n);
++    if (n > 0 && recomp_env("TRACE_FILE_BYTES")) {
++        // A bounded byte trace distinguishes host file input from subsequent
++        // guest parsing without treating binary bytes as console control text.
++        std::string bytes;
++        const uint32_t count = std::min(uint32_t(n), 256u);
++        for (uint32_t i = 0; i < count; ++i) {
++            char hex[4];
++            snprintf(hex, sizeof hex, " %02x", rd8(buf + i));
++            bytes += hex;
++        }
++        LOGW("file: bytes handle=%08x count=%u/%lld:%s", arg(c, 0), count, (long long)n,
++             bytes.c_str());
++    }
+     if (n < 0) {
+         set_last_error(ERROR_ACCESS_DENIED_);
+         if (pread)
+@@ -935,6 +960,214 @@ void k_CloseHandle(X86 *c) {
      set_eax(c, 1);
  }
  
@@ -3391,7 +3414,7 @@ index 529d27d..b9c7d48 100644
  void k_FlushFileBuffers(X86 *c) {
      HObj *o = handle_get(arg(c, 0), H_FILE);
      if (o)
-@@ -1059,6 +1279,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
+@@ -1059,6 +1292,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
  std::string module_file_name(uint32_t hmod) {
      std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
      if (hmod && hmod != IMAGE_BASE) {
@@ -3401,7 +3424,7 @@ index 529d27d..b9c7d48 100644
          for (const auto &kv : modules())
              if (kv.second == hmod) {
                  path = RECOMP_GUEST_ROOT "\\" + kv.first;
-@@ -1163,7 +1386,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1163,7 +1399,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
              memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
              m->attached = true;
              m->load_refs = 1;
@@ -3411,7 +3434,7 @@ index 529d27d..b9c7d48 100644
                  call_dll_entry(c, *m, 0);    // failed attach still receives detach
                  m->attached = false;
                  m->load_refs = 0;
-@@ -1195,6 +1419,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1195,6 +1432,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
  void k_LoadLibraryA(X86 *c) {
      load_library_named(c, gm_str(arg(c, 0)));
  }
@@ -3438,7 +3461,7 @@ index 529d27d..b9c7d48 100644
  
  void k_LoadLibraryW(X86 *c) {
      load_library_named(c, gm_wstr(arg(c, 0)));
-@@ -1306,6 +1550,47 @@ void win32_reset_command_line_for_test() {
+@@ -1306,6 +1563,47 @@ void win32_reset_command_line_for_test() {
      kernel32_wide_reset_command_line();
      g_cmdline_addr = 0;
  }
@@ -3486,7 +3509,7 @@ index 529d27d..b9c7d48 100644
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1483,6 +1768,43 @@ void k_GetSystemDirectoryA(X86 *c) {
+@@ -1483,6 +1781,43 @@ void k_GetSystemDirectoryA(X86 *c) {
      memcpy(g_mem + buf, dir, len + 1);
      set_eax(c, len);
  }
@@ -3530,7 +3553,7 @@ index 529d27d..b9c7d48 100644
  
  void k_GetLogicalDriveStringsA(X86 *c) {
      logical_drive_strings(c, false);
-@@ -1753,6 +2075,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1753,6 +2088,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -3538,7 +3561,7 @@ index 529d27d..b9c7d48 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -3547,9 +3870,19 @@ void k_RaiseException(X86 *c) {
+@@ -3547,9 +3883,31 @@ void k_RaiseException(X86 *c) {
              snprintf(b, sizeof b, " %08x", r);
              frames += b;
          }
@@ -3558,10 +3581,22 @@ index 529d27d..b9c7d48 100644
 +        }
 +        LOGV("RaiseException(code=%08x nargs=%u args:%s) from ret=%08x, frames:%s", arg(c, 0),
 +             arg(c, 2), detail.c_str(), rd32(c->r[R_ESP]), frames.c_str());
++        // Language helpers may repurpose EBP. Preserve a bounded stack sample
++        // when their conventional frame chain cannot describe the caller.
++        std::string stack;
++        for (uint32_t i = 0; i < 32 && gm_valid(c->r[R_ESP] + i * 4, 4); ++i) {
++            char word[16];
++            snprintf(word, sizeof word, " %08x", rd32(c->r[R_ESP] + i * 4));
++            stack += word;
++        }
++        LOGV("RaiseException registers: EAX=%08x EBX=%08x ECX=%08x EDX=%08x "
++             "ESI=%08x EDI=%08x EBP=%08x ESP=%08x stack:%s",
++             c->r[R_EAX], c->r[R_EBX], c->r[R_ECX], c->r[R_EDX], c->r[R_ESI], c->r[R_EDI],
++             c->r[R_EBP], c->r[R_ESP], stack.c_str());
      }
      if (recomp_seh_raise(c, arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3)))
          return; // only the testing runtime can return from an unhandled raise
-@@ -4742,6 +5075,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4742,6 +5100,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -3570,7 +3605,7 @@ index 529d27d..b9c7d48 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +5093,13 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4758,6 +5118,13 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
@@ -3584,7 +3619,7 @@ index 529d27d..b9c7d48 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +5119,9 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4777,6 +5144,9 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
@@ -3594,7 +3629,7 @@ index 529d27d..b9c7d48 100644
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4785,6 +5130,7 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4785,6 +5155,7 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetModuleHandleA", 1, k_GetModuleHandleA},
      {"KERNEL32.dll", "GetModuleHandleW", 1, k_GetModuleHandleW},
      {"KERNEL32.dll", "LoadLibraryA", 1, k_LoadLibraryA},
@@ -3602,7 +3637,7 @@ index 529d27d..b9c7d48 100644
      {"KERNEL32.dll", "LoadLibraryW", 1, k_LoadLibraryW},
      {"KERNEL32.dll", "LoadLibraryExW", 3, k_LoadLibraryExW},
      {"KERNEL32.dll", "FreeLibrary", 1, k_FreeLibrary},
-@@ -4935,6 +5281,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4935,6 +5306,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
