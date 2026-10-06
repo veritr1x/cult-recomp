@@ -144,6 +144,9 @@ The stable emulator 37.2.12 with software graphics boots and keeps the guest
 responsive, but its Vulkan device lacks dynamic rendering. The installed Cult
 II build falls back to the launcher and reports no GPU device; it does not reach
 gameplay. This owned test emulator was stopped after logs were captured.
+Both Android ARM64 APKs have now been rebuilt and packaged with the child-window
+fixes. The package checks verify the native ELF ABI and named runtime resources;
+they do not verify device gameplay.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
 from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build
