@@ -122,6 +122,20 @@ raises a guest exception before opening the save, then cannot find a live unwind
 checkpoint. The exported R6R6 save is intact and loads from the Windows diagnostic
 host's startup menu with no missing imports or runtime fault. The browser path
 requires further investigation; the missing GetWindowTextA was not its only cause.
+The translator now recognizes VB/MSVC prologues that cache FS:[0] in a register
+before pushing the registration link. The first rebuilt Cult II browser reaches
+the unwind checkpoint but freezes with an uncaught host longjmp. Its trace
+contains 154 retained checkpoints, including records already removed from the
+guest chain. The subsequent source fix retires unlinked registrations while
+locals are still allocated and lets the resumable driver adopt surviving
+checkpoints after generated activations return. It also resets profiling
+ownership on adoption. This passes **352 native SEH checks** and **212 selected
+translator checks**. Both games are regenerated. Cult's rebuilt Windows
+diagnostic passes a fresh 2,055-frame movement/save/load round trip with identical
+restored saves and no missing imports, unknown transfers or runtime errors.
+Its packaged Windows player renders and exits cleanly in a five-second check,
+while the current host still has no default audio playback device. Linux and
+browser builds and startup-load verification of this lifetime fix are in progress.
 Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.

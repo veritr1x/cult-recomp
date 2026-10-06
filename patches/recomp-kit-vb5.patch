@@ -1,11 +1,19 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..8f6b305 100644
+index 20fdc15..d56d441 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,136 @@
+@@ -2,6 +2,144 @@
  
  ## Unreleased
  
++- Emit live exception checkpoints for SEH prologues that push a proven register
++  copy of FS:[0], including Visual Basic and MSVC frames; reject mutated copies
++  and alternate entries that bypass the load.
++  Retire unlinked records before the local stack is popped, and move surviving
++  checkpoints onto the resumable driver after a generated activation returns.
++  Reset profiling ownership when a checkpoint moves to its new host activation.
++  Preserve unchanged generated source timestamps for incremental native builds.
++
 +- Deliver ANSI SetWindowText through WM_SETTEXT so controls update their text,
 +  notify their parent and repaint, matching the Unicode entry point.
 +  Implement GetWindowTextA through WM_GETTEXT with ANSI/Unicode conversion.
@@ -1623,10 +1631,37 @@ index 10a5e39..4499b0c 100644
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
-index 06d5e2b..551fe85 100644
+index 06d5e2b..c2683c7 100644
 --- a/runtime/cpu.cpp
 +++ b/runtime/cpu.cpp
-@@ -148,6 +148,10 @@ int recomp_module_call(X86 *c, uint32_t target) {
+@@ -95,9 +95,25 @@ const int recomp_resumable_stacks = RECOMP_RESUMABLE_STACKS;
+ // this opt-in translation mode; ordinary games retain their existing path.
+ void recomp_run(X86 *c, uint32_t target) {
+     c->eip = target;
++    if (!recomp_resumable_stacks) {
++        recomp_call(c, target);
++        return;
++    }
++    // A switched return ends its generated activation while the guest's SEH
++    // record can remain installed. Move that checkpoint onto this live driver
++    // before dispatching the continuation; never jump into a returned body.
++    uint64_t seh_mark = recomp_seh_frame_mark(c);
+     do {
++        while (jmp_buf *b = recomp_seh_frame_adopt_dispatch(c)) {
++            if (setjmp(*b)) {
++                recomp_seh_land(c);
++                goto continuation;
++            }
++        }
+         recomp_call(c, c->eip);
+-    } while (recomp_resumable_stacks && c->eip != GUEST_RETURN_SENTINEL);
++    continuation:;
++    } while (c->eip != GUEST_RETURN_SENTINEL);
++    recomp_seh_frame_orphan(c, seh_mark);
+ }
+ 
+ void recomp_module_register(const RecompModule *m) {
+@@ -148,6 +164,10 @@ int recomp_module_call(X86 *c, uint32_t target) {
      int32_t i = module_index(m, target);
      if (i < 0)
          return 0;
@@ -1637,7 +1672,7 @@ index 06d5e2b..551fe85 100644
  #ifdef RECOMP_NO_HOOKS
      m->base_ptrs[i](c);
  #else
-@@ -156,6 +160,12 @@ int recomp_module_call(X86 *c, uint32_t target) {
+@@ -156,6 +176,12 @@ int recomp_module_call(X86 *c, uint32_t target) {
      else
          m->base_ptrs[i](c);
  #endif
@@ -1650,7 +1685,7 @@ index 06d5e2b..551fe85 100644
      return 1;
  }
  
-@@ -209,7 +219,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
+@@ -209,7 +235,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
      // call through a null pointer faults at the call, and there are no
      // instructions at it to interpret. Reading them would be the very
      // dereference this page exists to refuse.
@@ -3041,7 +3076,7 @@ index d01eb0a..960cfd9 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..5472f57 100644
+index 529d27d..b9c7d48 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
 @@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
@@ -3432,7 +3467,30 @@ index 529d27d..5472f57 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -4742,6 +5065,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -3547,9 +3870,19 @@ void k_RaiseException(X86 *c) {
+             snprintf(b, sizeof b, " %08x", r);
+             frames += b;
+         }
+-        LOGV("RaiseException(code=%08x nargs=%u arg0=%08x) from ret=%08x, frames:%s", arg(c, 0),
+-             arg(c, 2), arg(c, 2) && gm_valid(arg(c, 3), 4) ? rd32(arg(c, 3)) : 0,
+-             rd32(c->r[R_ESP]), frames.c_str());
++        // Language runtimes carry their error detail after the first argument.
++        // Bound diagnostic reads just like the exception record itself.
++        std::string detail;
++        const uint32_t count = std::min(arg(c, 2), 15u), args = arg(c, 3);
++        if (count && gm_valid(args, count * 4)) {
++            for (uint32_t i = 0; i < count; ++i) {
++                char b[16];
++                snprintf(b, sizeof b, " %08x", rd32(args + i * 4));
++                detail += b;
++            }
++        }
++        LOGV("RaiseException(code=%08x nargs=%u args:%s) from ret=%08x, frames:%s", arg(c, 0),
++             arg(c, 2), detail.c_str(), rd32(c->r[R_ESP]), frames.c_str());
+     }
+     if (recomp_seh_raise(c, arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3)))
+         return; // only the testing runtime can return from an unhandled raise
+@@ -4742,6 +5075,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -3441,7 +3499,7 @@ index 529d27d..5472f57 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +5083,13 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4758,6 +5093,13 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
@@ -3455,7 +3513,7 @@ index 529d27d..5472f57 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +5109,9 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4777,6 +5119,9 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
@@ -3465,7 +3523,7 @@ index 529d27d..5472f57 100644
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4785,6 +5120,7 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4785,6 +5130,7 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetModuleHandleA", 1, k_GetModuleHandleA},
      {"KERNEL32.dll", "GetModuleHandleW", 1, k_GetModuleHandleW},
      {"KERNEL32.dll", "LoadLibraryA", 1, k_LoadLibraryA},
@@ -3473,7 +3531,7 @@ index 529d27d..5472f57 100644
      {"KERNEL32.dll", "LoadLibraryW", 1, k_LoadLibraryW},
      {"KERNEL32.dll", "LoadLibraryExW", 3, k_LoadLibraryExW},
      {"KERNEL32.dll", "FreeLibrary", 1, k_FreeLibrary},
-@@ -4935,6 +5271,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -4935,6 +5281,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -4629,6 +4687,96 @@ index d746097..3dc3b0d 100644
  bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names,
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
+diff --git a/runtime/seh.cpp b/runtime/seh.cpp
+index ac94a12..4190ec7 100644
+--- a/runtime/seh.cpp
++++ b/runtime/seh.cpp
+@@ -1,4 +1,4 @@
+-// x86 registration-chain dispatch and host checkpoints for Delphi frames.
++// x86 registration-chain dispatch and host checkpoints for guest SEH frames.
+ #include "seh.h"
+ #include "imports.h"
+ #include "memory.h"
+@@ -117,6 +117,22 @@ void validate_registration(X86 *c, uint32_t reg, uint32_t target) {
+         invalid_chain(c, reg, target, "registration outside guest stack");
+ }
+ 
++// A MOV to FS:[0] can unlink a record before ESP leaves its local variables.
++// Membership, rather than the current stack pointer, determines its lifetime.
++bool chain_contains(X86 *c, uint32_t wanted) {
++    uint32_t reg = chain_head(c), previous = 0;
++    for (uint32_t count = 0; reg != END_CHAIN; ++count) {
++        validate_registration(c, reg, wanted);
++        if (count == MAX_LINKS || (previous && reg <= previous))
++            invalid_chain(c, reg, wanted, "invalid registration order");
++        if (reg == wanted)
++            return true;
++        previous = reg;
++        reg = rd32(reg);
++    }
++    return false;
++}
++
+ // Trivial automatic storage only: a handler can leave this walk by longjmp.
+ struct ChainWalk {
+     uint32_t visited[MAX_LINKS];
+@@ -282,6 +298,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+         if (f->registration < c->r[R_ESP] || chain_head(c) != f->registration)
+             return nullptr;
+         f->orphan = false;
++        f->generation = ++state.generation;
+         f->profile_depth = recomp_profile_depth();
+         f->dispatch_depth = state.dispatches.size();
+         LOGV("SEH adopt: registration=%08x established=%08x EIP=%08x ESP=%08x", f->registration,
+@@ -291,13 +308,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+     return nullptr;
+ }
+ 
++jmp_buf *recomp_seh_frame_adopt_dispatch(X86 *c) {
++    for (size_t i = state.frames.size(); i-- > 0;) {
++        SehFrame *f = state.frames[i];
++        if (f->cpu != c || !f->orphan || f->retired || f->callback_depth != recomp_callback_depth())
++            continue;
++        if (f->registration < c->r[R_ESP] || !chain_contains(c, f->registration))
++            continue;
++        f->orphan = false;
++        f->generation = ++state.generation;
++        f->profile_depth = recomp_profile_depth();
++        LOGV("SEH dispatch adopt: registration=%08x established=%08x EIP=%08x ESP=%08x",
++             f->registration, f->establishing_eip, c->eip, c->r[R_ESP]);
++        return &f->env;
++    }
++    return nullptr;
++}
++
+ void recomp_seh_frame_leave(X86 *c) {
+     recomp_seh_validate_chain(c, "leave", "");
+     bool removed = false;
+     for (size_t i = state.frames.size(); i-- > 0;) {
+         SehFrame *f = state.frames[i];
+-        if (f->cpu == c && f->registration < c->r[R_ESP] &&
+-            (f->callback_depth == recomp_callback_depth() || f->active_landing)) {
++        if (f->cpu == c && (f->callback_depth == recomp_callback_depth() || f->active_landing) &&
++            !chain_contains(c, f->registration)) {
+             LOGV("SEH leave: registration=%08x established=%08x EIP=%08x ESP=%08x", f->registration,
+                  f->establishing_eip, c->eip, c->r[R_ESP]);
+             if (f->active_landing)
+diff --git a/runtime/seh.h b/runtime/seh.h
+index b457d2f..6bba6c4 100644
+--- a/runtime/seh.h
++++ b/runtime/seh.h
+@@ -15,7 +15,10 @@ jmp_buf *recomp_seh_frame_enter(X86 *c);
+ uint64_t recomp_seh_frame_mark(X86 *c);
+ void recomp_seh_frame_orphan(X86 *c, uint64_t mark);
+ jmp_buf *recomp_seh_frame_adopt(X86 *c);
+-/* Drop records below ESP at this callback level; retain active landings. */
++/* The resumable driver adopts surviving records after a generated activation
++ * has returned; setjmp runs on that driver's live host stack. */
++jmp_buf *recomp_seh_frame_adopt_dispatch(X86 *c);
++/* Drop unlinked records at this callback level; retain active landings. */
+ void recomp_seh_frame_leave(X86 *c);
+ void recomp_seh_land(X86 *c);
+ uint32_t recomp_seh_pending_target(void);
 diff --git a/runtime/structured_storage.cpp b/runtime/structured_storage.cpp
 new file mode 100644
 index 0000000..37c89a1
@@ -7384,6 +7532,128 @@ index 7016990..6910a83 100644
      test_preferred_ui_languages();
      test_session_notification_service_unavailable();
      test_buffered_paint_unavailable();
+diff --git a/runtime/tests/seh_tests.cpp b/runtime/tests/seh_tests.cpp
+index 44b24b0..e9020bb 100644
+--- a/runtime/tests/seh_tests.cpp
++++ b/runtime/tests/seh_tests.cpp
+@@ -34,6 +34,9 @@ static uint32_t callback_sp, cleanup_reg, outer_reg;
+ static bool raise_in_cleanup, unknown_sentinel;
+ static void cleanup_block(X86 *c);
+ static void surgery(X86 *c);
++static void yield_establishing(X86 *c);
++static void callee(X86 *c);
++static constexpr uint32_t YIELD_FRAME = LANDING + 64, RESUME_FRAME = LANDING + 80;
+ 
+ static uint32_t invoke(X86 *c, const char *name, std::initializer_list<uint32_t> args) {
+     return guest_call(c, imports_resolve("KERNEL32.dll", name), args.begin(), (int)args.size());
+@@ -117,6 +120,15 @@ extern "C" int32_t recomp_index_of(uint32_t target) {
+     return target == LANDING || target == GUEST_RETURN_SENTINEL ? 0 : -1;
+ }
+ extern "C" void recomp_call(X86 *c, uint32_t target) {
++    if (target == YIELD_FRAME) {
++        yield_establishing(c);
++        return;
++    }
++    if (target == RESUME_FRAME) {
++        callee(c);
++        ++after_raise;
++        return;
++    }
+     if (target == CLEANUP) {
+         cleanup_block(c);
+         return;
+@@ -165,6 +177,24 @@ static void callee(X86 *c) {
+     ++after_raise;
+ }
+ 
++// Model a generated activation that returns to the resumable driver with
++// its guest registration still installed. Its original setjmp is now dead.
++static void yield_establishing(X86 *c) {
++    uint64_t mark = recomp_seh_frame_mark(c);
++    recomp_profile_push(17);
++    c->r[R_ESP] -= 12;
++    registration(c, c->r[R_ESP], 0xffffffff, handler_accept);
++    jmp_buf *b = recomp_seh_frame_enter(c);
++    if (setjmp(*b)) {
++        recomp_seh_land(c);
++        CHECK(false); // the driver must have replaced this returned environment
++        return;
++    }
++    recomp_profile_pop();
++    c->eip = RESUME_FRAME;
++    recomp_seh_frame_orphan(c, mark);
++}
++
+ static void establishing(X86 *c) {
+     c->r[R_ESP] -= 12;
+     registration(c, c->r[R_ESP], 0xffffffff, handler_accept);
+@@ -294,6 +324,44 @@ static void unwind_and_leave() {
+     CHECK(rd32(c.fs_base) == 0xffffffff && recomp_seh_pending_target() == 0);
+ }
+ 
++static void unlink_before_stack_pop() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t outer = c.r[R_ESP] - 12, inner = outer - 12;
++    registration(&c, outer, 0xffffffff, handler_search);
++    recomp_seh_frame_enter(&c);
++    for (unsigned i = 0; i < 3; ++i) {
++        registration(&c, inner, outer, handler_search);
++        recomp_seh_frame_enter(&c);
++        c.r[R_ESP] = inner - 128; // MSVC/VB still have their local stack allocated
++        wr32(c.fs_base, outer);
++        recomp_seh_frame_leave(&c);
++        CHECK(recomp_seh_test_frame_count(&c) == 1);
++        CHECK(c.r[R_ESP] == inner - 128 && rd32(c.fs_base) == outer);
++    }
++    wr32(c.fs_base, 0xffffffff);
++    recomp_seh_frame_leave(&c);
++    CHECK(recomp_seh_test_frame_count(&c) == 0);
++}
++
++static void yielded_frame_landing() {
++    if (!recomp_resumable_stacks)
++        return;
++    X86 c;
++    loader_init_context(&c);
++    clear_observations();
++    landing_runs = after_raise = 0;
++    uint32_t before = c.r[R_ESP], blocks = heap_stats().used_blocks;
++    uint32_t profile_depth = recomp_profile_depth();
++    recomp_run(&c, YIELD_FRAME);
++    CHECK(landing_runs == 1 && after_raise == 0);
++    CHECK(c.r[R_ESP] == before + 4 && c.eip == GUEST_RETURN_SENTINEL);
++    CHECK(recomp_seh_test_frame_count(&c) == 0);
++    CHECK(heap_stats().used_blocks == blocks);
++    CHECK(recomp_profile_depth() == profile_depth);
++    landing_runs = after_raise = 0;
++}
++
+ static void landing() {
+     X86 c;
+     loader_init_context(&c);
+@@ -565,6 +633,12 @@ static void delay_load_return() {
+     c.eip = rd32(c.r[R_ESP]);
+     c.r[R_ESP] += 4;
+     recomp_return(&c);
++    if (recomp_resumable_stacks) {
++        // This mode hands a changed return to the dispatch driver instead
++        // of invoking the tail target inside the pending native caller.
++        CHECK(delay_target_calls == 0 && c.eip == target);
++        recomp_run(&c, c.eip);
++    }
+     CHECK(delay_target_calls == 1);
+     CHECK(c.r[R_EAX] == 46);
+     CHECK(c.r[R_ESP] == original_sp && c.eip == GUEST_RETURN_SENTINEL);
+@@ -670,6 +744,8 @@ int main(int argc, char **argv) {
+     chain_walk();
+     null_call_faults();
+     unwind_and_leave();
++    unlink_before_stack_pop();
++    yielded_frame_landing();
+     landing();
+     adopted_landing();
+     cleanup_landing(false);
 diff --git a/runtime/thunks.cpp b/runtime/thunks.cpp
 index 7ab10c7..e851f42 100644
 --- a/runtime/thunks.cpp
@@ -10364,11 +10634,113 @@ index f569db1..2d0d44d 100644
 +               "00401125  RET\n")
 +    text = translate(listing)
 +    assert "00401105" not in text and "goto L_00401120" not in text
+diff --git a/tools/recomp/tests/test_translate_seh.py b/tools/recomp/tests/test_translate_seh.py
+index e31c835..e0a17a7 100644
+--- a/tools/recomp/tests/test_translate_seh.py
++++ b/tools/recomp/tests/test_translate_seh.py
+@@ -7,7 +7,7 @@ import pytest
+ 
+ from test_translate_driver import synthetic_image
+ from test_translate_driver import translate_entry_fixture
+-from test_translate_insns import Case, T, translate_case
++from test_translate_insns import Case, NoImage, T, translate_case
+ 
+ BASE = 0x0D02A000
+ 
+@@ -141,6 +141,49 @@ def test_other_teb_writes_do_not_create_checkpoints():
+     assert "recomp_seh_" not in translate_case(case)
+ 
+ 
++@pytest.mark.parametrize("variant,checkpoint", [("valid", True), ("changed", False),
++                                               ("other_teb", False), ("branch", False)])
++@pytest.mark.parametrize("resumable", [False, True])
++def test_register_loaded_chain_head_requires_provenance(monkeypatch, variant, checkpoint, resumable):
++    monkeypatch.setattr(T, "RESUMABLE_STACKS", resumable)
++    # VB/MSVC save FS:[0] in EAX before pushing it as the new record's link.
++    # A mutation or alternate entry must not turn a random register into SEH.
++    handler = BASE + 0x100
++    lines, code = [], bytearray()
++
++    def add(text, raw):
++        lines.append((len(code), text))
++        code.extend(bytes.fromhex(raw))
++
++    add("PUSH EBP", "55")
++    if variant != "changed":
++        add("PUSH 0x%x" % handler, (b"\x68" + struct.pack("<I", handler)).hex())
++    if variant == "branch":
++        add("JE 0x%x" % (BASE + len(code) + 8), "7406")
++    add("MOV EAX,dword ptr FS:[0x%x]" % (4 if variant == "other_teb" else 0),
++        "64a1" + struct.pack("<I", 4 if variant == "other_teb" else 0).hex())
++    if variant == "changed":
++        add("XOR EAX,EAX", "31c0")
++        add("PUSH 0x%x" % handler, (b"\x68" + struct.pack("<I", handler)).hex())
++    add("PUSH EAX", "50")
++    add("MOV dword ptr FS:[0x0],ESP", "64892500000000")
++    add("POP EDX", "5a")
++    add("POP ECX", "59")
++    add("POP ECX", "59")
++    add("MOV dword ptr FS:[0x0],EDX", "64891500000000")
++    add("RET", "c3")
++    case = Case("cached_chain", BASE, lines, code.hex())
++    fn = T.Function(BASE, case.name, len(code), T.parse_listing_text(case.listing()))
++    fn.measure(NoImage(case))
++    link_push = next(i for i, ins in enumerate(fn.insns)
++                     if ins.mnem == "PUSH" and ins.ops == ["EAX"])
++    assert T.seh_pushed_chain(fn, link_push, None) == checkpoint
++    text = translate_case(case)
++    assert ("recomp_seh_frame_enter(c)" in text) == checkpoint
++    assert ("recomp_seh_frame_leave(c)" in text) == checkpoint
++    assert ("recomp_seh_frame_orphan(c, seh_scope_)" in text) == (resumable and checkpoint)
++
++
+ @pytest.mark.parametrize("reg,zeroed,checkpoint", [("EDX", True, True), ("EDX", False, False),
+                                                  ("ESP", True, False)])
+ def test_frame_establishment_through_edx_needs_a_zero_base(reg, zeroed, checkpoint):
 diff --git a/tools/recomp/translate.py b/tools/recomp/translate.py
-index 944f2ca..bdef214 100644
+index 944f2ca..7a64cbb 100644
 --- a/tools/recomp/translate.py
 +++ b/tools/recomp/translate.py
-@@ -1336,11 +1336,17 @@ class Image(object):
+@@ -18,6 +18,7 @@ are enabled by the native host, never by the baseline/differential build.
+ """
+ 
+ import argparse
++import io
+ import json
+ import os
+ import re
+@@ -25,6 +26,7 @@ import struct
+ import sys
+ import time
+ from collections import defaultdict
++from contextlib import contextmanager
+ from pathlib import Path
+ from bisect import bisect_right
+ 
+@@ -34,6 +36,22 @@ import game_config  # noqa: E402
+ 
+ FUNCS_PER_CHUNK = 200
+ 
++
++@contextmanager
++def generated_source(path):
++    """Keep unchanged C/header timestamps so regeneration reuses native objects."""
++    output = io.StringIO()
++    yield output
++    text = output.getvalue()
++    try:
++        with open(path) as previous:
++            if previous.read() == text:
++                return
++    except FileNotFoundError:
++        pass
++    with open(path, "w") as destination:
++        destination.write(text)
++
+ # Set by configure(): the game's listings, binary and curated symbols, and the
+ # audited reads of its animation counter (game.toml [translate].volatile_reads:
+ # reads that only select a visual phase or blink, never interpolation,
+@@ -1336,11 +1354,17 @@ class Image(object):
                    "repne": "REPNE", "repnz": "REPNE"}
      #: Mnemonics capstone spells differently from the listing grammar.
      MNEM_ALIAS = {"POPAL": "POPAD", "PUSHAL": "PUSHAD",
@@ -10386,7 +10758,7 @@ index 944f2ca..bdef214 100644
          if mnem.startswith("F") and mnem not in self.X87_INT:
              return {4: "float", 8: "double", 10: "extended double"}.get(nbytes)
          return {1: "byte", 2: "word", 4: "dword", 8: "qword",
-@@ -1369,7 +1375,7 @@ class Image(object):
+@@ -1369,7 +1393,7 @@ class Image(object):
                               else "0x%x" % op.mem.disp)
              inner = " + ".join(parts)
              seg = ci.reg_name(op.mem.segment).upper() if op.mem.segment else ""
@@ -10395,7 +10767,7 @@ index 944f2ca..bdef214 100644
          raise TranslateError("unknown capstone operand type %d" % op.type)
  
      def to_insn(self, ci):
-@@ -1433,6 +1439,7 @@ class Image(object):
+@@ -1433,6 +1457,7 @@ class Image(object):
          self.md.detail = True
          seen = {}
          pending = [start]
@@ -10403,7 +10775,7 @@ index 944f2ca..bdef214 100644
          truncated = False
          while pending and len(seen) < limit:
              va = pending.pop()
-@@ -1452,6 +1459,11 @@ class Image(object):
+@@ -1452,6 +1477,11 @@ class Image(object):
                  if index < len(boundaries) and ci.address + ci.size > boundaries[index]:
                      break  # Do not consume another candidate's first opcode byte.
                  if ci.mnemonic in ("int3", "hlt", "(bad)"):
@@ -10415,7 +10787,7 @@ index 944f2ca..bdef214 100644
                      if bounds is not None:
                          self.md.detail = False
                          return []
-@@ -1467,6 +1479,9 @@ class Image(object):
+@@ -1467,6 +1497,9 @@ class Image(object):
                  if ci.op_str.startswith("0x") and (
                          ci.mnemonic == "jmp" or ci.mnemonic.startswith("j")):
                      t = int(ci.op_str, 16)
@@ -10425,7 +10797,57 @@ index 944f2ca..bdef214 100644
                      if (abs(t - start) <= self.RECOVER_WINDOW and t not in listed
                              and lo <= t < hi and self.is_exec(t)):
                          pending.append(t)
-@@ -1656,6 +1671,42 @@ NORETURN_IMPORTS = frozenset(("RaiseException", "ExitProcess", "TerminateProcess
+@@ -1548,7 +1581,7 @@ TERMINATORS = frozenset(("RET", "JMP"))
+ 
+ 
+ def seh_chain_operand(op, zero_base=0):
+-    """Only the Delphi chain-head spellings, not other fields in the TEB."""
++    """Only the Windows SEH chain head, not other fields in the TEB."""
+     return (op.kind == "mem" and op.size == 32 and op.seg == "FS"
+             and op.base in (None, zero_base) and op.index is None and op.disp == 0)
+ 
+@@ -1594,6 +1627,31 @@ def seh_restore_sites(fn):
+     return result
+ 
+ 
++def seh_pushed_chain(fn, i, zero_base):
++    """Prove PUSH uses FS:[0] directly or an unmodified copy of its head."""
++    op = parse_operand(fn.insns[i].ops[0])
++    if seh_chain_operand(op, zero_base):
++        return True
++    if op.kind != "reg" or op.size != 32 or op.reg == R_ESP:
++        return False
++    targets = {Translator.branch_target(ins) for ins in fn.insns
++               if ins.mnem in JCC or ins.mnem == "JMP"}
++    for j in range(i - 1, max(-1, i - 16), -1):
++        if not fn.contiguous[j] or fn.insns[j + 1].addr in targets:
++            return False
++        ins = fn.insns[j]
++        if ins.mnem == "MOV" and len(ins.ops) == 2:
++            dst, src = [parse_operand(o) for o in ins.ops]
++            if dst.kind == "reg" and dst.reg == op.reg and dst.size == 32:
++                return (seh_chain_operand(src, src.base)
++                        and seh_zero_base(fn, j, src.base))
++        if (ins.mnem not in ("MOV", "LEA", "POP", "PUSH", "ADD", "SUB", "AND", "OR",
++                              "XOR", "TEST", "CMP", "NOP")
++                or Translator.writes_reg32(ins, op.reg)):
++            return False
++    return False
++
++
+ def seh_frame_sites(fn, image=None):
+     """Map establishing MOV/helper CALL indices to their handler addresses."""
+     sites = {}
+@@ -1635,7 +1693,7 @@ def seh_frame_sites(fn, image=None):
+             # register operand can address a different TEB field.
+             zero_base = dst.base if seh_zero_base(fn, i, dst.base) else 0
+             if (not seh_chain_operand(dst, zero_base) or src.kind != "reg" or src.reg != 4
+-                    or src.size != 32 or not seh_chain_operand(parse_operand(push.ops[0]), zero_base)
++                    or src.size != 32 or not seh_pushed_chain(fn, i - 1, zero_base)
+                     or not fn.contiguous[i - 1]):
+                 continue
+             for j in range(i - 2, max(-1, i - 4), -1):
+@@ -1656,6 +1714,42 @@ NORETURN_IMPORTS = frozenset(("RaiseException", "ExitProcess", "TerminateProcess
                                "ExitThread", "FatalAppExitA", "FatalExit"))
  
  
@@ -10468,7 +10890,7 @@ index 944f2ca..bdef214 100644
  def noreturn_callees_from(parsed, iat_names, image=None):
      """Callees that never return, as the listings show them.
  
-@@ -1679,7 +1730,20 @@ def noreturn_callees_from(parsed, iat_names, image=None):
+@@ -1679,7 +1773,20 @@ def noreturn_callees_from(parsed, iat_names, image=None):
  
      returns = {fn.addr for fn in parsed
                 if any(i.mnem == "RET" for i in fn.insns) and not ends_process(fn)}
@@ -10490,7 +10912,7 @@ index 944f2ca..bdef214 100644
      for fn in parsed:
          # A loop that cannot fall out of itself never returns either.
          if Translator.closed_noreturn_loop(fn):
-@@ -1734,6 +1798,7 @@ class Translator(object):
+@@ -1734,6 +1841,7 @@ class Translator(object):
          #: A CALL to one ends its block: the emitter leaves a trap in place of
          #: the fall-through instead of a jump onto the padding that follows.
          self.noreturn_callees = set()
@@ -10498,7 +10920,7 @@ index 944f2ca..bdef214 100644
          self.seh_helpers = set()
          #: Does a pointer to this address name data rather than code? The
          #: driver installs its judgement before the first translation pass
-@@ -2050,9 +2115,9 @@ class Translator(object):
+@@ -2050,9 +2158,9 @@ class Translator(object):
          through the bytes behind the call, and Delphi keeps string literals
          there: Siege of Avalon's single-instance check ends CALL _Halt0 and is
          followed by L"DigitalTomeSiegeOfAvalon", whose 16-bit addressing the
@@ -10511,7 +10933,7 @@ index 944f2ca..bdef214 100644
          (RTL fill routines compute addresses into unrolled code), so a body
          holding one keeps everything. POP reg; JMP reg goes where a
          continuation was pushed, or out of the function.
-@@ -2060,13 +2125,11 @@ class Translator(object):
+@@ -2060,13 +2168,11 @@ class Translator(object):
          if not any(self.never_returns(ins) for ins in fn.insns):
              return set()
          live = self.reached(fn, {fn.addr} | set(entries))
@@ -10530,7 +10952,7 @@ index 944f2ca..bdef214 100644
  
      def reached(self, fn, roots):
          """Indices control flow reaches from `roots` and the pushed
-@@ -2094,6 +2157,9 @@ class Translator(object):
+@@ -2094,6 +2200,9 @@ class Translator(object):
                  t = fn.fallthrough[i]
                  if t in fn.index:
                      work.append(fn.index[t])
@@ -10540,7 +10962,7 @@ index 944f2ca..bdef214 100644
                  continue
              work.extend(j for j in self.successors(fn, i) if j is not None)
          return live
-@@ -2465,11 +2531,9 @@ class Translator(object):
+@@ -2465,11 +2574,9 @@ class Translator(object):
              if target is not None and self.image.is_exec(target):
                  self.unlisted_targets.add(target)
              return
@@ -10555,10 +10977,48 @@ index 944f2ca..bdef214 100644
              self.unlisted_targets.add(target)
              return
          raise TranslateError(
-@@ -2730,6 +2794,11 @@ class Translator(object):
-             for e in entries:
-                 out.append("void fn_%08x(X86 *c) { body_%08x(c, %s); }"
-                            % (e, fn.addr, hexlit(e)))
+@@ -2608,6 +2715,10 @@ class Translator(object):
+             entries = [e for e in entries if e in fn.index]
+         fn.return_jumps = self.popped_return_jumps(fn, entries)
+         fn.seh_escapes = self.seh_escaping_returns(fn)
++        seh_scope = RESUMABLE_STACKS and (fn.seh_sites or any(
++            ins.mnem == "CALL" and self.branch_target(ins) in self.seh_helpers
++            for ins in fn.insns))
++        shared_body = bool(entries or seh_scope)
+         if self.opts.eager_flags:
+             live_out = [ALL_FLAGS] * len(fn.insns)
+         else:
+@@ -2664,7 +2775,7 @@ class Translator(object):
+         if head:
+             labels.add(fn.addr)
+         prologue = 0                 # lines before the first instruction
+-        if entries:
++        if shared_body:
+             out.append("static void body_%08x(X86 *c, uint32_t entry_) {" % fn.addr)
+             if fn.seh_escapes:
+                 out.append("    uint64_t seh_mark_ = recomp_seh_frame_mark(c);")
+@@ -2725,11 +2836,24 @@ class Translator(object):
+                     "was %s" % (fn.addr, fn.insns[0].addr,
+                                 " | ".join(l.strip() for l in out[:prologue])))
+         out.append("}")
+-        if entries:
+-            out.append("void fn_%08x(X86 *c) { body_%08x(c, 0u); }" % (fn.addr, fn.addr))
+-            for e in entries:
+-                out.append("void fn_%08x(X86 *c) { body_%08x(c, %s); }"
+-                           % (e, fn.addr, hexlit(e)))
++        if shared_body:
++            for e, entry in [(fn.addr, "0u")] + [(e, hexlit(e)) for e in entries]:
++                if seh_scope:
++                    # A mismatched CALL return can end this C activation with
++                    # an installed guest record. The driver must adopt it
++                    # before using its continuation, not retain this dead env.
++                    out.extend(["void fn_%08x(X86 *c) {" % e,
++                                "    uint64_t seh_scope_ = recomp_seh_frame_mark(c);",
++                                "    body_%08x(c, %s);" % (fn.addr, entry),
++                                "    recomp_seh_frame_orphan(c, seh_scope_);", "}"])
++                else:
++                    out.append("void fn_%08x(X86 *c) { body_%08x(c, %s); }"
++                               % (e, fn.addr, entry))
 +        emitted = "\n".join(out)
 +        defined = set(re.findall(r"\b(L_[0-9a-f]{8}):", emitted))
 +        referenced = set(re.findall(r"\bgoto (L_[0-9a-f]{8})\b", emitted))
@@ -10567,7 +11027,7 @@ index 944f2ca..bdef214 100644
          return out
  
      # ---- helpers used by emit -------------------------------------------
-@@ -3202,6 +3271,9 @@ class Translator(object):
+@@ -3202,6 +3326,9 @@ class Translator(object):
                      L.append("{ jmp_buf *b_ = recomp_seh_frame_adopt(c); "
                               "if (b_) { if (setjmp(*b_)) { recomp_seh_land(c); return; } } }")
                  if t in self.noreturn_callees:
@@ -10577,7 +11037,7 @@ index 944f2ca..bdef214 100644
                      # The callee throws or exits; what follows is padding and
                      # tables, never code.  Reaching this line means it came
                      # back after all, which the runtime then reports by address.
-@@ -4186,6 +4258,7 @@ def main():
+@@ -4186,6 +4313,7 @@ def main():
      rejected = set()
      tr = Translator(image, all_addrs, args)
      tr.noreturn_callees = image.noreturn_callees
@@ -10585,7 +11045,7 @@ index 944f2ca..bdef214 100644
  
      if args.check_flags:
          for fn in parsed:
-@@ -4426,8 +4499,8 @@ def main():
+@@ -4426,8 +4554,8 @@ def main():
          own_interior = home is not None and t in home.addrs
          independent = why != "branch" or protected_source(home)
          if (t in scan_aliases and t in owner
@@ -10596,7 +11056,7 @@ index 944f2ca..bdef214 100644
          if not own_interior and independent:
              remember_candidate(t)
          entry_strength[t] = strength
-@@ -4968,7 +5041,10 @@ def main():
+@@ -4968,7 +5096,10 @@ def main():
                              dst = parse_operand(ins.ops[0])
                          except TranslateError:
                              continue
@@ -10608,7 +11068,7 @@ index 944f2ca..bdef214 100644
                              continue
                      immediates.add(src.imm)
              # Collect all scan candidates against the settled protected code
-@@ -5020,6 +5096,20 @@ def main():
+@@ -5020,6 +5151,20 @@ def main():
                  # boundary. In particular, a bare pointer to its RET must not
                  # withdraw the method by stopping it one instruction early.
                  scan_aliases.update(fn.addrs & guesses)
@@ -10629,7 +11089,31 @@ index 944f2ca..bdef214 100644
                  for i, ins in enumerate(probe):
                      end = fn.fallthrough[i] or ins.addr + 1
                      weaker_interiors.update(a for a in range(ins.addr + 1, end) if a in guesses)
-@@ -5792,6 +5882,7 @@ def main():
+@@ -5680,7 +5825,7 @@ def main():
+                              ", ".join("%08x" % a for a in missing_patches))
+ 
+     # funcs.h ---------------------------------------------------------------
+-    with open(os.path.join(args.out, "funcs.h"), "w") as fh:
++    with generated_source(os.path.join(args.out, "funcs.h")) as fh:
+         fh.write("/* generated by tools/recomp/translate.py -- do not edit */\n")
+         fh.write("#ifndef RECOMP_FUNCS_H\n#define RECOMP_FUNCS_H\n")
+         fh.write('#include "x86.h"\n#include "intrinsics.h"\n#include "seh.h"\n')
+@@ -5730,7 +5875,7 @@ def main():
+     for start in range(0, len(ok), FUNCS_PER_CHUNK):
+         group = ok[start:start + FUNCS_PER_CHUNK]
+         path = os.path.join(args.out, "chunk_%03d.c" % nchunk)
+-        with open(path, "w") as fh:
++        with generated_source(path) as fh:
+             fh.write("/* generated by tools/recomp/translate.py -- do not edit */\n")
+             fh.write('#include "funcs.h"\n\n')
+             for fn in group:
+@@ -5787,11 +5932,12 @@ def main():
+ 
+     # table.c ---------------------------------------------------------------
+     P = SYMBOL_PREFIX
+-    with open(os.path.join(args.out, "table.c"), "w") as fh:
++    with generated_source(os.path.join(args.out, "table.c")) as fh:
+         fh.write("/* generated by tools/recomp/translate.py -- do not edit */\n")
          fh.write('#include <stdio.h>\n#include <stdlib.h>\n#include "funcs.h"\n#include "thunks.h"\n'
                   '#include "discovery.h"\n#include "interp.h"\n\n')
          if AUX_MODULE is None:
@@ -10637,7 +11121,7 @@ index 944f2ca..bdef214 100644
              fh.write("/* Baseline and differential hosts retain exact guest timing. */\n"
                       "__attribute__((weak)) uint32_t recomp_visual_animation_tick(uint32_t tick) { return tick; }\n\n")
          fh.write("const uint32_t %sfunc_addrs[] = {\n" % P)
-@@ -5988,7 +6079,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
+@@ -5988,7 +6134,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
       * --discovered, then let the interpreter carry the run past the gap so
       * one run can report every gap it reaches rather than the first. */
      discovery_note("jump", target, c->eip);
