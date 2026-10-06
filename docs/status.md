@@ -17,7 +17,7 @@ player visibly moves and appears again after loading a saved game.
 Both games write their own save formats (.zsg and .fcg) and return to their
 game scenes through Load without missing imports, unknown transfers, VB errors
 or native faults. The latest completed save/load runs presented 2,055 frames
-for Cult and 2,510 for Cult II. These are bounded tests of particular paths,
+for Cult and 2,509 for Cult II. These are bounded tests of particular paths,
 not complete gameplay verification or original-save compatibility tests.
 Cult's stronger test now verifies movement from (267,60) to (267,90), then
 restoration to (267,60), with fresh saves before and after loading matching
@@ -114,7 +114,14 @@ Cult II's save/load name visibly legible in the native host and browser.
 The repaint exposed an unsupported GetWindowTextA call; the browser then aborted
 on Load. Its implementation now delivers WM_GETTEXT with encoding conversion,
 and both native Windows movement/save/load tests pass without missing imports,
-unknown transfers or runtime errors. The browser rebuild is awaiting verification.
+unknown transfers or runtime errors. All Windows, Linux, browser and Android
+packages are rebuilt with these text changes. Cult II creates a fresh browser
+save (P4) and loads it from the in-game menu, returning to its street scene.
+Loading either P4 or the older R6R6 save from the startup menu aborts: the trace
+raises a guest exception before opening the save, then cannot find a live unwind
+checkpoint. The exported R6R6 save is intact and loads from the Windows diagnostic
+host's startup menu with no missing imports or runtime fault. The browser path
+requires further investigation; the missing GetWindowTextA was not its only cause.
 Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
@@ -125,14 +132,16 @@ skips, including file overlay, version/image resources, timing fixtures and
 translation metadata contracts; it is not a full pass. Its window-model checks
 pass.
 The current Windows/Linux player packages include these fixes. The latest
-20-second Windows launcher probes render and exit cleanly, but their audio
+five-second Windows launcher probes render and exit cleanly, but their audio
 devices report no default playback device even with DirectSound, so these runs
 capture no PCM. Earlier nonzero device-audio results above remain historical
 evidence, and audible output is still unverified.
-The rebuilt Linux players pass bounded startup with nonzero device PCM: Cult
-has 118,569 frames in five seconds, and Cult II has 944,947 frames in twenty
-seconds, both peaking at 17,341 PCM16. The initial five-second Cult II run has
-buffered PCM with a zero peak and is preserved separately.
+The rebuilt Linux players pass twenty-second startup with nonzero device PCM:
+Cult has 933,435 frames, and Cult II has 943,508 frames, both peaking at 17,341
+PCM16. An initial Cult II run during concurrent compilation records late audio
+pulls; repeating it after linking finishes records zero late or starved pulls.
+The initial five-second menu-only Cult II run has buffered PCM with a zero peak
+and is preserved separately.
 Windows-hosted Android
 NDK r30, API 36 revision 2 and Build Tools 37.0.0 are staged under ignored
 build/toolchains/android-sdk/. Their archives matched pinned upstream checksums;
@@ -151,7 +160,7 @@ responsive, but its Vulkan device lacks dynamic rendering. The installed Cult
 II build falls back to the launcher and reports no GPU device; it does not reach
 gameplay. This owned test emulator was stopped after logs were captured.
 Both Android ARM64 APKs have now been rebuilt and packaged with the child-window
-fixes. The package checks verify the native ELF ABI and named runtime resources;
+and control-text fixes. The package checks verify the native ELF ABI and named runtime resources;
 they do not verify device gameplay.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
@@ -174,7 +183,8 @@ it does not verify SDL display or audio devices.
 
 The latest selected native contracts pass:
 
-- Graphics: **202 checks, zero failures**, including requested-depth bitmap
+- Graphics: **220 checks, zero failures**, including control text delivery and
+  retrieval, child/sibling stacking and clipping, requested-depth bitmap
   downloads with guard bytes, orientation, scan ranges, background erasure,
   partial update clipping, hidden child DCs and cropped DIB orientation.
 - Loader/startup: **487 checks, zero failures, one resource-related skip**.

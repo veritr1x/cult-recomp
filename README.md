@@ -213,9 +213,11 @@ language screens through WebGPU and initialize the packaged MIDI bank. A runtime
 mouse-state fix lets ordinary Play clicks start both games. Keyboard input reaches
 the opening scenes and advances their conversations. Both initial menus and
 Cult II's in-game menu now render correctly. Its browser save-name field is
-legible after the text repaint fix. That build exposed a missing GetWindowTextA
-call while loading; a tested implementation is being propagated to the browser
-packages. Browser save/load and full gameplay remain unverified. The guest arena extends
+legible after the text repaint fix. GetWindowTextA is implemented in all rebuilt
+packages. Cult II writes a fresh browser save and loads it from the in-game menu.
+Loading either tested save from the startup menu still aborts during guest
+exception handling; the older browser save loads in the Windows diagnostic host.
+Full browser gameplay remains unverified. The guest arena extends
 to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
 cross-origin isolated page and a WebGPU-capable browser.
