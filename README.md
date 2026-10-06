@@ -39,6 +39,32 @@ the tested settings under WSL while preserving explicit overrides.
 The deadline requested was 6 October 2026; an all-platform playable release by
 that date cannot be promised from the current state.
 
+## Play the current local builds
+
+From this repository on Windows, run either generated launcher:
+
+```powershell
+.\build\player\windows\CultRecomp\Play.cmd
+.\build\player\windows\Cult2Recomp\Play.cmd
+```
+
+From Ubuntu/WSL, run `./build/player/linux/CultRecomp/Play.sh` or
+`./build/player/linux/Cult2Recomp/Play.sh`.
+Select English, choose Play, and use arrows and Enter in the menus.
+Arrows move in the game, Space advances conversations, and Escape opens
+the in-game menu. Saves stay in each player's `profile/` folder.
+
+The browser players are served locally at `http://localhost:8086/` during
+development. To restart the server from PowerShell:
+
+```powershell
+.venv\Scripts\python.exe kit\tools\web_launcher.py --game-dir "$PWD\games\cult" --game-dir "$PWD\games\cult2" --out "$PWD\build\player\web" --serve 8086
+```
+
+The browser requires WebGPU and the server's isolation headers. The current
+browser checks cover opening scenes, menu input and Cult II save/load. Held-key
+movement and later gameplay remain unverified in the browser.
+
 RecompKit is pinned as the `kit/` submodule to
 `eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.
 The local submodule carries the port patch in `patches/recomp-kit-vb5.patch`

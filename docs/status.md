@@ -186,6 +186,10 @@ be verified. Escape opens its in-game menu, keyboard navigation reaches Save,
 and a fresh A.fcg reaches GAME SAVED. Exporting through the local player's save
 manager yields a 124-byte A.fcg identical to the loaded P4.fcg. A single Right
 tap did not change its coordinates; browser movement is not established.
+Fresh browser checks after narrowing the target also restore A from the startup
+Load menu with the street and inventory intact. Cult reaches New Game and its
+player changes facing after direction input. Browser automation sends brief taps;
+held movement awaits the user's check. Neither run establishes a complete playthrough.
 Both Windows diagnostics now repeat movement/save/load with the timer corrections:
 2,055 frames for Cult and 2,509 for Cult II. The fresh Linux runs also pass:
 2,055 and 2,510 frames respectively, restoring identical saves. Cult moves
