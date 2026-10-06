@@ -1,11 +1,13 @@
 """Assemble private browser players and local test inputs without publishing them."""
 
 import hashlib
+import html
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -47,6 +49,17 @@ def main():
         command += ["--game-dir", str(ROOT / "games" / game), "--web-build",
                     f"{game}={ROOT / 'games' / game / 'build/web/recomp'}"]
     subprocess.run(command, check=True)
+    template = (ROOT / "kit/web/player/index.html").read_text()
+    for game in GAMES:
+        page = out / game / "index.html"
+        config = tomllib.loads((ROOT / "games" / game / "game.toml").read_text())["game"]
+        text = template.replace("@APP@", config["app_name"]).replace("@TITLE@", html.escape(config["name"]))
+        # Match the desktop launchers' tested runtime settings for ordinary URLs.
+        text = text.replace("const m = Module;", 'const m = Module;\n      m.ENV.RECOMP_NO_MODS = "1";')
+        page.write_text(text.replace(
+            "Click the game to focus keyboard input.",
+            "Click the game, then use keyboard arrows to move. Enter / Space: interact. Esc: menu."),
+            newline="\n")
     objcopy = (ROOT / "build/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/llvm-objcopy.exe"
                if os.name == "nt" else ROOT / "build/toolchains/emsdk/upstream/bin/llvm-objcopy")
     diagnostics = out / "_diagnostic"
@@ -61,7 +74,7 @@ def main():
             raise ValueError(f"{game}: stripping debug metadata changed executable sections")
         records.append({"game": game, "source_bytes": source.stat().st_size,
                         "player_bytes": target.stat().st_size, "executable_sections_unchanged": True,
-                        "browser_gameplay_verified": False})
+                        "full_playthrough_verified": False})
         with zipfile.ZipFile(diagnostics / (game + ".zip"), "w", zipfile.ZIP_DEFLATED) as archive:
             install = ROOT / "games" / game / "original/install"
             for path in sorted(install.rglob("*")):
@@ -73,7 +86,8 @@ def main():
     (out / "README.txt").write_text(
         "Experimental private browser players. No external publication.\n"
         "The _diagnostic ZIPs contain copies of your supplied game data.\n"
-        "Keep this folder private. Browser gameplay remains unverified.\n"
+        "Keep this folder private. Full playthroughs have not been validated.\n"
+        "Click the game, then use keyboard arrows, Enter / Space and Escape.\n"
         "Serve with kit/tools/web_launcher.py --game-dir <absolute cult dir> "
         "--game-dir <absolute cult2 dir> --out <this folder> --serve 8086.\n",
         newline="\n")

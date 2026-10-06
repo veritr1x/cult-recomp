@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..c5e323e 100644
+index 20fdc15..3a6af63 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,173 @@
+@@ -2,6 +2,176 @@
  
  ## Unreleased
  
++- Show a keyboard focus hint in browser players. Diagnose host key transitions
++  and the first key-state query in each state with `RECOMP_TRACE_KEYS=1`.
++
 +- Build Android x86_64 APKs with `--android-abi x86_64` for native emulator
 +  testing. Keep their CMake and Gradle output separate from ARM64, and package
 +  the configured ABI rather than silently labeling every library ARM64.
@@ -8667,7 +8670,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..6be7cca 100644
+index 2ef5486..3a7b0ca 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -8728,7 +8731,7 @@ index 2ef5486..6be7cca 100644
  }
  
  } // namespace user32
-@@ -147,12 +170,19 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
+@@ -147,11 +170,21 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
          win->w = w;
          win->h = h;
          win->update_pending = true;
@@ -8737,18 +8740,21 @@ index 2ef5486..6be7cca 100644
      }
  }
  void host_set_key_state(int vk, bool down) {
-     if (vk >= 0 && vk < 256)
+-    if (vk >= 0 && vk < 256)
++    if (vk >= 0 && vk < 256) {
++        if ((g_key_state[vk] != 0) != down && recomp_env("TRACE_KEYS"))
++            LOGW("KEY host state: vk=%02x down=%d", vk, int(down));
          g_key_state[vk] = down ? 0x80 : 0x00;
- }
++    }
++}
 +void host_reset_message_key_state() {
 +    // Focus loss invalidates every receiving thread's snapshot. Host input
 +    // mutations hold the guest baton, so this generation needs no host lock.
 +    ++g_message_key_generation;
-+}
+ }
  void host_set_cursor_pos(int32_t x, int32_t y) {
      g_cursor_x = x;
-     g_cursor_y = y;
-@@ -163,6 +193,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
+@@ -163,6 +196,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
      host_set_cursor_pos(int32_t(uint32_t(x) + uint32_t(origin_x)),
                          int32_t(uint32_t(y) + uint32_t(origin_y)));
  }
@@ -8767,7 +8773,7 @@ index 2ef5486..6be7cca 100644
  void host_set_message_waiter(bool (*fn)()) {
      g_message_waiter = fn;
  }
-@@ -198,8 +240,107 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
+@@ -198,8 +243,107 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
      return guest_call(c, proc, hwnd, msg, wparam, lparam);
  }
  
@@ -8875,7 +8881,7 @@ index 2ef5486..6be7cca 100644
  // ---------------------------------------------------------------------------
  // Classes and windows
  // ---------------------------------------------------------------------------
-@@ -358,6 +499,8 @@ void create_window_body(X86 *c, bool wide) {
+@@ -358,6 +502,8 @@ void create_window_body(X86 *c, bool wide) {
              nw->visible = true;
              nw->shown = true;
              nw->update_pending = true;
@@ -8884,7 +8890,7 @@ index 2ef5486..6be7cca 100644
              if (g_window_shown)
                  g_window_shown(hwnd);
          }
-@@ -383,13 +526,15 @@ void u_DestroyWindow(X86 *c) {
+@@ -383,13 +529,15 @@ void u_DestroyWindow(X86 *c) {
      set_eax(c, destroy_window(c, arg(c, 0)));
  }
  
@@ -8904,7 +8910,7 @@ index 2ef5486..6be7cca 100644
      if (!w->shown) {
          w->shown = true;
          post_geometry(w->hwnd, w, false, true);
-@@ -427,6 +572,11 @@ void u_ShowWindow(X86 *c) {
+@@ -427,6 +575,11 @@ void u_ShowWindow(X86 *c) {
      set_eax(c, was ? 1 : 0);
      if (!was && w->visible)
          became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
@@ -8916,7 +8922,7 @@ index 2ef5486..6be7cca 100644
  }
  
  // UpdateWindow sends WM_PAINT directly to the window procedure, synchronously,
-@@ -467,7 +617,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -467,7 +620,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
          w->w = cx;
          w->h = cy;
          if (!(flags & 0x0008)) // SWP_NOREDRAW
@@ -8925,7 +8931,7 @@ index 2ef5486..6be7cca 100644
      } // SWP_NOSIZE
      LOGV("SetWindowPos(%08x): %dx%d at %d,%d, flags=%08x changed=%d/%d", w->hwnd, w->w, w->h, w->x,
           w->y, flags, moved, sized);
-@@ -481,6 +631,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -481,6 +634,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
      } else if ((flags & 0x0080) && w->visible) {
          w->visible = false;
          w->style &= ~WS_VISIBLE;
@@ -8937,7 +8943,7 @@ index 2ef5486..6be7cca 100644
      }
      if (moved || sized) {
          // SetWindowPos sends this before returning. VCL updates its cached
-@@ -506,6 +661,21 @@ void u_SetWindowPos(X86 *c) {
+@@ -506,6 +664,21 @@ void u_SetWindowPos(X86 *c) {
                         int32_t(arg(c, 5)), arg(c, 6));
      set_eax(c, 1);
  }
@@ -8959,7 +8965,7 @@ index 2ef5486..6be7cca 100644
  // The bounds a window had before a display took it over, by handle.
  std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
      static std::map<uint32_t, std::array<int32_t, 4>> m;
-@@ -572,6 +742,9 @@ void u_AdjustWindowRectEx(X86 *c) {
+@@ -572,6 +745,9 @@ void u_AdjustWindowRectEx(X86 *c) {
  void u_ScreenToClient(X86 *c) {
      Window *w = find_window(arg(c, 0));
      uint32_t p = arg(c, 1);
@@ -8969,7 +8975,7 @@ index 2ef5486..6be7cca 100644
      if (p && w) {
          LOGV("ScreenToClient(%08x): (%d,%d) through a window at %d,%d", arg(c, 0), (int32_t)rd32(p),
               (int32_t)rd32(p + 4), w->x, w->y);
-@@ -617,12 +790,19 @@ void u_SetRect(X86 *c) {
+@@ -617,12 +793,19 @@ void u_SetRect(X86 *c) {
  // A null hwnd invalidates every window, which is what Windows does.
  void u_InvalidateRect(X86 *c) {
      uint32_t hwnd = arg(c, 0);
@@ -8993,7 +8999,7 @@ index 2ef5486..6be7cca 100644
      set_eax(c, 1);
  }
  
-@@ -747,10 +927,13 @@ void u_GetWindowLongA(X86 *c) {
+@@ -747,10 +930,13 @@ void u_GetWindowLongA(X86 *c) {
  }
  
  void u_SetWindowTextA(X86 *c) {
@@ -9011,7 +9017,7 @@ index 2ef5486..6be7cca 100644
  }
  
  void u_SetDlgItemTextA(X86 *c) {
-@@ -813,6 +996,27 @@ bool paint_pending() {
+@@ -813,6 +999,27 @@ bool paint_pending() {
      return pending_paint(0, 0, 0, 0);
  }
  
@@ -9039,7 +9045,7 @@ index 2ef5486..6be7cca 100644
  void peek_message(X86 *c) {
      // The game's message loop is PeekMessageA and nothing else: it never calls
      // GetMessageA, so anything hung off that one never runs. Windows services
-@@ -826,17 +1030,7 @@ void peek_message(X86 *c) {
+@@ -826,17 +1033,7 @@ void peek_message(X86 *c) {
      gdi_present_windows();
      uint32_t p = arg(c, 0), filter_hwnd = arg(c, 1);
      uint32_t min_msg = arg(c, 2), max_msg = arg(c, 3), flags = arg(c, 4);
@@ -9058,7 +9064,7 @@ index 2ef5486..6be7cca 100644
  }
  
  // GetMessage blocks until a message arrives. The runtime cannot block on its
-@@ -863,18 +1057,8 @@ void u_GetMessageA(X86 *c) {
+@@ -863,18 +1060,8 @@ void u_GetMessageA(X86 *c) {
          pump_window_timers();
          pump_mouse_input(c);
          gdi_present_windows();
@@ -9079,7 +9085,7 @@ index 2ef5486..6be7cca 100644
              return;
          }
          host_pump_timers(c);
-@@ -911,6 +1095,15 @@ void u_TranslateMessage(X86 *c) {
+@@ -911,6 +1098,15 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
@@ -9095,7 +9101,7 @@ index 2ef5486..6be7cca 100644
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
          uint32_t ch = 0;
          if (vk >= 0x30 && vk <= 0x5a)
-@@ -943,6 +1136,12 @@ void dispatch_message(X86 *c) {
+@@ -943,6 +1139,12 @@ void dispatch_message(X86 *c) {
      }
      uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
      uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
@@ -9108,7 +9114,7 @@ index 2ef5486..6be7cca 100644
      if (msg == 0x113 && lp)
          set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
      else
-@@ -969,6 +1168,16 @@ void u_PostMessageA(X86 *c) {
+@@ -969,6 +1171,16 @@ void u_PostMessageA(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -9125,7 +9131,7 @@ index 2ef5486..6be7cca 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1200,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -991,9 +1203,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -9149,7 +9155,7 @@ index 2ef5486..6be7cca 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1236,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1015,8 +1239,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -9168,7 +9174,7 @@ index 2ef5486..6be7cca 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1280,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1050,20 +1283,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -9207,7 +9213,7 @@ index 2ef5486..6be7cca 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1466,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1226,8 +1469,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -9219,7 +9225,7 @@ index 2ef5486..6be7cca 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1477,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1235,15 +1480,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -9269,7 +9275,7 @@ index 2ef5486..6be7cca 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,20 +1538,39 @@ void u_DestroyIcon(X86 *c) {
+@@ -1268,20 +1541,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -9310,7 +9316,26 @@ index 2ef5486..6be7cca 100644
      if (p) {
          wr32(p, (uint32_t)g_cursor_x);
          wr32(p + 4, (uint32_t)g_cursor_y);
-@@ -1300,7 +1589,11 @@ void u_GetAsyncKeyState(X86 *c) {
+@@ -1294,13 +1586,31 @@ void u_GetMessagePos(X86 *c) {
+ void u_GetMessageTime(X86 *c) {
+     set_eax(c, last_message.time);
+ }
++// Record the first poll in each state without flooding the game's timer loop.
++static void trace_key_query(X86 *c, uint32_t vk, bool down, bool async) {
++    if (vk < 256 && recomp_env("TRACE_KEYS")) {
++        static thread_local uint8_t seen[2][256] = {};
++        const uint8_t bit = down ? 2 : 1;
++        if (!(seen[async][vk] & bit)) {
++            seen[async][vk] |= bit;
++            LOGW("KEY %s query: vk=%02x down=%d caller=%08x", async ? "async" : "message", vk,
++                 int(down), rd32(c->r[R_ESP]));
++        }
++    }
++}
+ void u_GetAsyncKeyState(X86 *c) {
+     uint32_t vk = arg(c, 0);
++    trace_key_query(c, vk, vk < 256 && g_key_state[vk], true);
+     set_eax(c, vk < 256 && g_key_state[vk] ? 0x8000 : 0);
  }
  void u_GetKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
@@ -9319,11 +9344,12 @@ index 2ef5486..6be7cca 100644
 +    bool down = vk < 256 && g_key_state[vk];
 +    if (mouse_bit && g_mouse_key_generation == g_message_key_generation)
 +        down = (g_message_mouse_buttons & mouse_bit) != 0;
++    trace_key_query(c, vk, down, false);
 +    set_eax(c, down ? 0xff80 : 0);
  }
  void u_ShowCursor(X86 *c) {
      g_cursor_show += arg(c, 0) ? 1 : -1;
-@@ -1398,6 +1691,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1398,6 +1708,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -9342,7 +9368,7 @@ index 2ef5486..6be7cca 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +2000,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +2017,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -9350,7 +9376,7 @@ index 2ef5486..6be7cca 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1707,6 +2013,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1707,6 +2030,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "SetWindowLongA", 3, u_SetWindowLongA},
      {"USER32.dll", "GetWindowLongA", 2, u_GetWindowLongA},
      {"USER32.dll", "SetWindowTextA", 2, u_SetWindowTextA},
@@ -9358,7 +9384,7 @@ index 2ef5486..6be7cca 100644
      {"USER32.dll", "SetDlgItemTextA", 3, u_SetDlgItemTextA},
      {"USER32.dll", "CreateDialogParamA", 5, u_CreateDialogParamA},
      {"USER32.dll", "PeekMessageA", 5, u_PeekMessageA},
-@@ -1716,15 +2023,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1716,15 +2040,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -9377,7 +9403,7 @@ index 2ef5486..6be7cca 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +2051,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1741,6 +2068,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -12367,3 +12393,21 @@ index f94a129..c25c6b6 100644
  @pytest.mark.parametrize("system", ["Linux", "Windows"])
  def test_video_libraries_and_notice(tmp_path, monkeypatch, system):
      exe = tmp_path / "recomp_app"
+diff --git a/web/player/index.html b/web/player/index.html
+index 66254e1..e8f0cf2 100644
+--- a/web/player/index.html
++++ b/web/player/index.html
+@@ -15,10 +15,13 @@
+   #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+             text-align: center; padding: 0 16px; white-space: pre-line; pointer-events: none; }
+   #status a { pointer-events: auto; color: #8cf; }
++  #keyboard-hint { position: fixed; bottom: 10px; left: 12px; right: 12px; text-align: center;
++                   color: #bbb; font-size: 12px; pointer-events: none; }
+ </style>
+ </head>
+ <body>
+ <canvas id="canvas" tabindex="-1"></canvas>
++<div id="keyboard-hint">Click the game to focus keyboard input.</div>
+ <div id="status">Loading…</div>
+ <script>
+ "use strict";

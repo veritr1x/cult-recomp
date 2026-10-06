@@ -1,10 +1,10 @@
 # Status: 6 October 2026
 
-The requested playable ports are **not complete**. Both games and four supplied
-libraries have been statically translated with RecompKit and compiled for
-Windows x64. Both Linux x86_64 diagnostic executables also build and pass
-the bounded movement/save/load path under Ubuntu in WSL. Runtime x86
-interpretation is disabled; a completed translation does not prove gameplay coverage.
+Local builds are available for the requested Windows x64, Linux x86_64 and
+WebGPU browser targets. Both games and four supplied libraries are statically
+translated with RecompKit. Runtime x86 interpretation is disabled. Windows and
+Linux pass bounded movement/save/load checks, and the user confirms held-key
+movement in both browser games. Full playthroughs remain unverified.
 
 The user narrowed the immediate target to Windows, Linux and browser.
 Apple ports and physical Android verification are deferred. Android emulator
@@ -189,7 +189,16 @@ tap did not change its coordinates; browser movement is not established.
 Fresh browser checks after narrowing the target also restore A from the startup
 Load menu with the street and inventory intact. Cult reaches New Game and its
 player changes facing after direction input. Browser automation sends brief taps;
-held movement awaits the user's check. Neither run establishes a complete playthrough.
+The user initially reported no movement. `RECOMP_TRACE_KEYS=1` showed mouse
+button activity with no held keyboard arrow; the user then confirmed that
+movement works with the physical Right-arrow key. A fresh browser B.fcg exported
+through Manage / Export saves changes coordinates from A.fcg's (407,160) to
+(477,170), confirming serialized movement. The user also confirms Cult's held
+Down-arrow movement; the captured player visibly advances down the starting
+path. Cult reaches GAME SAVED for fresh D.zsg, and a clean browser reload loads
+D with the same advanced player position. A clean reload of Cult II likewise
+loads B and restores the moved player, street and inventory. Browser players
+now show a keyboard hint. Neither run establishes a complete playthrough.
 Both Windows diagnostics now repeat movement/save/load with the timer corrections:
 2,055 frames for Cult and 2,509 for Cult II. The fresh Linux runs also pass:
 2,055 and 2,510 frames respectively, restoring identical saves. Cult moves

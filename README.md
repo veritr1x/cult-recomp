@@ -1,6 +1,6 @@
 # Cult / Cult II RecompKit bring-up
 
-**Experimental ports: full gameplay and an all-platform release remain incomplete.**
+**Local builds for Windows x64, Linux x86_64 and WebGPU browsers. Full playthroughs remain unverified.**
 Both games contain native x86 code compiled with Visual Basic 5. Their code and
 four supporting libraries are statically translated to C with RecompKit;
 runtime x86 interpretation is disabled.
@@ -61,9 +61,13 @@ development. To restart the server from PowerShell:
 .venv\Scripts\python.exe kit\tools\web_launcher.py --game-dir "$PWD\games\cult" --game-dir "$PWD\games\cult2" --out "$PWD\build\player\web" --serve 8086
 ```
 
-The browser requires WebGPU and the server's isolation headers. The current
-browser checks cover opening scenes, menu input and Cult II save/load. Held-key
-movement and later gameplay remain unverified in the browser.
+The browser requires WebGPU and the server's isolation headers. Click inside
+the game, then use the physical keyboard arrows to move. Mouse buttons do not
+move the character. Cult II's held-key movement is confirmed by the user and
+by a fresh browser save changing coordinates from (407,160) to (477,170).
+The user also confirms Cult's held-key movement down its starting path.
+The current browser checks also cover opening scenes, menu input and save/load
+in both games. Full playthroughs remain unverified.
 
 RecompKit is pinned as the `kit/` submodule to
 `eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.
