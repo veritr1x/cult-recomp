@@ -1,11 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..2c0aff3 100644
+index 20fdc15..8f6b305 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,132 @@
+@@ -2,6 +2,136 @@
  
  ## Unreleased
  
++- Deliver ANSI SetWindowText through WM_SETTEXT so controls update their text,
++  notify their parent and repaint, matching the Unicode entry point.
++  Implement GetWindowTextA through WM_GETTEXT with ANSI/Unicode conversion.
++
 +- Place newly created child windows below existing siblings and clip shared GDI
 +  surfaces against higher siblings when requested by WS_CLIPSIBLINGS, including
 +  siblings that cover an ancestor control.
@@ -5372,7 +5376,7 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..38186e9 100644
+index cf0d171..fd9bd63 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
 @@ -177,6 +177,12 @@ static void test_model() {
@@ -5548,7 +5552,70 @@ index cf0d171..38186e9 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -911,11 +1032,77 @@ static void test_clip_children() {
+@@ -877,9 +998,59 @@ static void test_static_control() {
+     call_import(&c, "USER32.dll", "DestroyWindow", {child});
+     call_import(&c, "USER32.dll", "DestroyWindow", {parent});
+ }
+-// WS_CLIPCHILDREN: a parent's DC leaves its visible children's areas alone,
+-// so a form that repaints does not paint over its controls; a hidden child
+-// is not excluded.
++// SetWindowText must reach the control procedure, not merely its cached title.
++static void test_set_window_text_repaint() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00318000;
++    uint32_t parent = make_test_window(&c, s, 64, 32);
++    gm_put_str(s + 0x900, "EDIT", 16);
++    gm_put_str(s + 0x940, "P1", 16);
++    uint32_t edit =
++        call_import(&c, "USER32.dll", "CreateWindowExA",
++                    {0, s + 0x900, 0, 0x50000000u, 0, 0, 64, 32, parent, 0, IMAGE_BASE, 0});
++    call_import(&c, "USER32.dll", "UpdateWindow", {edit});
++    check(call_import(&c, "USER32.dll", "GetUpdateRect", {edit, 0, 0}) == 0,
++          "blank EDIT starts with a validated paint region");
++    check(call_import(&c, "USER32.dll", "SetWindowTextA", {edit, s + 0x940}) != 0 &&
++              call_import(&c, "USER32.dll", "GetUpdateRect", {edit, 0, 0}) != 0,
++          "SetWindowTextA schedules an EDIT repaint through WM_SETTEXT");
++    call_import(&c, "USER32.dll", "UpdateWindow", {edit});
++    uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {edit});
++    uint32_t ink = 0;
++    for (uint32_t y = 1; y < 17; ++y)
++        for (uint32_t x = 2; x < 18; ++x)
++            ink += call_import(&c, "GDI32.dll", "GetPixel", {dc, x, y}) == 0;
++    check(ink != 0, "ANSI control text changes reach the painted window pixels");
++    call_import(&c, "USER32.dll", "ReleaseDC", {edit, dc});
++    check(call_import(&c, "USER32.dll", "GetWindowTextA", {edit, s + 0xa00, 16}) == 2 &&
++              gm_str(s + 0xa00) == "P1",
++          "GetWindowTextA retrieves text through the control procedure");
++    check(call_import(&c, "USER32.dll", "GetWindowTextA", {edit, s + 0xa00, 2}) == 1 &&
++              gm_str(s + 0xa00) == "P",
++          "GetWindowTextA truncates to capacity minus the terminator");
++    wr8(s + 0xa00, 0x5a);
++    check(call_import(&c, "USER32.dll", "GetWindowTextA", {edit, s + 0xa00, 0}) == 0 &&
++              rd8(s + 0xa00) == 0x5a,
++          "GetWindowTextA leaves a zero-capacity buffer untouched");
++    gm_put_wstr(s + 0x980, "EDIT", 16);
++    uint32_t wide =
++        call_import(&c, "USER32.dll", "CreateWindowExW",
++                    {0, s + 0x980, 0, 0x50000000u, 0, 0, 64, 32, parent, 0, IMAGE_BASE, 0});
++    check(call_import(&c, "USER32.dll", "SetWindowTextA", {wide, s + 0x940}) != 0 &&
++              call_import(&c, "USER32.dll", "GetWindowTextW", {wide, s + 0xa00, 16}) == 2 &&
++              gm_wstr(s + 0xa00) == "P1",
++          "ANSI SetWindowText converts text for a Unicode control");
++    check(call_import(&c, "USER32.dll", "GetWindowTextA", {wide, s + 0xa00, 16}) == 2 &&
++              gm_str(s + 0xa00) == "P1",
++          "GetWindowTextA converts text from a Unicode control");
++    check(call_import(&c, "USER32.dll", "GetWindowTextA", {0xdead, s + 0xa00, 16}) == 0,
++          "GetWindowTextA reports an invalid window as failure");
++    check(call_import(&c, "USER32.dll", "SetWindowTextA", {0xdead, s + 0x940}) == 0,
++          "SetWindowTextA reports an invalid window as failure");
++    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
++}
++// WS_CLIPCHILDREN protects visible child controls from a parent repaint.
+ static void test_clip_children() {
+     X86 c;
+     loader_init_context(&c);
+@@ -911,11 +1082,77 @@ static void test_clip_children() {
      check(pixel(parent, 0, 0) == 0xff && pixel(child, 1, 1) == 0,
            "a WS_CLIPCHILDREN parent paints around its visible child, not over it");
      call_import(&c, "USER32.dll", "ShowWindow", {child, 0});
@@ -5627,7 +5694,7 @@ index cf0d171..38186e9 100644
  // DrawThemeParentBackground: the parent paints into the child's DC, shifted so
  // its own coordinates land on the child, with WM_ERASEBKGND then
  // WM_PRINTCLIENT. It is how a transparent VCL control shows the form behind it.
-@@ -1070,11 +1257,31 @@ static void test_memory_truetype_font() {
+@@ -1070,11 +1307,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -5659,7 +5726,7 @@ index cf0d171..38186e9 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,15 +1331,248 @@ static void test_windows_face_substitute() {
+@@ -1124,15 +1381,248 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -5736,9 +5803,9 @@ index cf0d171..38186e9 100644
 +    call_import(&c, "GDI32.dll", "DeleteDC", {source});
 +    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
 +    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, reader});
-     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
- }
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
 +// A 32-bpp source must fit the caller's 24-bpp row buffer exactly. The
 +// adjacent canary represents the COM object overwritten by the old raw copy.
 +static void test_dib_download_formats() {
@@ -5824,9 +5891,9 @@ index cf0d171..38186e9 100644
 +            red += a == 0x0000ff;
 +        }
 +    check(same && red > 0, "ANSI text leaves visible pixels matching its decoded wide text");
-+    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-+    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
-+}
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
 +// Retained window pixels require a real erase pass; validation and a non-erasing
 +// invalidation must preserve drawings instead of clearing every paint.
 +static void test_background_erasing() {
@@ -5914,7 +5981,7 @@ index cf0d171..38186e9 100644
  int main(int argc, char **argv) {
      mem_init();
      imports_init();
-@@ -1147,8 +1587,15 @@ int main(int argc, char **argv) {
+@@ -1147,8 +1637,16 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -5926,6 +5993,7 @@ index cf0d171..38186e9 100644
 +        test_plain_ansi_text();
          test_static_control();
          test_clip_children();
++        test_set_window_text_repaint();
 +        test_clip_siblings();
          test_draw_theme_parent_background();
          test_draw_theme_text_ex();
@@ -7469,7 +7537,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..e2dc18b 100644
+index 2ef5486..be6a468 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -7795,7 +7863,25 @@ index 2ef5486..e2dc18b 100644
      set_eax(c, 1);
  }
  
-@@ -911,6 +1091,15 @@ void u_TranslateMessage(X86 *c) {
+@@ -747,10 +927,13 @@ void u_GetWindowLongA(X86 *c) {
+ }
+ 
+ void u_SetWindowTextA(X86 *c) {
+-    Window *w = find_window(arg(c, 0));
+-    if (w)
+-        w->title_utf8 = gm_str(arg(c, 1));
+-    set_eax(c, 1);
++    // The control owns text changes, notifications and repainting. Updating
++    // only its cached title bypasses those, leaving EDIT contents invisible.
++    set_eax(c, deliver_message(c, arg(c, 0), 0x000c, 0, arg(c, 1), false));
++}
++
++void u_GetWindowTextA(X86 *c) {
++    set_eax(c, deliver_message(c, arg(c, 0), 0x000d, arg(c, 2), arg(c, 1), false));
+ }
+ 
+ void u_SetDlgItemTextA(X86 *c) {
+@@ -911,6 +1094,15 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
@@ -7811,7 +7897,7 @@ index 2ef5486..e2dc18b 100644
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
          uint32_t ch = 0;
          if (vk >= 0x30 && vk <= 0x5a)
-@@ -943,6 +1132,9 @@ void dispatch_message(X86 *c) {
+@@ -943,6 +1135,9 @@ void dispatch_message(X86 *c) {
      }
      uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
      uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
@@ -7821,7 +7907,7 @@ index 2ef5486..e2dc18b 100644
      if (msg == 0x113 && lp)
          set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
      else
-@@ -969,6 +1161,16 @@ void u_PostMessageA(X86 *c) {
+@@ -969,6 +1164,16 @@ void u_PostMessageA(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -7838,7 +7924,7 @@ index 2ef5486..e2dc18b 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1193,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -991,9 +1196,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -7862,7 +7948,7 @@ index 2ef5486..e2dc18b 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1229,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1015,8 +1232,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -7881,7 +7967,7 @@ index 2ef5486..e2dc18b 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1273,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1050,20 +1276,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -7920,7 +8006,7 @@ index 2ef5486..e2dc18b 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1459,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1226,8 +1462,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -7932,7 +8018,7 @@ index 2ef5486..e2dc18b 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1470,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1235,15 +1473,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -7982,7 +8068,7 @@ index 2ef5486..e2dc18b 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,20 +1531,39 @@ void u_DestroyIcon(X86 *c) {
+@@ -1268,20 +1534,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -8023,7 +8109,7 @@ index 2ef5486..e2dc18b 100644
      if (p) {
          wr32(p, (uint32_t)g_cursor_x);
          wr32(p + 4, (uint32_t)g_cursor_y);
-@@ -1300,7 +1582,11 @@ void u_GetAsyncKeyState(X86 *c) {
+@@ -1300,7 +1585,11 @@ void u_GetAsyncKeyState(X86 *c) {
  }
  void u_GetKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
@@ -8036,7 +8122,7 @@ index 2ef5486..e2dc18b 100644
  }
  void u_ShowCursor(X86 *c) {
      g_cursor_show += arg(c, 0) ? 1 : -1;
-@@ -1398,6 +1684,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1398,6 +1687,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -8055,7 +8141,7 @@ index 2ef5486..e2dc18b 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +1993,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +1996,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -8063,7 +8149,15 @@ index 2ef5486..e2dc18b 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1716,15 +2015,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1707,6 +2009,7 @@ const ImportShim g_user32_shims[] = {
+     {"USER32.dll", "SetWindowLongA", 3, u_SetWindowLongA},
+     {"USER32.dll", "GetWindowLongA", 2, u_GetWindowLongA},
+     {"USER32.dll", "SetWindowTextA", 2, u_SetWindowTextA},
++    {"USER32.dll", "GetWindowTextA", 3, u_GetWindowTextA},
+     {"USER32.dll", "SetDlgItemTextA", 3, u_SetDlgItemTextA},
+     {"USER32.dll", "CreateDialogParamA", 5, u_CreateDialogParamA},
+     {"USER32.dll", "PeekMessageA", 5, u_PeekMessageA},
+@@ -1716,15 +2019,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -8082,7 +8176,7 @@ index 2ef5486..e2dc18b 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +2043,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1741,6 +2047,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},

@@ -103,13 +103,19 @@ Later browser movement/menu input can leave blank or stale frames. The shared
 gray initial-menu rectangles are fixed in both Windows diagnostic hosts: child
 windows now start below existing siblings, showing a child preserves its
 stacking, and WS_CLIPSIBLINGS prevents covered controls from erasing menu pixels.
-The GDI suite passes 209 checks, including child creation/show order and sibling
+The GDI suite passes 220 checks, including child creation/show order and sibling
 clipping through an ancestor. Both menus are visually checked, and both games
 pass fresh movement/save/load round trips with the fix. Both browser builds are
 updated; both main menus and Cult II's in-game Escape menu are visually verified.
 Its browser save screen accepts keyboard input and reaches GAME SAVED; loading
-the selected entry returns to the opening scene. Save-name text is not legible,
-and browser serialization/restoration has not received the native byte comparison.
+the selected entry returned to the opening scene with the menu-only fix.
+SetWindowTextA now reaches the control procedure to notify and repaint, making
+Cult II's save/load name visibly legible in the native host and browser.
+The repaint exposed an unsupported GetWindowTextA call; the browser then aborted
+on Load. Its implementation now delivers WM_GETTEXT with encoding conversion,
+and both native Windows movement/save/load tests pass without missing imports,
+unknown transfers or runtime errors. The browser rebuild is awaiting verification.
+Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
 The four mouse-state regressions pass; the keyboard gate and queued-input checks

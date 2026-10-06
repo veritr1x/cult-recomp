@@ -11,6 +11,9 @@ checks on both systems, including byte-for-byte restoration of serialized state.
 The gray main-menu rectangles are now fixed in both Windows diagnostic hosts;
 new child-window stacking and sibling-clipping checks pass, and fresh
 movement/save/load round trips still succeed for both games.
+Save/load names now repaint through the control procedure, and GetWindowTextA
+retrieves their text. Both Windows diagnostic save tests pass again with no
+missing imports or unknown transfers; 220 GDI checks pass.
 Cult II's player now renders; its inventory icon is temporarily blank after
 loading and returns on the next movement input.
 
@@ -208,10 +211,11 @@ It strips only WebAssembly debug metadata and checks that every executable
 section remains unchanged. Both games import their supplied data, reach their
 language screens through WebGPU and initialize the packaged MIDI bank. A runtime
 mouse-state fix lets ordinary Play clicks start both games. Keyboard input reaches
-the opening scenes and advances their conversations. Later movement/menu input
-can leave blank or stale frames; browser save/load and full gameplay remain
-unverified. Gray rectangles on the initial menu also occur in Windows diagnostic
-frames and need a shared rendering fix. The guest arena extends
+the opening scenes and advances their conversations. Both initial menus and
+Cult II's in-game menu now render correctly. Its browser save-name field is
+legible after the text repaint fix. That build exposed a missing GetWindowTextA
+call while loading; a tested implementation is being propagated to the browser
+packages. Browser save/load and full gameplay remain unverified. The guest arena extends
 to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
 cross-origin isolated page and a WebGPU-capable browser.
