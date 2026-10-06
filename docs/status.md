@@ -25,8 +25,9 @@ byte for byte. Cult II's test likewise verifies movement from (407,160) to
 (437,160), then restoration to (407,160), with fresh saves matching byte for
 byte. Both repeat this test successfully on Linux x86_64 through the desktop
 keyboard gate, with 2,055 frames for Cult and 2,510 for Cult II.
-Cult II's inventory icon is blank immediately after loading and returns
-on the next movement input; the serialized inventory is preserved throughout.
+Earlier Cult II builds left the inventory icon blank after loading until the
+next movement input. The timer and paint corrections below restore it immediately
+in the new Windows and browser checks; the serialized inventory is preserved.
 
 StretchDIBits now converts positive-height source crops from a bottom-up DIB's
 lower-left origin to the bitmap DC's top-left coordinates. Previously Cult II
@@ -140,14 +141,42 @@ and SEH records, while preserving active SEH landings through their checkpoints.
 It passes **365 SEH checks on both Windows and Linux**. Both browser builds now
 include this correction. Cult II's browser startup Load opens P4.fcg and reads
 its 124 bytes, then reports Visual Basic error 5 (invalid procedure call or
-argument) and exits the guest with code zero. The saved scene does not render;
-a successful browser startup Load has not been established. A concise trace
+argument) and exits the guest with code zero. A successful browser startup Load
+has not been established. A concise trace
 preserves the error after verbose import traffic had displaced it from the
 browser console. Import tracing can now be suppressed independently of other
 verbose diagnostics through RECOMP_TRACE_IMPORTS=0. A bounded ReadFile byte
 trace confirms that all 124 browser input bytes equal the exported P4 file.
 The exception stack reports a failed picture-control method (offset 0x280);
 its underlying cause remains under investigation.
+Targeted argument tracing now shows the browser's first sprite call arrives
+from a different timer callback with a null animation BSTR; the successful
+native path first supplies "Stand". Direction restoration matches the native
+writer and the saved bytes are not the divergence.
+
+Window message retrieval now returns pending paint before generated SetTimer
+notifications, as documented by Windows, while explicitly posted WM_TIMER
+messages keep their queue order. Eight regressions exercise both retrieval APIs,
+filters, removal and paint validation. The first GDI pass covered **229 checks on
+Windows and Linux**. A Windows startup P4 load with this change presents 604
+frames, completes all 11 script steps and renders both the street and inventory
+icon without movement. The browser also paints that scene and inventory, but
+still raises error 5 and exits on its first sprite timer call. That painted
+frame is not evidence of playable browser Load.
+
+A Windows probe with real time reproduces that error: after slow input loading,
+the 1,000 ms sprite update timer is retrieved before the overdue 10 ms setup
+timer because the runtime iterates timers by window handle. A message-only
+fixture using Windows' own USER32 API retrieves the earlier deadline first,
+with three separate windows and with three timers on one window. The runtime
+now queues expired timers in deadline order, with regressions for DWORD clock
+wrap. **233 GDI checks pass on Windows and Linux**. The corrected real-time Windows
+startup P4 probe completes all 11 steps and 2,197 frames, restores the street
+and inventory, and exits cleanly. The corrected browser now loads P4 from its
+startup menu, renders the street, character and inventory, and keeps executing
+its timers with valid "Stand" BSTR arguments. The captured console trace has
+neither a run-time error nor ExitProcess. Broader browser gameplay remains to
+be verified.
 The corrected Cult II diagnostics repeat the 2,510-frame movement/save/load
 round trip on Windows and Linux, restoring identical save bytes.
 Cult likewise repeats its 2,055-frame round trip on both systems after the

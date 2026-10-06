@@ -13,9 +13,10 @@ new child-window stacking and sibling-clipping checks pass, and fresh
 movement/save/load round trips still succeed for both games.
 Save/load names now repaint through the control procedure, and GetWindowTextA
 retrieves their text. Both Windows diagnostic save tests pass again with no
-missing imports or unknown transfers; 220 GDI checks pass.
-Cult II's player now renders; its inventory icon is temporarily blank after
-loading and returns on the next movement input.
+missing imports or unknown transfers. The latest GDI suite passes 233 checks
+on Windows and Linux, including paint priority and timer deadline order.
+Cult II's player and inventory now render immediately after startup Load in
+the corrected Windows and browser builds.
 
 SDL desktop packages build for Windows and Linux. Both games completed bounded
 20-second startups with Vulkan presentation, nonzero device PCM and clean exits.
@@ -220,10 +221,13 @@ The latest trace identifies a direct return to an older guest callback that
 the runtime mistakes for an exception-handler disposition. A source fix passes
 365 SEH checks on both Windows and Linux. Both browser builds and all four
 Windows/Linux player packages now include the callback correction. Cult II's
-browser startup Load now opens and reads P4.fcg, then reports Visual Basic
-error 5 (invalid procedure call or argument) and exits. It still does not reach
-the saved scene. Its updated Windows and Linux diagnostics repeat the movement
-and byte-identical save/load round trip successfully.
+browser startup Load previously read P4.fcg and then exited with Visual Basic
+error 5. A second fix queues expired timers by deadline, so the earlier sprite
+setup runs before the later update. The browser now reaches P4's saved street
+scene with its character and inventory and keeps running without that error.
+A Windows startup Load with real time also passes after this fix. Earlier
+Windows and Linux diagnostics pass the movement and byte-identical save/load
+round trip.
 Full browser gameplay remains unverified. The guest arena extends
 to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,
