@@ -99,14 +99,34 @@ screens through WebGPU and initialize their MIDI banks. GetKeyState now retains
 the retrieved mouse message's button state, so an early physical release no longer
 erases a windowless control's press. Ordinary Play clicks start both games;
 keyboard input reaches their opening scenes and advances the conversations.
-Later movement/menu input can leave blank or stale frames. Gray initial-menu
-rectangles also appear in saved Windows diagnostic frames, so this rendering
-defect is shared. Browser save/load,
+Later browser movement/menu input can leave blank or stale frames. The shared
+gray initial-menu rectangles are fixed in both Windows diagnostic hosts: child
+windows now start below existing siblings, showing a child preserves its
+stacking, and WS_CLIPSIBLINGS prevents covered controls from erasing menu pixels.
+The GDI suite passes 209 checks, including child creation/show order and sibling
+clipping through an ancestor. Both menus are visually checked, and both games
+pass fresh movement/save/load round trips with the fix. Both browser builds are
+updated; both main menus and Cult II's in-game Escape menu are visually verified.
+Its browser save screen accepts keyboard input and reaches GAME SAVED; loading
+the selected entry returns to the opening scene. Save-name text is not legible,
+and browser serialization/restoration has not received the native byte comparison.
+Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
 The four mouse-state regressions pass; the keyboard gate and queued-input checks
 have 78 checks with zero
-failures. A broader runtime run has 1,602 checks, 25 failures and one skip, including
-unavailable PE helpers and game-specific fixture contracts; it is not a full pass.
+failures. The latest broader runtime run has 1,617 checks, 24 failures and two
+skips, including file overlay, version/image resources, timing fixtures and
+translation metadata contracts; it is not a full pass. Its window-model checks
+pass.
+The current Windows/Linux player packages include these fixes. The latest
+20-second Windows launcher probes render and exit cleanly, but their audio
+devices report no default playback device even with DirectSound, so these runs
+capture no PCM. Earlier nonzero device-audio results above remain historical
+evidence, and audible output is still unverified.
+The rebuilt Linux players pass bounded startup with nonzero device PCM: Cult
+has 118,569 frames in five seconds, and Cult II has 944,947 frames in twenty
+seconds, both peaking at 17,341 PCM16. The initial five-second Cult II run has
+buffered PCM with a zero peak and is preserved separately.
 Windows-hosted Android
 NDK r30, API 36 revision 2 and Build Tools 37.0.0 are staged under ignored
 build/toolchains/android-sdk/. Their archives matched pinned upstream checksums;
@@ -120,6 +140,10 @@ exposed an omitted VK_KHR_android_surface extension, now enabled when available.
 The original emulator then failed in WHPX MMIO emulation. Checksum-pinned stable
 emulator 37.2.12 boots in the same isolated AVD, but its device connection becomes
 unavailable after launch. Neither test verifies Android gameplay.
+The stable emulator 37.2.12 with software graphics boots and keeps the guest
+responsive, but its Vulkan device lacks dynamic rendering. The installed Cult
+II build falls back to the launcher and reports no GPU device; it does not reach
+gameplay. This owned test emulator was stopped after logs were captured.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
 from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build

@@ -8,6 +8,9 @@ runtime x86 interpretation is disabled.
 Windows x64 and Linux x86_64 diagnostic builds reach the language selector,
 intro, main menu and opening scenes. Both games pass fresh movement/save/load
 checks on both systems, including byte-for-byte restoration of serialized state.
+The gray main-menu rectangles are now fixed in both Windows diagnostic hosts;
+new child-window stacking and sibling-clipping checks pass, and fresh
+movement/save/load round trips still succeed for both games.
 Cult II's player now renders; its inventory icon is temporarily blank after
 loading and returns on the next movement input.
 
@@ -19,6 +22,9 @@ late or starved audio pulls. Default WSL backends previously exposed intermitten
 startup/cleanup hangs, so these results apply to the tested settings. All 49 original
 MIDI scores produce nonzero audio through the offline MCI mixer. Physical input,
 audible output and later desktop gameplay remain unverified.
+The latest Windows player checks render and exit cleanly but cannot open the
+current host's default playback device, including with DirectSound. Updated
+Linux players still produce nonzero PCM under the tested WSL settings.
 
 Private local player folders include the supplied data and Play.cmd or Play.sh.
 Windows launchers select DirectSound unless overridden; Linux launchers apply

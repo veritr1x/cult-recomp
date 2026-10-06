@@ -1,11 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..3505f37 100644
+index 20fdc15..2c0aff3 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,128 @@
+@@ -2,6 +2,132 @@
  
  ## Unreleased
  
++- Place newly created child windows below existing siblings and clip shared GDI
++  surfaces against higher siblings when requested by WS_CLIPSIBLINGS, including
++  siblings that cover an ancestor control.
++
 +- Enable the available Android Vulkan surface extension, and give Gradle the
 +  native build's NDK so its APK symbol stripping uses the matching toolchain.
 +
@@ -1652,7 +1656,7 @@ index 06d5e2b..551fe85 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..b8f4cdf 100644
+index 13ba56f..bd4e7a5 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
 @@ -6,6 +6,7 @@
@@ -2013,7 +2017,51 @@ index 13ba56f..b8f4cdf 100644
      Rect clip = clip_box(dc);
      for (int64_t y = std::max(r.t, clip.t); y < std::min(r.b, clip.b); ++y)
          for (int64_t x = std::max(r.l, clip.l); x < std::min(r.r, clip.r); ++x)
-@@ -1293,6 +1352,9 @@ bool presented_pixels(PresentedSurface &s) {
+@@ -1136,6 +1195,35 @@ std::vector<Rect> clipped_children(uint32_t hwnd, uint32_t surface) {
+     }
+     return out;
+ }
++// WS_CLIPSIBLINGS protects higher siblings in the shared surface. Apply it
++// along the parent chain too: a nested control cannot draw through a sibling
++// that covers its parent. window_z_order is ordered from bottom to top.
++void append_clipped_siblings(uint32_t hwnd, uint32_t surface, std::vector<Rect> &out) {
++    int32_t root_x = 0, root_y = 0;
++    user32::client_origin(surface, &root_x, &root_y);
++    for (size_t hop = 0; hwnd && hwnd != surface && hop < user32::windows().size(); ++hop) {
++        auto *self = user32::find_window(hwnd);
++        if (!self)
++            break;
++        if (self->style & 0x04000000u) {
++            bool above = false;
++            for (uint32_t sibling : user32::window_z_order(self->parent)) {
++                if (sibling == hwnd) {
++                    above = true;
++                    continue;
++                }
++                auto *w = user32::find_window(sibling);
++                if (!above || !w || !w->visible || !(w->style & 0x40000000u) || w->w <= 0 ||
++                    w->h <= 0)
++                    continue;
++                int32_t x = 0, y = 0;
++                user32::client_origin(sibling, &x, &y);
++                out.push_back({x - root_x, y - root_y, x - root_x + w->w, y - root_y + w->h});
++            }
++        }
++        hwnd = self->parent;
++    }
++}
+ } // namespace
+ uint32_t gdi_window_dc(uint32_t hwnd) {
+     DeviceContext dc;
+@@ -1154,6 +1242,7 @@ uint32_t gdi_window_dc(uint32_t hwnd) {
+         }
+         dc.surface = w->hwnd;
+         dc.excluded = clipped_children(hwnd, dc.surface);
++        append_clipped_siblings(hwnd, dc.surface, dc.excluded);
+     }
+     uint32_t handle = g_next_dc++;
+     dcs()[handle] = dc;
+@@ -1293,6 +1382,9 @@ bool presented_pixels(PresentedSurface &s) {
  }
  } // namespace
  
@@ -2023,7 +2071,7 @@ index 13ba56f..b8f4cdf 100644
  void gdi_present_windows(bool refresh) {
      auto surfaces = visible_surfaces();
      auto &presented = presented_surface();
-@@ -1480,6 +1542,21 @@ void brush_indirect(X86 *c) {
+@@ -1480,6 +1572,21 @@ void brush_indirect(X86 *c) {
  void pen_indirect(X86 *c) {
      indirect_object(c, true);
  }
@@ -2045,7 +2093,7 @@ index 13ba56f..b8f4cdf 100644
  void stock_object(X86 *c) {
      uint32_t i = arg(c, 0);
      set_eax(c, i <= 19 ? 0x4f100 + i : 0);
-@@ -1494,6 +1571,10 @@ void set_pixel(X86 *c) {
+@@ -1494,6 +1601,10 @@ void set_pixel(X86 *c) {
                     ? arg(c, 3) & 0xffffff
                     : 0xffffffff);
  }
@@ -2056,7 +2104,7 @@ index 13ba56f..b8f4cdf 100644
  void save_dc(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      if (!dc) {
-@@ -1579,6 +1660,61 @@ void get_stretch_mode(X86 *c) {
+@@ -1579,6 +1690,61 @@ void get_stretch_mode(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      set_eax(c, dc ? dc->stretch_mode : 0);
  }
@@ -2118,7 +2166,7 @@ index 13ba56f..b8f4cdf 100644
  void rop2(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      int v = int(arg(c, 1));
-@@ -1589,6 +1725,10 @@ void rop2(X86 *c) {
+@@ -1589,6 +1755,10 @@ void rop2(X86 *c) {
      set_eax(c, dc->rop2);
      dc->rop2 = v;
  }
@@ -2129,7 +2177,7 @@ index 13ba56f..b8f4cdf 100644
  void flush(X86 *c) {
      set_eax(c, 1);
  }
-@@ -1642,12 +1782,20 @@ void gdi_model_register() {
+@@ -1642,12 +1812,20 @@ void gdi_model_register() {
      static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                         G("CreateBrushIndirect", 1, brush_indirect),
                                         G("CreatePenIndirect", 1, pen_indirect),
@@ -2150,7 +2198,7 @@ index 13ba56f..b8f4cdf 100644
                                         G("GetWindowOrgEx", 2, get_window_org),
                                         G("SetViewportOrgEx", 4, viewport_org),
                                         G("SetBrushOrgEx", 4, brush_org),
-@@ -1657,6 +1805,7 @@ void gdi_model_register() {
+@@ -1657,6 +1835,7 @@ void gdi_model_register() {
                                         G("SetStretchBltMode", 2, stretch_mode),
                                         G("GetStretchBltMode", 1, get_stretch_mode),
                                         G("SetROP2", 2, rop2),
@@ -2158,7 +2206,7 @@ index 13ba56f..b8f4cdf 100644
                                         G("GdiFlush", 0, flush),
                                         G("UnrealizeObject", 1, unrealize),
                                         G("ResizePalette", 2, resize_palette),
-@@ -1671,10 +1820,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+@@ -1671,10 +1850,12 @@ Rect to_device(uint32_t hdc, Rect r) {
      auto *dc = dc_of(hdc);
      if (!dc)
          return {};
@@ -2173,7 +2221,7 @@ index 13ba56f..b8f4cdf 100644
  }
  } // namespace gdi
  namespace {
-@@ -1741,6 +1892,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+@@ -1741,6 +1922,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
  }
  void create_section(X86 *c) {
      Dib d;
@@ -2181,7 +2229,7 @@ index 13ba56f..b8f4cdf 100644
      uint32_t out = arg(c, 3);
      if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
          !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
-@@ -1825,6 +1977,87 @@ struct DibDc {
+@@ -1825,6 +2007,87 @@ struct DibDc {
          dibs().erase(bitmap);
      }
  };
@@ -2269,7 +2317,7 @@ index 13ba56f..b8f4cdf 100644
  void set_dibits(X86 *c) {
      auto *dest = dib_of(arg(c, 1));
      Dib src;
-@@ -1864,6 +2097,12 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1864,6 +2127,12 @@ void dib_to_device(X86 *c, bool stretch) {
          set_eax(c, 0);
          return;
      }
@@ -2282,7 +2330,7 @@ index 13ba56f..b8f4cdf 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1882,11 +2121,23 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1882,11 +2151,23 @@ void dib_to_device(X86 *c, bool stretch) {
      src.size = count * src.stride;
      DibDc input(src);
      if (stretch) {
@@ -2308,7 +2356,7 @@ index 13ba56f..b8f4cdf 100644
          for (int i = 10; i >= 0; --i) {
              c->r[R_ESP] -= 4;
              wr32(c->r[R_ESP], values[i]);
-@@ -1927,17 +2178,48 @@ void stretch_dibits(X86 *c) {
+@@ -1927,17 +2208,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -2589,7 +2637,7 @@ index c22dc11..f46098c 100644
                                         G("IntersectClipRect", 5, intersect_clip),
                                         G("ExcludeClipRect", 5, exclude_clip),
 diff --git a/runtime/gdi32_internal.h b/runtime/gdi32_internal.h
-index d70b9d1..da27538 100644
+index d70b9d1..41ddd71 100644
 --- a/runtime/gdi32_internal.h
 +++ b/runtime/gdi32_internal.h
 @@ -6,6 +6,23 @@
@@ -2625,6 +2673,17 @@ index d70b9d1..da27538 100644
      uint32_t pen = 0x4f107, brush = 0x4f100, font = 0x4f10d;
      uint32_t bitmap = 0, palette = 0, region = 0;
      uint32_t text_color = 0, bk_color = 0xffffff;
+@@ -29,8 +48,8 @@ struct DcState {
+ struct DeviceContext : DcState {
+     bool memory = true;
+     uint32_t window = 0; // The acquiring window, possibly a child of surface.
+-    // WS_CLIPCHILDREN: the visible children's areas, in surface coordinates,
+-    // taken when the DC is made. Writes there are dropped.
++    // Visible children and higher siblings excluded by the window styles,
++    // in surface coordinates, taken when the DC is made. Writes are dropped.
+     std::vector<Rect> excluded;
+     std::vector<DcState> saved;
+ };
 @@ -40,6 +59,7 @@ struct Object {
      int32_t width = 1;
      std::array<uint8_t, 92> logfont{};
@@ -5313,7 +5372,7 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..ea1dbc8 100644
+index cf0d171..38186e9 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
 @@ -177,6 +177,12 @@ static void test_model() {
@@ -5489,7 +5548,7 @@ index cf0d171..ea1dbc8 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -911,8 +1032,16 @@ static void test_clip_children() {
+@@ -911,11 +1032,77 @@ static void test_clip_children() {
      check(pixel(parent, 0, 0) == 0xff && pixel(child, 1, 1) == 0,
            "a WS_CLIPCHILDREN parent paints around its visible child, not over it");
      call_import(&c, "USER32.dll", "ShowWindow", {child, 0});
@@ -5507,7 +5566,68 @@ index cf0d171..ea1dbc8 100644
      call_import(&c, "USER32.dll", "DestroyWindow", {child});
      call_import(&c, "USER32.dll", "DestroyWindow", {parent});
  }
-@@ -1070,11 +1199,31 @@ static void test_memory_truetype_font() {
++// A lower sibling and its nested controls must preserve a higher sibling's
++// pixels. Reacquiring a DC after hiding/reordering observes the new stacking.
++static void test_clip_siblings() {
++    X86 c;
++    loader_init_context(&c);
++    uint32_t s = 0x00318000;
++    uint32_t parent = make_test_window(&c, s, 16, 16);
++    uint32_t lower =
++        call_import(&c, "USER32.dll", "CreateWindowExW",
++                    {0, s + 0x800, 0, 0x54000000u, 0, 0, 12, 12, parent, 0, IMAGE_BASE, 0});
++    uint32_t nested =
++        call_import(&c, "USER32.dll", "CreateWindowExW",
++                    {0, s + 0x800, 0, 0x50000000u, 0, 0, 12, 12, lower, 0, IMAGE_BASE, 0});
++    uint32_t upper =
++        call_import(&c, "USER32.dll", "CreateWindowExW",
++                    {0, s + 0x800, 0, 0x54000000u, 4, 4, 4, 4, parent, 0, IMAGE_BASE, 0});
++    check(call_import(&c, "USER32.dll", "GetWindow", {parent, 5}) == lower &&
++              call_import(&c, "USER32.dll", "GetWindow", {lower, 2}) == upper,
++          "new child windows begin below existing siblings");
++    call_import(&c, "USER32.dll", "ShowWindow", {upper, 0});
++    call_import(&c, "USER32.dll", "ShowWindow", {upper, 5});
++    check(call_import(&c, "USER32.dll", "GetWindow", {parent, 5}) == lower,
++          "showing a child preserves its sibling stacking");
++    call_import(&c, "USER32.dll", "SetWindowPos", {upper, 0, 0, 0, 0, 0, 3});
++    auto paint = [&](uint32_t hwnd, uint32_t color) {
++        uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
++        uint32_t brush = call_import(&c, "GDI32.dll", "CreateSolidBrush", {color});
++        wr32(s + 0x100, 0);
++        wr32(s + 0x104, 0);
++        wr32(s + 0x108, 12);
++        wr32(s + 0x10c, 12);
++        call_import(&c, "USER32.dll", "FillRect", {dc, s + 0x100, brush});
++        call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++        call_import(&c, "GDI32.dll", "DeleteObject", {brush});
++    };
++    auto pixel = [&](uint32_t x, uint32_t y) {
++        uint32_t dc = call_import(&c, "USER32.dll", "GetDC", {parent});
++        uint32_t result = call_import(&c, "GDI32.dll", "GetPixel", {dc, x, y});
++        call_import(&c, "USER32.dll", "ReleaseDC", {parent, dc});
++        return result;
++    };
++    paint(upper, 0xff);
++    paint(lower, 0xff00);
++    check(pixel(5, 5) == 0xff && pixel(1, 1) == 0xff00,
++          "lower sibling paints exposed pixels and preserves its higher sibling");
++    paint(nested, 0xff0000);
++    check(pixel(5, 5) == 0xff && pixel(1, 1) == 0xff0000,
++          "nested child inherits its ancestor's sibling clipping");
++    call_import(&c, "USER32.dll", "SetWindowPos", {lower, 0, 0, 0, 0, 0, 3});
++    paint(lower, 0xff00);
++    paint(upper, 0xff);
++    check(pixel(5, 5) == 0xff00, "reordering siblings changes which overlapping window is clipped");
++    call_import(&c, "USER32.dll", "ShowWindow", {lower, 0});
++    paint(upper, 0xff);
++    check(pixel(5, 5) == 0xff, "hidden higher sibling no longer excludes pixels");
++    call_import(&c, "USER32.dll", "DestroyWindow", {parent});
++}
++
+ // DrawThemeParentBackground: the parent paints into the child's DC, shifted so
+ // its own coordinates land on the child, with WM_ERASEBKGND then
+ // WM_PRINTCLIENT. It is how a transparent VCL control shows the form behind it.
+@@ -1070,11 +1257,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -5539,7 +5659,7 @@ index cf0d171..ea1dbc8 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,15 +1273,248 @@ static void test_windows_face_substitute() {
+@@ -1124,15 +1331,248 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -5559,9 +5679,9 @@ index cf0d171..ea1dbc8 100644
 +    check(w == 96, "a fixed-pitch face keeps the 8x16 cells (%u)", w);
 +    w = width("RecompUnknown", 400);
 +    check(w == 96, "an unknown face keeps the 8x16 cells (%u)", w);
-     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
- }
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
 +// OLE pictures draw in HIMETRIC coordinates. A scaled 2x2 source must cover
 +// every device pixel, and a negative viewport extent must invert the image.
 +static void test_anisotropic_picture_mapping() {
@@ -5616,9 +5736,9 @@ index cf0d171..ea1dbc8 100644
 +    call_import(&c, "GDI32.dll", "DeleteDC", {source});
 +    call_import(&c, "GDI32.dll", "DeleteObject", {bitmap});
 +    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, reader});
-+    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-+    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
-+}
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
 +// A 32-bpp source must fit the caller's 24-bpp row buffer exactly. The
 +// adjacent canary represents the COM object overwritten by the old raw copy.
 +static void test_dib_download_formats() {
@@ -5794,7 +5914,7 @@ index cf0d171..ea1dbc8 100644
  int main(int argc, char **argv) {
      mem_init();
      imports_init();
-@@ -1147,6 +1529,12 @@ int main(int argc, char **argv) {
+@@ -1147,8 +1587,15 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -5806,7 +5926,10 @@ index cf0d171..ea1dbc8 100644
 +        test_plain_ansi_text();
          test_static_control();
          test_clip_children();
++        test_clip_siblings();
          test_draw_theme_parent_background();
+         test_draw_theme_text_ex();
+         test_blit_into_moved_child_origin();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
 index 7016990..6910a83 100644
 --- a/runtime/tests/runtime_tests.cpp
@@ -7346,7 +7469,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..96ea383 100644
+index 2ef5486..e2dc18b 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -7446,7 +7569,7 @@ index 2ef5486..96ea383 100644
  void host_set_message_waiter(bool (*fn)()) {
      g_message_waiter = fn;
  }
-@@ -198,8 +240,98 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
+@@ -198,8 +240,107 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
      return guest_call(c, proc, hwnd, msg, wparam, lparam);
  }
  
@@ -7458,6 +7581,15 @@ index 2ef5486..96ea383 100644
 +               "pending=%u/%u proc=%08x class=%s title=%s\n",
 +               w.hwnd, w.parent, w.visible, w.style, w.x, w.y, w.w, w.h, w.update_pending,
 +               w.erase_pending, w.wndproc, w.cls.c_str(), w.title_utf8.c_str());
++    }
++    for (const auto &kv : user32::windows()) {
++        const auto order = user32::window_z_order(kv.first);
++        if (order.empty())
++            continue;
++        printf("  stacking %08x bottom-to-top:", kv.first);
++        for (uint32_t hwnd : order)
++            printf(" %08x", hwnd);
++        printf("\n");
 +    }
 +    fflush(stdout);
 +}
@@ -7545,7 +7677,7 @@ index 2ef5486..96ea383 100644
  // ---------------------------------------------------------------------------
  // Classes and windows
  // ---------------------------------------------------------------------------
-@@ -358,6 +490,8 @@ void create_window_body(X86 *c, bool wide) {
+@@ -358,6 +499,8 @@ void create_window_body(X86 *c, bool wide) {
              nw->visible = true;
              nw->shown = true;
              nw->update_pending = true;
@@ -7554,8 +7686,19 @@ index 2ef5486..96ea383 100644
              if (g_window_shown)
                  g_window_shown(hwnd);
          }
-@@ -390,6 +524,8 @@ static void became_visible(Window *w, bool to_top) {
-     if (to_top)
+@@ -383,13 +526,15 @@ void u_DestroyWindow(X86 *c) {
+     set_eax(c, destroy_window(c, arg(c, 0)));
+ }
+ 
+-// A hidden window becoming visible: it goes to the top unless the show keeps
+-// the stacking, its whole client area needs painting, and the host is told it
+-// has appeared. ShowWindow and SetWindowPos's SWP_SHOWWINDOW both make it.
++// A hidden window becoming visible needs painting and a host notification.
++// Showing a child preserves sibling stacking; activating a top-level window
++// can raise it. SetWindowPos handles its own explicit ordering separately.
+ static void became_visible(Window *w, bool to_top) {
+-    if (to_top)
++    if (to_top && !(w->style & 0x40000000u))
          reorder_window(w->hwnd, 0);
      w->update_pending = true;
 +    w->erase_pending = true;
@@ -7563,7 +7706,7 @@ index 2ef5486..96ea383 100644
      if (!w->shown) {
          w->shown = true;
          post_geometry(w->hwnd, w, false, true);
-@@ -427,6 +563,11 @@ void u_ShowWindow(X86 *c) {
+@@ -427,6 +572,11 @@ void u_ShowWindow(X86 *c) {
      set_eax(c, was ? 1 : 0);
      if (!was && w->visible)
          became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
@@ -7575,7 +7718,7 @@ index 2ef5486..96ea383 100644
  }
  
  // UpdateWindow sends WM_PAINT directly to the window procedure, synchronously,
-@@ -467,7 +608,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -467,7 +617,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
          w->w = cx;
          w->h = cy;
          if (!(flags & 0x0008)) // SWP_NOREDRAW
@@ -7584,7 +7727,7 @@ index 2ef5486..96ea383 100644
      } // SWP_NOSIZE
      LOGV("SetWindowPos(%08x): %dx%d at %d,%d, flags=%08x changed=%d/%d", w->hwnd, w->w, w->h, w->x,
           w->y, flags, moved, sized);
-@@ -481,6 +622,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -481,6 +631,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
      } else if ((flags & 0x0080) && w->visible) {
          w->visible = false;
          w->style &= ~WS_VISIBLE;
@@ -7596,7 +7739,7 @@ index 2ef5486..96ea383 100644
      }
      if (moved || sized) {
          // SetWindowPos sends this before returning. VCL updates its cached
-@@ -506,6 +652,21 @@ void u_SetWindowPos(X86 *c) {
+@@ -506,6 +661,21 @@ void u_SetWindowPos(X86 *c) {
                         int32_t(arg(c, 5)), arg(c, 6));
      set_eax(c, 1);
  }
@@ -7618,7 +7761,7 @@ index 2ef5486..96ea383 100644
  // The bounds a window had before a display took it over, by handle.
  std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
      static std::map<uint32_t, std::array<int32_t, 4>> m;
-@@ -572,6 +733,9 @@ void u_AdjustWindowRectEx(X86 *c) {
+@@ -572,6 +742,9 @@ void u_AdjustWindowRectEx(X86 *c) {
  void u_ScreenToClient(X86 *c) {
      Window *w = find_window(arg(c, 0));
      uint32_t p = arg(c, 1);
@@ -7628,7 +7771,7 @@ index 2ef5486..96ea383 100644
      if (p && w) {
          LOGV("ScreenToClient(%08x): (%d,%d) through a window at %d,%d", arg(c, 0), (int32_t)rd32(p),
               (int32_t)rd32(p + 4), w->x, w->y);
-@@ -617,12 +781,19 @@ void u_SetRect(X86 *c) {
+@@ -617,12 +790,19 @@ void u_SetRect(X86 *c) {
  // A null hwnd invalidates every window, which is what Windows does.
  void u_InvalidateRect(X86 *c) {
      uint32_t hwnd = arg(c, 0);
@@ -7652,7 +7795,7 @@ index 2ef5486..96ea383 100644
      set_eax(c, 1);
  }
  
-@@ -911,6 +1082,15 @@ void u_TranslateMessage(X86 *c) {
+@@ -911,6 +1091,15 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
@@ -7668,7 +7811,7 @@ index 2ef5486..96ea383 100644
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
          uint32_t ch = 0;
          if (vk >= 0x30 && vk <= 0x5a)
-@@ -943,6 +1123,9 @@ void dispatch_message(X86 *c) {
+@@ -943,6 +1132,9 @@ void dispatch_message(X86 *c) {
      }
      uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
      uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
@@ -7678,7 +7821,7 @@ index 2ef5486..96ea383 100644
      if (msg == 0x113 && lp)
          set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
      else
-@@ -969,6 +1152,16 @@ void u_PostMessageA(X86 *c) {
+@@ -969,6 +1161,16 @@ void u_PostMessageA(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -7695,7 +7838,7 @@ index 2ef5486..96ea383 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1184,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -991,9 +1193,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -7719,7 +7862,7 @@ index 2ef5486..96ea383 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1220,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1015,8 +1229,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -7738,7 +7881,7 @@ index 2ef5486..96ea383 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1264,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1050,20 +1273,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -7777,7 +7920,7 @@ index 2ef5486..96ea383 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1450,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1226,8 +1459,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -7789,7 +7932,7 @@ index 2ef5486..96ea383 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1461,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1235,15 +1470,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -7839,7 +7982,7 @@ index 2ef5486..96ea383 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,20 +1522,39 @@ void u_DestroyIcon(X86 *c) {
+@@ -1268,20 +1531,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -7880,7 +8023,7 @@ index 2ef5486..96ea383 100644
      if (p) {
          wr32(p, (uint32_t)g_cursor_x);
          wr32(p + 4, (uint32_t)g_cursor_y);
-@@ -1300,7 +1573,11 @@ void u_GetAsyncKeyState(X86 *c) {
+@@ -1300,7 +1582,11 @@ void u_GetAsyncKeyState(X86 *c) {
  }
  void u_GetKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
@@ -7893,7 +8036,7 @@ index 2ef5486..96ea383 100644
  }
  void u_ShowCursor(X86 *c) {
      g_cursor_show += arg(c, 0) ? 1 : -1;
-@@ -1398,6 +1675,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1398,6 +1684,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -7912,7 +8055,7 @@ index 2ef5486..96ea383 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +1984,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1695,6 +1993,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -7920,7 +8063,7 @@ index 2ef5486..96ea383 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1716,15 +2006,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1716,15 +2015,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -7939,7 +8082,7 @@ index 2ef5486..96ea383 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +2034,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1741,6 +2043,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -9023,7 +9166,7 @@ index 4b3b30d..35a675b 100644
  }
  } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
-index dea756d..e35be13 100644
+index dea756d..440c277 100644
 --- a/runtime/user32_vcl.cpp
 +++ b/runtime/user32_vcl.cpp
 @@ -4,6 +4,7 @@
@@ -9034,7 +9177,22 @@ index dea756d..e35be13 100644
  #include <algorithm>
  #include <set>
  #include <vector>
-@@ -248,32 +249,82 @@ void set_timer(X86 *c) {
+@@ -29,7 +30,13 @@ uint32_t next_timer = 1;
+ std::set<uint32_t> destroying;
+ } // namespace
+ void window_created(uint32_t hwnd) {
+-    z_order.push_back(hwnd);
++    // CreateWindowEx places a child beneath existing siblings; top-level
++    // windows start on top. The shared list runs from bottom to top.
++    auto *w = find_window(hwnd);
++    if (w && (w->style & 0x40000000u))
++        z_order.insert(z_order.begin(), hwnd);
++    else
++        z_order.push_back(hwnd);
+     if (!active)
+         active = hwnd;
+     if (!focus)
+@@ -248,32 +255,82 @@ void set_timer(X86 *c) {
  void kill_timer(X86 *c) {
      set_eax(c, timers.erase({arg(c, 0), arg(c, 1)}) != 0);
  }
@@ -9125,7 +9283,7 @@ index dea756d..e35be13 100644
  void set_parent(X86 *c) {
      Window *w = find_window(arg(c, 0));
      uint32_t parent = arg(c, 1);
-@@ -484,6 +535,59 @@ void map_points(X86 *c) {
+@@ -484,6 +541,59 @@ void map_points(X86 *c) {
      }
      set_eax(c, (uint32_t(uint16_t(dy)) << 16) | uint16_t(dx));
  }
@@ -9185,7 +9343,7 @@ index dea756d..e35be13 100644
  void intersect_rect(X86 *c) {
      uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
      if (!out || !a || !b || !gm_valid(out, 16) || !gm_valid(a, 16) || !gm_valid(b, 16)) {
-@@ -568,7 +672,7 @@ void redraw(X86 *c) {
+@@ -568,7 +678,7 @@ void redraw(X86 *c) {
      Window *w = find_window(arg(c, 0));
      if (w) {
          if (arg(c, 3) & 1)
@@ -9194,7 +9352,7 @@ index dea756d..e35be13 100644
          if (arg(c, 3) & 8)
              w->update_pending = false;
          if (arg(c, 3) & 0x100)
-@@ -579,7 +683,7 @@ void redraw(X86 *c) {
+@@ -579,7 +689,7 @@ void redraw(X86 *c) {
  void scroll_window(X86 *c) {
      Window *w = find_window(arg(c, 0));
      if (w)
@@ -9203,7 +9361,7 @@ index dea756d..e35be13 100644
      set_eax(c, w != nullptr);
  }
  // Ownership and update state are retained even before a GDI window surface exists.
-@@ -588,7 +692,7 @@ void set_window_region(X86 *c) {
+@@ -588,7 +698,7 @@ void set_window_region(X86 *c) {
      if (w) {
          w->region = arg(c, 1);
          if (arg(c, 2))
@@ -9212,7 +9370,7 @@ index dea756d..e35be13 100644
      }
      set_eax(c, w != nullptr);
  }
-@@ -611,7 +715,7 @@ void show_owned(X86 *c) {
+@@ -611,7 +721,7 @@ void show_owned(X86 *c) {
              w.owned_hidden = false;
              w.visible = true;
              w.style |= 0x10000000u;
@@ -9221,7 +9379,7 @@ index dea756d..e35be13 100644
          }
      }
      set_eax(c, 1);
-@@ -1039,8 +1143,8 @@ void insert_menu(X86 *c) {
+@@ -1039,8 +1149,8 @@ void insert_menu(X86 *c) {
  bool clipboard_open = false;
  std::map<uint32_t, uint32_t> clipboard;
  std::map<std::string, uint32_t> clipboard_formats, window_messages;
@@ -9232,7 +9390,7 @@ index dea756d..e35be13 100644
      if (name.empty())
          return 0;
      for (char &ch : name)
-@@ -1057,6 +1161,9 @@ uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
+@@ -1057,6 +1167,9 @@ uint32_t register_name(std::map<std::string, uint32_t> &names, uint32_t p) {
  void register_clipboard(X86 *c) {
      set_eax(c, register_name(clipboard_formats, arg(c, 0)));
  }
@@ -9242,7 +9400,7 @@ index dea756d..e35be13 100644
  void register_message(X86 *c) {
      set_eax(c, register_name(window_messages, arg(c, 0)));
  }
-@@ -1234,8 +1341,10 @@ void draw_focus(X86 *c) {
+@@ -1234,8 +1347,10 @@ void draw_focus(X86 *c) {
                                    int32_t(rd32(p + 8)), int32_t(rd32(p + 12))));
  }
  void create_icon(X86 *c) {
@@ -9255,7 +9413,7 @@ index dea756d..e35be13 100644
      if (!w || !h || w > 4096 || h > 4096 || planes != 1 || (bpp != 1 && bpp != 24 && bpp != 32)) {
          set_eax(c, 0);
          return;
-@@ -1366,6 +1475,11 @@ const ImportShim shims[] = {
+@@ -1366,6 +1481,11 @@ const ImportShim shims[] = {
      U("GetPropW", 2, get_prop),
      U("SetPropW", 3, set_prop),
      U("RemovePropW", 2, remove_prop),
@@ -9267,7 +9425,7 @@ index dea756d..e35be13 100644
      U("SetParent", 2, set_parent),
      U("GetParent", 1, get_parent),
      U("IsChild", 2, child_of),
-@@ -1405,6 +1519,11 @@ const ImportShim shims[] = {
+@@ -1405,6 +1525,11 @@ const ImportShim shims[] = {
      U("ScrollWindow", 5, scroll_window),
      U("MapWindowPoints", 4, map_points),
      U("IntersectRect", 3, intersect_rect),
@@ -9279,7 +9437,7 @@ index dea756d..e35be13 100644
      U("GetCursor", 0, get_cursor),
      U("GetMessageExtraInfo", 0, zero),
      U("GetKeyboardState", 1, keyboard_state),
-@@ -1458,8 +1577,10 @@ const ImportShim shims[] = {
+@@ -1458,8 +1583,10 @@ const ImportShim shims[] = {
      U("EmptyClipboard", 0, empty_clipboard),
      U("SetClipboardData", 2, set_clipboard),
      U("RegisterClipboardFormatW", 1, register_clipboard),
@@ -9290,7 +9448,7 @@ index dea756d..e35be13 100644
      U("UnhookWindowsHookEx", 1, unhook),
      U("CallNextHookEx", 4, zero),
      U("CreateAcceleratorTableW", 2, create_accelerator),
-@@ -1484,6 +1605,10 @@ void user32_vcl_register() {
+@@ -1484,6 +1611,10 @@ void user32_vcl_register() {
      imports_register(shims, sizeof(shims) / sizeof(shims[0]));
  }
  
@@ -9301,7 +9459,7 @@ index dea756d..e35be13 100644
  // Menus attached to an owned window retire with it; detached menus stay caller-owned.
  void user32::forget_window_services(uint32_t hwnd) {
      Window *w = find_window(hwnd);
-@@ -1502,14 +1627,19 @@ void user32::forget_window_services(uint32_t hwnd) {
+@@ -1502,14 +1633,19 @@ void user32::forget_window_services(uint32_t hwnd) {
  // is the invisible application window, which does nothing with a keystroke.
  // Falls back to the active window and then to the main one, so a guest that
  // never called SetFocus is no worse off than before.
