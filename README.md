@@ -25,9 +25,9 @@ late or starved audio pulls. Default WSL backends previously exposed intermitten
 startup/cleanup hangs, so these results apply to the tested settings. All 49 original
 MIDI scores produce nonzero audio through the offline MCI mixer. Physical input,
 audible output and later desktop gameplay remain unverified.
-The latest Windows player checks render and exit cleanly but cannot open the
-current host's default playback device, including with DirectSound. Updated
-Linux players still produce nonzero PCM under the tested WSL settings.
+The latest five-second Windows player checks render, produce nonzero device PCM
+and exit cleanly for both games. Cult's refreshed Linux player also completes
+a twenty-second audio check with zero late or starved pulls under those settings.
 
 Private local player folders include the supplied data and Play.cmd or Play.sh.
 Windows launchers select DirectSound unless overridden; Linux launchers apply
@@ -216,7 +216,11 @@ Cult II's in-game menu now render correctly. Its browser save-name field is
 legible after the text repaint fix. GetWindowTextA is implemented in all rebuilt
 packages. Cult II writes a fresh browser save and loads it from the in-game menu.
 Loading either tested save from the startup menu still aborts during guest
-exception handling; the older browser save loads in the Windows diagnostic host.
+exception handling; both exported saves load in the Windows diagnostic host.
+The latest trace identifies a direct return to an older guest callback that
+the runtime mistakes for an exception-handler disposition. A source fix passes
+365 SEH checks on both Windows and Linux; browser verification and build
+propagation are pending.
 Full browser gameplay remains unverified. The guest arena extends
 to 0x74200000, so its browser memory
 requirements need actual device testing. The kit's player requires a secure,

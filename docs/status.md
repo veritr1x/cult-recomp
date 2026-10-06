@@ -117,25 +117,29 @@ and both native Windows movement/save/load tests pass without missing imports,
 unknown transfers or runtime errors. All Windows, Linux, browser and Android
 packages are rebuilt with these text changes. Cult II creates a fresh browser
 save (P4) and loads it from the in-game menu, returning to its street scene.
-Loading either P4 or the older R6R6 save from the startup menu aborts: the trace
-raises a guest exception before opening the save, then cannot find a live unwind
-checkpoint. The exported R6R6 save is intact and loads from the Windows diagnostic
-host's startup menu with no missing imports or runtime fault. The browser path
-requires further investigation; the missing GetWindowTextA was not its only cause.
 The translator now recognizes VB/MSVC prologues that cache FS:[0] in a register
-before pushing the registration link. The first rebuilt Cult II browser reaches
-the unwind checkpoint but freezes with an uncaught host longjmp. Its trace
-contains 154 retained checkpoints, including records already removed from the
-guest chain. The subsequent source fix retires unlinked registrations while
-locals are still allocated and lets the resumable driver adopt surviving
-checkpoints after generated activations return. It also resets profiling
-ownership on adoption. This passes **352 native SEH checks** and **212 selected
-translator checks**. Both games are regenerated. Cult's rebuilt Windows
-diagnostic passes a fresh 2,055-frame movement/save/load round trip with identical
-restored saves and no missing imports, unknown transfers or runtime errors.
-Its packaged Windows player renders and exits cleanly in a five-second check,
-while the current host still has no default audio playback device. Linux and
-browser builds and startup-load verification of this lifetime fix are in progress.
+before pushing the registration link. The runtime retires unlinked registrations
+while locals are still allocated and lets the resumable driver adopt surviving
+checkpoints after generated activations return, resetting profiling ownership.
+This passes **352 Windows and Linux SEH checks** and **212 selected translator
+checks**. Both games are regenerated. Both refreshed Windows diagnostics pass
+fresh movement/save/load round trips with identical restored saves; Cult's
+refreshed Linux diagnostic repeats its 2,055-frame round trip successfully.
+The exported P4 and R6R6 browser saves also load from the refreshed Windows
+diagnostic host's startup menu: each presents 603 frames and renders the street
+without missing imports, unknown transfers or runtime errors.
+
+Cult II's refreshed browser still aborts when loading P4 from the startup menu.
+Its trace now reaches the handler, then exposes a callback ownership error:
+the guest restores an older callback's stack and returns at ESP=0efffe94, while
+the runtime still expects the handler callback below ESP=0efff864. The resumable
+driver mistakes this completed older callback for a handler disposition of zero.
+A regression reproduces the erroneous disposition and abort before the source
+fix. The correction finds the owning callback and retires abandoned callback
+and SEH records, while preserving active SEH landings through their checkpoints.
+It passes **365 SEH checks on both Windows and Linux**. The refreshed Cult browser
+and Cult II Linux build, and browser verification of the callback correction
+are in progress. No successful browser startup Load has been established.
 Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
@@ -145,11 +149,13 @@ failures. The latest broader runtime run has 1,617 checks, 24 failures and two
 skips, including file overlay, version/image resources, timing fixtures and
 translation metadata contracts; it is not a full pass. Its window-model checks
 pass.
-The current Windows/Linux player packages include these fixes. The latest
-five-second Windows launcher probes render and exit cleanly, but their audio
-devices report no default playback device even with DirectSound, so these runs
-capture no PCM. Earlier nonzero device-audio results above remain historical
-evidence, and audible output is still unverified.
+The current Windows/Linux player packages include the control text changes;
+both Windows players and Cult's Linux player also include the checkpoint lifetime
+fix. The latest five-second Windows launcher probes render and exit cleanly
+with running audio devices: Cult captures 227,328 PCM frames and Cult II captures
+233,472, both with peak 17,341 PCM16. Audible output is still unverified.
+Cult's refreshed Linux player completes twenty seconds with 927,672 PCM frames,
+peak 17,341, zero late or starved pulls and a clean exit.
 The rebuilt Linux players pass twenty-second startup with nonzero device PCM:
 Cult has 933,435 frames, and Cult II has 943,508 frames, both peaking at 17,341
 PCM16. An initial Cult II run during concurrent compilation records late audio

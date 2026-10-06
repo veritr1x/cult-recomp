@@ -1,8 +1,8 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..d56d441 100644
+index 20fdc15..0687517 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,144 @@
+@@ -2,6 +2,146 @@
  
  ## Unreleased
  
@@ -13,6 +13,8 @@ index 20fdc15..d56d441 100644
 +  checkpoints onto the resumable driver after a generated activation returns.
 +  Reset profiling ownership when a checkpoint moves to its new host activation.
 +  Preserve unchanged generated source timestamps for incremental native builds.
++  Complete the owning callback when guest exception recovery restores an older
++  callback stack directly, retiring abandoned handlers and exception records.
 +
 +- Deliver ANSI SetWindowText through WM_SETTEXT so controls update their text,
 +  notify their parent and repaint, matching the Unicode entry point.
@@ -2999,7 +3001,7 @@ index a6dd8fa..d62f5d6 100644
                                         G("EnumFontsW", 4, enumerate),
                                         G("EnumFontFamiliesExW", 5, enumerate),
 diff --git a/runtime/imports.cpp b/runtime/imports.cpp
-index ec1d2b1..4ab7bf7 100644
+index ec1d2b1..be30212 100644
 --- a/runtime/imports.cpp
 +++ b/runtime/imports.cpp
 @@ -1,4 +1,5 @@
@@ -3053,7 +3055,38 @@ index ec1d2b1..4ab7bf7 100644
      if (g_return_observer)
          g_return_observer(desc, c->r[R_EAX]);
      LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
-@@ -582,6 +613,7 @@ void imports_init() {
+@@ -537,8 +568,28 @@ void recomp_callback_return(X86 *c) {
+     // live guest_call. Match the guest return slot as well: a completing SEH
+     // landing may RET to an older callback's identical sentinel, in which
+     // case intercept must finish that function through its SEH checkpoint.
+-    if (call->cpu != c || c->r[R_ESP] < call->return_sp + 4 || c->r[R_ESP] > call->saved_esp)
+-        return;
++    if (call->cpu != c || c->r[R_ESP] < call->return_sp + 4 || c->r[R_ESP] > call->saved_esp) {
++        if (recomp_seh_callback_return_deferred(c))
++            return;
++        // A direct stack restore (including VB On Error recovery) can RET
++        // from an older callback without returning through intervening shims.
++        // Retire their heap ownership before abandoning their native frames.
++        call = nullptr;
++        for (size_t i = callbacks.stack.size() - 1; i-- > 0;) {
++            Callback *candidate = callbacks.stack[i];
++            if (candidate->cpu != c || c->r[R_ESP] < candidate->return_sp + 4 ||
++                c->r[R_ESP] > candidate->saved_esp)
++                continue;
++            call = candidate;
++            LOGV("callback stack return: depth=%zu -> %zu ESP=%08x", callbacks.stack.size(), i + 1,
++                 c->r[R_ESP]);
++            recomp_seh_callback_leave(c, (uint32_t)i + 2);
++            recomp_callback_truncate((uint32_t)i + 1);
++            break;
++        }
++        if (!call)
++            return;
++    }
+     mods_hooks_unwind_to_esp(call->return_sp);
+     recomp_profile_truncate(call->profile_depth);
+     longjmp(call->env, 1);
+@@ -582,6 +633,7 @@ void imports_init() {
      imports_register(g_kernel32_shims, g_kernel32_shim_count);
      kernel32_wide_register();
      oleaut32_register();
@@ -3062,10 +3095,21 @@ index ec1d2b1..4ab7bf7 100644
      comctl32_register();
      media_foundation_register();
 diff --git a/runtime/imports.h b/runtime/imports.h
-index d01eb0a..960cfd9 100644
+index d01eb0a..658e274 100644
 --- a/runtime/imports.h
 +++ b/runtime/imports.h
-@@ -70,6 +70,9 @@ ImportCallObserver imports_set_call_observer_get(void);
+@@ -14,6 +14,10 @@
+ #include "guest.h"
+ #include <stdio.h>
+ 
++// SEH landings finish through their establishing checkpoint before an older
++// callback sentinel can escape. This runtime-only query is defined in seh.cpp.
++bool recomp_seh_callback_return_deferred(const X86 *c);
++
+ // argc_stdcall sentinels.
+ static const uint8_t ARGC_CDECL = 0xff;   // caller cleans the stack: pop only the return address
+ static const uint8_t ARGC_UNKNOWN = 0xfe; // signature unknown: pop nothing and log loudly
+@@ -70,6 +74,9 @@ ImportCallObserver imports_set_call_observer_get(void);
  // WINMM tables owned by this runtime. Idempotent; called by loader_load().
  void imports_init();
  void oleaut32_register();
@@ -4688,7 +4732,7 @@ index d746097..3dc3b0d 100644
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
 diff --git a/runtime/seh.cpp b/runtime/seh.cpp
-index ac94a12..4190ec7 100644
+index ac94a12..f58763f 100644
 --- a/runtime/seh.cpp
 +++ b/runtime/seh.cpp
 @@ -1,4 +1,4 @@
@@ -4720,7 +4764,30 @@ index ac94a12..4190ec7 100644
  // Trivial automatic storage only: a handler can leave this walk by longjmp.
  struct ChainWalk {
      uint32_t visited[MAX_LINKS];
-@@ -282,6 +298,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -176,6 +192,8 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+          rd32(d->record + 4));
+     uint32_t args[] = {d->record, reg, d->context, 0};
+     uint32_t disposition = guest_call(c, handler, args, 4);
++    LOGV("SEH handler returned: disposition=%u EIP=%08x ESP=%08x context EIP=%08x ESP=%08x",
++         disposition, c->eip, c->r[R_ESP], rd32(d->context + 0xb8), rd32(d->context + 0xc4));
+     if (disposition == 0) {
+         LOGW("ExceptionContinueExecution requested; not supported (record=%08x code=%08x "
+              "registration=%08x handler=%08x)",
+@@ -191,6 +209,13 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+ }
+ } // namespace
+ 
++bool recomp_seh_callback_return_deferred(const X86 *c) {
++    for (const SehFrame *f : state.frames)
++        if (f->cpu == c && f->active_landing)
++            return true;
++    return false;
++}
++
+ extern "C" {
+ 
+ // Inspection only: do not repair or dereference an invalid link. Retain the
+@@ -282,6 +307,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
          if (f->registration < c->r[R_ESP] || chain_head(c) != f->registration)
              return nullptr;
          f->orphan = false;
@@ -4728,7 +4795,7 @@ index ac94a12..4190ec7 100644
          f->profile_depth = recomp_profile_depth();
          f->dispatch_depth = state.dispatches.size();
          LOGV("SEH adopt: registration=%08x established=%08x EIP=%08x ESP=%08x", f->registration,
-@@ -291,13 +308,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -291,13 +317,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
      return nullptr;
  }
  
@@ -7533,7 +7600,7 @@ index 7016990..6910a83 100644
      test_session_notification_service_unavailable();
      test_buffered_paint_unavailable();
 diff --git a/runtime/tests/seh_tests.cpp b/runtime/tests/seh_tests.cpp
-index 44b24b0..e9020bb 100644
+index 44b24b0..850a80c 100644
 --- a/runtime/tests/seh_tests.cpp
 +++ b/runtime/tests/seh_tests.cpp
 @@ -34,6 +34,9 @@ static uint32_t callback_sp, cleanup_reg, outer_reg;
@@ -7645,7 +7712,69 @@ index 44b24b0..e9020bb 100644
      CHECK(delay_target_calls == 1);
      CHECK(c.r[R_EAX] == 46);
      CHECK(c.r[R_ESP] == original_sp && c.eip == GUEST_RETURN_SENTINEL);
-@@ -670,6 +744,8 @@ int main(int argc, char **argv) {
+@@ -572,6 +646,57 @@ static void delay_load_return() {
+     CHECK(delay_target_calls == 1); // the original continuation returns once
+ }
+ 
++// VB recovery can restore an older callback's guest stack directly. Its RET
++// completes that callback, abandoning RaiseException and the handler callback;
++// it is not an ExceptionContinueExecution disposition from the handler.
++static uint32_t direct_return_sp, direct_return_record, direct_return_after;
++static uint32_t direct_return_handler;
++static void direct_stack_handler(X86 *c) {
++    direct_return_record = arg(c, 0);
++    CHECK(heap_owns(direct_return_record));
++    CHECK(rd32(direct_return_record + 4) == 1);
++    c->r[R_ESP] -= 32;
++    registration(c, c->r[R_ESP], rd32(c->fs_base), handler_search);
++    recomp_seh_frame_enter(c);
++    recomp_profile_push(19);
++    wr32(c->fs_base, 0xffffffff);
++    c->r[R_ESP] = direct_return_sp;
++    c->eip = rd32(c->r[R_ESP]);
++    c->r[R_ESP] += 4;
++    c->r[R_EAX] = 0x789abc;
++    recomp_return(c);
++    ++direct_return_after;
++}
++static void direct_stack_outer(X86 *c) {
++    direct_return_sp = c->r[R_ESP];
++    c->r[R_ESP] -= 32;
++    registration(c, c->r[R_ESP], 0xffffffff, direct_return_handler);
++    recomp_seh_frame_enter(c);
++    recomp_profile_push(17);
++    invoke(c, "RaiseException", {0x12345678, 1, 0, 0});
++    ++direct_return_after;
++}
++static void direct_stack_callback_return() {
++    X86 c;
++    loader_init_context(&c);
++    direct_return_handler = imports_alloc_trampoline("SEH.dll", "direct_stack_handler",
++                                                     direct_stack_handler, ARGC_CDECL);
++    uint32_t outer =
++        imports_alloc_trampoline("SEH.dll", "direct_stack_outer", direct_stack_outer, ARGC_CDECL);
++    uint32_t sp = c.r[R_ESP], blocks = heap_stats().used_blocks;
++    uint32_t depth = recomp_callback_depth(), profile = recomp_profile_depth();
++    direct_return_after = 0;
++    CHECK(guest_call(&c, outer, nullptr, 0) == 0x789abc);
++    CHECK(direct_return_after == 0);
++    CHECK(c.r[R_ESP] == sp);
++    CHECK(recomp_callback_depth() == depth);
++    CHECK(recomp_profile_depth() == profile);
++    CHECK(recomp_seh_test_frame_count(&c) == 0);
++    CHECK(heap_stats().used_blocks == blocks);
++    CHECK(!heap_owns(direct_return_record));
++    recomp_seh_reset(&c);
++}
++
+ // Capture the first invalid chain at the boundary that observes it, before a
+ // later RaiseException diagnoses only an unusable registration. Child runs
+ // isolate the cached logging switch and the deliberately damaged chains.
+@@ -667,9 +792,12 @@ int main(int argc, char **argv) {
+         return 1;
+     }
+     delay_load_return();
++    direct_stack_callback_return();
      chain_walk();
      null_call_faults();
      unwind_and_leave();
