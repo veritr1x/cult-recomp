@@ -16,7 +16,10 @@ retrieves their text. Both Windows diagnostic save tests pass again with no
 missing imports or unknown transfers. The latest GDI suite passes 233 checks
 on Windows and Linux, including paint priority and timer deadline order.
 Cult II's player and inventory now render immediately after startup Load in
-the corrected Windows and browser builds.
+the corrected Windows, Linux and browser builds. Cult II's browser also writes
+a new save from the loaded scene; the exported bytes match P4 exactly. Fresh
+Windows and Linux movement/save/load round trips pass for both games with the
+timer corrections. All Windows, Linux, browser and Android packages include them.
 
 SDL desktop packages build for Windows and Linux. Both games completed bounded
 20-second startups with Vulkan presentation, nonzero device PCM and clean exits.
@@ -225,6 +228,7 @@ browser startup Load previously read P4.fcg and then exited with Visual Basic
 error 5. A second fix queues expired timers by deadline, so the earlier sprite
 setup runs before the later update. The browser now reaches P4's saved street
 scene with its character and inventory and keeps running without that error.
+It also reloads the new A save through the in-game Load menu.
 A Windows startup Load with real time also passes after this fix. Earlier
 Windows and Linux diagnostics pass the movement and byte-identical save/load
 round trip.
@@ -246,7 +250,11 @@ for symbol stripping; the packages are about 654 MB and 658 MB. Optional
 Both games install and load their libraries on an isolated emulator using ARM64
 translation. The original software GPU lacked dynamic rendering. Host GPU testing
 exposed a missing Android Vulkan surface extension, now enabled in the runtime,
-but the emulator failed or lost its device connection after launch. Physical ARM64
+but the emulator failed or lost its device connection after launch. A legacy
+Vulkan render-pass fallback now creates the software device and swapchain;
+the emulator's ARM native bridge still faults while uploading launcher pixels.
+Both Windows and Linux packages launch with the fallback, render frames,
+capture audio and exit cleanly. Physical ARM64
 device execution, touch input and audible output remain unverified.
 
 ## Metadata references

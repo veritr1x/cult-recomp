@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--audio-ahead", type=int)
     parser.add_argument("--player", action="store_true", help="Test the assembled private launcher")
+    parser.add_argument("--legacy-vulkan", action="store_true",
+                        help="Require the Vulkan render-pass fallback during this startup check")
     args = parser.parse_args()
     if not 0 < args.seconds <= 120:
         parser.error("--seconds must be between 0 and 120")
@@ -47,6 +49,8 @@ def main():
                    RECOMP_HOST_AUDIO_CAPTURE=str(audio_file))
         if args.audio_ahead is not None:
             env["RECOMP_AUDIO_AHEAD"] = str(args.audio_ahead)
+        if args.legacy_vulkan:
+            env["RECOMP_VULKAN_LEGACY_RENDER_PASSES"] = "1"
         executable = "Cult.exe" if game == "cult" else "Cult2FC.exe"
         env["RECOMP_EXE"] = str(ROOT / "games" / game / "original/install" / executable)
         timed_out = False
@@ -74,6 +78,8 @@ def main():
                   "sdl_audio_driver_requested": env.get("SDL_AUDIODRIVER"),
                   "pulse_latency_ms_requested": env.get("PULSE_LATENCY_MSEC"),
                   "audio_ahead_frames_requested": env.get("RECOMP_AUDIO_AHEAD"),
+                  "legacy_vulkan_requested": args.legacy_vulkan,
+                  "legacy_vulkan_verified": "gpu/vulkan: legacy render passes" in log,
                   "presenter_faults": re.findall(r"presenter: FAULT:[^\n]*", log),
                   "playability_verified": False}
         # A startup run has no input script. Success requires actual presents
@@ -94,6 +100,7 @@ def main():
             except (wave.Error, ValueError, EOFError) as error:
                 record["audio_capture_error"] = str(error)
         record["verified"] = (code == 0 and not timed_out and
+                              (not args.legacy_vulkan or record["legacy_vulkan_verified"]) and
                               (record["presented_frames"] or 0) > 0 and not any(
                                   record[key] for key in ("missing_imports_called", "unknown_transfers",
                                                          "runtime_errors", "guest_access_violations",

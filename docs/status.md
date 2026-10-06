@@ -27,7 +27,7 @@ byte. Both repeat this test successfully on Linux x86_64 through the desktop
 keyboard gate, with 2,055 frames for Cult and 2,510 for Cult II.
 Earlier Cult II builds left the inventory icon blank after loading until the
 next movement input. The timer and paint corrections below restore it immediately
-in the new Windows and browser checks; the serialized inventory is preserved.
+in the new Windows, Linux and browser checks; the serialized inventory is preserved.
 
 StretchDIBits now converts positive-height source crops from a bottom-up DIB's
 lower-left origin to the bitmap DC's top-left coordinates. Previously Cult II
@@ -142,13 +142,13 @@ It passes **365 SEH checks on both Windows and Linux**. Both browser builds now
 include this correction. Cult II's browser startup Load opens P4.fcg and reads
 its 124 bytes, then reports Visual Basic error 5 (invalid procedure call or
 argument) and exits the guest with code zero. A successful browser startup Load
-has not been established. A concise trace
+had not yet been established. A concise trace
 preserves the error after verbose import traffic had displaced it from the
 browser console. Import tracing can now be suppressed independently of other
 verbose diagnostics through RECOMP_TRACE_IMPORTS=0. A bounded ReadFile byte
 trace confirms that all 124 browser input bytes equal the exported P4 file.
 The exception stack reports a failed picture-control method (offset 0x280);
-its underlying cause remains under investigation.
+its underlying cause was subsequently traced to timer ordering, described below.
 Targeted argument tracing now shows the browser's first sprite call arrives
 from a different timer callback with a null animation BSTR; the successful
 native path first supplies "Stand". Direction restoration matches the native
@@ -172,11 +172,21 @@ with three separate windows and with three timers on one window. The runtime
 now queues expired timers in deadline order, with regressions for DWORD clock
 wrap. **233 GDI checks pass on Windows and Linux**. The corrected real-time Windows
 startup P4 probe completes all 11 steps and 2,197 frames, restores the street
-and inventory, and exits cleanly. The corrected browser now loads P4 from its
+and inventory, and exits cleanly. The equivalent real-time Linux probe completes
+all 11 steps and 2,195 frames, renders the street and inventory, and exits cleanly.
+The corrected browser now loads P4 from its
 startup menu, renders the street, character and inventory, and keeps executing
 its timers with valid "Stand" BSTR arguments. The captured console trace has
 neither a run-time error nor ExitProcess. Broader browser gameplay remains to
-be verified.
+be verified. Escape opens its in-game menu, keyboard navigation reaches Save,
+and a fresh A.fcg reaches GAME SAVED. Exporting through the local player's save
+manager yields a 124-byte A.fcg identical to the loaded P4.fcg. A single Right
+tap did not change its coordinates; browser movement is not established.
+Both Windows diagnostics now repeat movement/save/load with the timer corrections:
+2,055 frames for Cult and 2,509 for Cult II. The fresh Linux runs also pass:
+2,055 and 2,510 frames respectively, restoring identical saves. Cult moves
+from (267,60) to (267,90); Cult II's Windows run reaches (437,160) and its
+Linux run reaches (417,160), both restoring (407,160).
 The corrected Cult II diagnostics repeat the 2,510-frame movement/save/load
 round trip on Windows and Linux, restoring identical save bytes.
 Cult likewise repeats its 2,055-frame round trip on both systems after the
@@ -186,31 +196,28 @@ real time and concise logging: all eleven input steps complete, 1,592 frames
 are presented and the guest exits cleanly. The preserved pinned-clock run
 stalled; a verbose real-time run had not finished its intro when input arrived.
 Those earlier probes do not establish a Linux startup-Load failure.
-Browser serialization/restoration has not received the native byte comparison.
-Browser save/load,
-sustained gameplay and physical/touch device compatibility remain unverified.
+The browser's newly exported save byte comparison covers the P4 startup Load and
+resave path. Sustained browser gameplay and physical/touch device compatibility
+remain unverified.
 The four mouse-state regressions pass; the keyboard gate and queued-input checks
 have 78 checks with zero
 failures. The latest broader runtime run has 1,617 checks, 24 failures and two
 skips, including file overlay, version/image resources, timing fixtures and
 translation metadata contracts; it is not a full pass. Its window-model checks
 pass.
-All four Windows/Linux player packages include the control text changes,
-checkpoint lifetime fix and callback ownership correction. The latest
-five-second Windows launcher probes render and exit cleanly
-with running audio devices: Cult captures 232,448 PCM frames and Cult II captures
-229,376, both with peak 17,341 PCM16 and zero late or starved pulls. Audible
+All Windows, Linux, browser and Android packages include the control text changes,
+checkpoint lifetime fix, callback ownership correction and timer ordering fixes. The latest
+five-second Windows launcher probes explicitly select legacy Vulkan, render and exit cleanly
+with running audio devices: Cult captures 225,280 PCM frames and Cult II captures
+231,424, both with peak 17,341 PCM16. Audible
 output is still unverified.
-Cult's refreshed Linux player completes twenty seconds with 927,672 PCM frames,
-peak 17,341, zero late or starved pulls and a clean exit.
-Cult II's newest Linux player exits cleanly in a twenty-second startup and
-captures 166,133 PCM frames, peak 17,341, but reports 16 late audio pulls out
-of 78 and zero starved pulls. This run does not establish smooth playback;
-the earlier zero-late timing result does not describe this newest run.
-The rebuilt Linux players pass twenty-second startup with nonzero device PCM:
-Cult has 933,435 frames, and Cult II has 943,508 frames, both peaking at 17,341
-PCM16. An initial Cult II run during concurrent compilation records late audio
-pulls; repeating it after linking finishes records zero late or starved pulls.
+The latest Linux launchers also explicitly select legacy Vulkan and pass
+twenty-second startup with 118 presented frames for Cult and five for Cult II.
+Cult captures 935,831 PCM frames, peak 32,767, and Cult II captures 945,904,
+peak 17,341. Both report zero late or starved audio pulls and exit cleanly.
+These checks establish menu startup, renderer selection and captured output;
+they do not establish audible sound quality. Earlier Cult II runs during
+concurrent work reported late pulls; their logs are retained as historical evidence.
 The initial five-second menu-only Cult II run has buffered PCM with a zero peak
 and is preserved separately.
 Windows-hosted Android
@@ -235,11 +242,31 @@ and control-text fixes. The package checks verify the native ELF ABI and named r
 they do not verify device gameplay.
 Cult II's newest APK also contains the checkpoint lifetime and callback ownership
 corrections, confirmed in its ARM64 library. Its SHA-256 is
-36450bc92a6ed77ffae5c780e666333b86b970681cfc9747207e0a6a970071d2.
+e539f6242a0d6485e197cefb082917dafc497f299b796101f6ccda92c5880db8.
 Cult's corresponding rebuild is also packaged; its SHA-256 is
-06bb5110a440833568a09d384c768682cf26ce782d1bce77c6b56ebc9a42b625.
-Android gameplay remains
-blocked on the tested software Vulkan device's missing dynamic-rendering support.
+218d6878458cbfd6c13ca2222103b25b05abe910e43e139d291eee60e17e8f80.
+Both APKs now include a legacy Vulkan render-pass fallback and buffer diagnostics.
+The fallback selects supported features, retains framebuffers through submission
+and retires them before their image views. Its focused attachment clear/load,
+depth and lifetime suite passes 53 checks on Windows and Linux; presenter pixel
+checks pass 131 on each. Validation layers are absent on both tested hosts.
+The broad Windows renderer suite records 3,738,266 checks and 229 failures in both
+dynamic and legacy modes, with identical failure records; it is not a full pass.
+The swapchain suite now renders before resizing to cover framebuffer retirement;
+both modes record 36 checks and one failure because the hidden Windows surface
+remains 32 pixels wide when the fixture requests a 64-pixel swapchain.
+The emulator now creates a legacy Vulkan device and a 1080x2400 swapchain, clearing
+the missing-dynamic-rendering blocker. Its native-bridge libc then faults during
+the 10,368,000-byte staging upload of launcher pixels. Buffer diagnostics preserve
+the returned maps and faulting write; no game frame has been established.
+After correcting copied game-directory permissions, the Android app recognizes
+Cult2FC.exe. The adb push path now applies that scoped directory permission fix,
+and 40 build and packaging tests pass.
+Disabling GLDirectMem, including a second attempt also disabling GLDMA and GLDMA2,
+causes the emulator's own SurfaceFlinger to abort; those test emulators were
+stopped after logs were captured. Disabling VirtioGpuNext preserves a healthy
+emulator boot but the same app upload still faults. An explicit mapping size
+also faults and was reverted. Android gameplay remains unverified.
 Gradle now receives CMake's NDK path and Pkg.Revision, avoiding a silent failure
 to strip symbols with AGP's different default NDK. This reduces Cult II's APK
 from about 1.28 GB to 658 MB; Cult's package is about 654 MB. The Gradle/build
@@ -261,7 +288,8 @@ it does not verify SDL display or audio devices.
 
 The latest selected native contracts pass:
 
-- Graphics: **220 checks, zero failures**, including control text delivery and
+- Graphics: **233 checks, zero failures**, including paint/timer priority,
+  deadline ordering across clock wrap, control text delivery and
   retrieval, child/sibling stacking and clipping, requested-depth bitmap
   downloads with guard bytes, orientation, scan ranges, background erasure,
   partial update clipping, hidden child DCs and cropped DIB orientation.
@@ -344,8 +372,7 @@ After the mouse-state fix, updated Windows launchers pass 20-second checks with
 nonzero captured device PCM; updated Linux launchers pass five-second checks
 with nonzero PCM. These checks verify startup and clean exits, not gameplay.
 
-Remaining work: investigate Cult II's inventory redraw immediately after loading,
-exercise further interactions/transitions, verify original-save
+Remaining work: exercise further interactions/transitions, verify original-save
 compatibility, test physical and touch input plus audible music/effects, and
 build/test each requested platform with its required toolchain and SDK. Full
 playable ports and an all-platform release remain outstanding.

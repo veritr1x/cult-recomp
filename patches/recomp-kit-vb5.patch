@@ -1,11 +1,20 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..a475b02 100644
+index 20fdc15..7cb30d5 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,160 @@
+@@ -2,6 +2,169 @@
  
  ## Unreleased
  
++- Use legacy single-subpass Vulkan render passes when dynamic rendering is not
++  supported or enabled. Retain framebuffers until command completion and retire
++  them before referenced image views. `RECOMP_VULKAN_LEGACY_RENDER_PASSES=1`
++  selects this path for verification on newer devices. The separate Direct3D 9
++  Vulkan encoder still requires dynamic rendering and uses its CPU fallback on
++  these devices.
++  Make the copied Android game directory traversable by the app after an adb
++  data push; preserve the app's enclosing scoped-storage root permissions.
++
 +- Retrieve pending window paint before generated SetTimer notifications in both
 +  PeekMessage and GetMessage. Preserve explicitly posted WM_TIMER order, message
 +  filters and PM_NOREMOVE behavior.
@@ -182,7 +191,7 @@ index 2735492..a656211 100644
  
  # glslang compiles the Direct3D 9 renderer's GLSL to SPIR-V at run time
 diff --git a/docs/testing.md b/docs/testing.md
-index bb8776b..9ff6c19 100644
+index bb8776b..e6e75fd 100644
 --- a/docs/testing.md
 +++ b/docs/testing.md
 @@ -3,6 +3,14 @@
@@ -200,10 +209,17 @@ index bb8776b..9ff6c19 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
-@@ -63,6 +71,12 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
+@@ -63,6 +71,19 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
  
  ## Manual gameplay checks
  
++`host_tests --render-pass-gpu` checks real attachment clear/load operations,
++two color attachments, depth and framebuffer resource lifetime through readback.
++Run it and `host_tests --presenter-gpu` with
++`RECOMP_VULKAN_LEGACY_RENDER_PASSES=1` to verify the fallback on a Vulkan device
++that also supports dynamic rendering. `RECOMP_GPU_VALIDATE=1` requests validation
++layers and reports explicitly when none are available.
++
 +`RECOMP_HOST_SECONDS=10` requests a normal guest close after ten seconds in the
 +SDL desktop app, for bounded startup/display/audio diagnostics. Invalid or
 +nonpositive values leave the normal run unlimited. Combine this with
@@ -1160,8 +1176,49 @@ index 71c41d8..add93cd 100644
          candidate = l.developer ? l.checkout_root + "/" + candidate : std::string();
      OsStat st;
      if (!candidate.empty() && os_stat(candidate.c_str(), &st) == 0) {
+diff --git a/host/gpu/tests/gpu_contract_tests.cpp b/host/gpu/tests/gpu_contract_tests.cpp
+index db35284..a5da31b 100644
+--- a/host/gpu/tests/gpu_contract_tests.cpp
++++ b/host/gpu/tests/gpu_contract_tests.cpp
+@@ -186,9 +186,20 @@ static void test_swapchain_from_surface() {
+     CHECK(s && d->swapchain_format(s) == Format::BGRA8);
+     Texture t = d->acquire(s);
+     CHECK(t && d->describe(t).width == 32 && d->describe(t).height == 16);
+-    d->release_drawable(s, t);
++    // Resize must retire the submitted pass's framebuffer before replacing
++    // the swapchain views, including when the caller does not wait first.
++    RenderPass pass;
++    pass.color[0].texture = t;
++    pass.color[0].load = Load::Clear;
++    auto cb = d->begin();
++    CHECK(cb);
++    d->begin_render_pass(cb, pass);
++    d->end_render_pass(cb);
++    d->present(cb, s, t, 0, nullptr);
++    d->commit(cb);
+     CHECK(d->describe(t).width == 0);
+     d->resize(s, 64, 32);
++    CHECK(d->status(cb) == CommandStatus::Completed);
+     Texture t2 = d->acquire(s);
+     CHECK(t2 && d->describe(t2).width == 64);
+     d->release_drawable(s, t2);
+diff --git a/host/gpu/vulkan/d3d9_vulkan.cpp b/host/gpu/vulkan/d3d9_vulkan.cpp
+index cae581c..567e803 100644
+--- a/host/gpu/vulkan/d3d9_vulkan.cpp
++++ b/host/gpu/vulkan/d3d9_vulkan.cpp
+@@ -2692,7 +2692,9 @@ class VkRenderer final : public D9Backend {
+ 
+ D9Backend *d9_vulkan_create(gpu::Device *device) {
+     auto *vulkan = dynamic_cast<VulkanDevice *>(device);
+-    if (!vulkan)
++    // This encoder still uses dynamic rendering; keep the CPU D3D9 fallback
++    // available on older devices while the shared 2D renderer uses render passes.
++    if (!vulkan || !vulkan->native_dynamic_rendering())
+         return nullptr;
+     auto *r = new VkRenderer(vulkan);
+     if (!r->ok()) {
 diff --git a/host/gpu/vulkan/vulkan_device.cpp b/host/gpu/vulkan/vulkan_device.cpp
-index e0ea1c5..4e4d24f 100644
+index e0ea1c5..18b5c89 100644
 --- a/host/gpu/vulkan/vulkan_device.cpp
 +++ b/host/gpu/vulkan/vulkan_device.cpp
 @@ -84,9 +84,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
@@ -1177,11 +1234,374 @@ index e0ea1c5..4e4d24f 100644
          if (has_inst(s))
              inst_ext.push_back(s);
      std::vector<const char *> layers;
+@@ -167,13 +167,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
+     if (has_dev("VK_KHR_portability_subset"))
+         dev_ext.push_back("VK_KHR_portability_subset");
+     d->core13_ = d->props_.apiVersion >= VK_API_VERSION_1_3 && app.apiVersion >= VK_API_VERSION_1_3;
+-    if (!d->core13_) {
+-        if (!has_dev("VK_KHR_dynamic_rendering")) {
+-            fprintf(stderr, "gpu/vulkan: device lacks dynamic rendering\n");
+-            return nullptr;
+-        }
+-        dev_ext.push_back("VK_KHR_dynamic_rendering");
+-    }
++    const bool has_dynamic = d->core13_ || has_dev("VK_KHR_dynamic_rendering");
+ 
+     VkPhysicalDeviceSubgroupProperties sub{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+     VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+@@ -204,16 +198,29 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
+         VkPhysicalDeviceFeatures2 have2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+         have2.pNext = &have13;
+         vkGetPhysicalDeviceFeatures2(chosen, &have2);
+-        f13.dynamicRendering = VK_TRUE;
++        f13.dynamicRendering = have13.dynamicRendering;
++        d->dynamic_rendering_ = have13.dynamicRendering;
+         if (have13.subgroupSizeControl && have13.computeFullSubgroups) {
+             f13.subgroupSizeControl = f13.computeFullSubgroups = VK_TRUE;
+             d->full_subgroups_ = true;
+         }
+         f2.pNext = &f13;
+-    } else {
+-        fdr.dynamicRendering = VK_TRUE;
++    } else if (has_dynamic) {
++        VkPhysicalDeviceFeatures2 have2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
++        have2.pNext = &fdr;
++        vkGetPhysicalDeviceFeatures2(chosen, &have2);
++        d->dynamic_rendering_ = fdr.dynamicRendering;
+         f2.pNext = &fdr;
+     }
++    if (const char *legacy = recomp_env("VULKAN_LEGACY_RENDER_PASSES"); legacy && *legacy == '1') {
++        d->dynamic_rendering_ = false;
++        f13.dynamicRendering = fdr.dynamicRendering = VK_FALSE;
++    }
++    if (!d->core13_ && d->dynamic_rendering_)
++        dev_ext.push_back("VK_KHR_dynamic_rendering");
++    else if (!d->core13_)
++        f2.pNext = nullptr;
++    fprintf(stderr, "gpu/vulkan: %s render passes\n", d->dynamic_rendering_ ? "dynamic" : "legacy");
+     float prio = 1.0f;
+     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+     qci.queueFamilyIndex = family;
+@@ -237,7 +244,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
+         vkCmdBeginRendering = vkCmdBeginRenderingKHR;
+         vkCmdEndRendering = vkCmdEndRenderingKHR;
+     }
+-    if (!vkCmdBeginRendering) {
++    if (d->dynamic_rendering_ && (!vkCmdBeginRendering || !vkCmdEndRendering)) {
+         fprintf(stderr, "gpu/vulkan: no dynamic rendering entry points\n");
+         return nullptr;
+     }
+@@ -271,6 +278,11 @@ VulkanDevice::~VulkanDevice() {
+     if (reaper_.joinable())
+         reaper_.join();
+     vkDeviceWaitIdle(device_);
++    // Framebuffers must go before the views owned by swapchains and textures.
++    for (auto &c : free_cmds_)
++        retire_framebuffers(*c);
++    for (auto &[id, c] : recording_)
++        retire_framebuffers(*c);
+     for (auto &[id, c] : swapchains_) {
+         for (auto &[tid, idx] : c->acquired)
+             textures_.erase(tid);
+@@ -320,6 +332,8 @@ VulkanDevice::~VulkanDevice() {
+     for (auto &[id, f] : families_)
+         for (auto &[k, p] : f.variants)
+             vkDestroyPipeline(device_, p, nullptr);
++    for (auto &[key, pass] : render_passes_)
++        vkDestroyRenderPass(device_, pass, nullptr);
+     for (auto &[id, cp] : computes_)
+         vkDestroyPipeline(device_, cp.pipeline, nullptr);
+     for (auto &[name, m] : modules_)
+@@ -376,6 +390,9 @@ static bool make_host_buffer(VulkanDevice &d, uint64_t bytes, VkBufferUsageFlags
+         *buffer = VK_NULL_HANDLE;
+         return false;
+     }
++    if (d.trace_)
++        fprintf(stderr, "gpu/vulkan: host buffer %llu bytes, allocation %llu, map %p\n",
++                (unsigned long long)bytes, (unsigned long long)req.size, *map);
+     return true;
+ }
+ 
+@@ -600,6 +617,9 @@ bool VulkanDevice::upload(Texture tex, Region region, const void *bytes, int pit
+     if (!make_host_buffer(*this, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging.buffer,
+                           &staging.memory, &staging.map))
+         return false;
++    if (trace_)
++        fprintf(stderr, "gpu/vulkan: upload %dx%d, row %llu, pitch %d, map %p, source %p\n",
++                region.w, region.h, (unsigned long long)row, pitch, staging.map, bytes);
+     for (int y = 0; y < region.h; ++y)
+         memcpy(static_cast<uint8_t *>(staging.map) + y * row,
+                static_cast<const uint8_t *>(bytes) + uint64_t(y) * pitch, size_t(row));
+@@ -996,6 +1016,7 @@ void VulkanDevice::submit_cmd(uint64_t id, std::unique_ptr<Cmd> c) {
+         auto callbacks = std::move(c->callbacks);
+         retired_[cb.id] = CommandStatus::Error;
+         retired_order_.push_back(cb.id);
++        retire_framebuffers(*c);
+         retire_graves(cb.id);
+         free_cmds_.push_back(std::move(c));
+         for (auto &fn : callbacks)
+@@ -1048,6 +1069,7 @@ void VulkanDevice::reap_loop() {
+         s.cmd->presented = nullptr;
+         retired_[s.id] = status;
+         retired_order_.push_back(s.id);
++        retire_framebuffers(*s.cmd);
+         retire_graves(s.id);
+         while (retired_order_.size() > 1024) {
+             retired_.erase(retired_order_.front());
+diff --git a/host/gpu/vulkan/vulkan_device.h b/host/gpu/vulkan/vulkan_device.h
+index 5f84c42..88b712c 100644
+--- a/host/gpu/vulkan/vulkan_device.h
++++ b/host/gpu/vulkan/vulkan_device.h
+@@ -99,6 +99,9 @@ class VulkanDevice final : public Device {
+     bool native_core13() const {
+         return core13_;
+     }
++    bool native_dynamic_rendering() const {
++        return dynamic_rendering_;
++    }
+     // Submits `cb` on the device's queue, behind the transfers the device has
+     // pending, so it runs before any command buffer committed after it.
+     bool submit_native(VkCommandBuffer cb, VkFence fence);
+@@ -145,6 +148,8 @@ class VulkanDevice final : public Device {
+         VkQueryPool queries = VK_NULL_HANDLE; // 2 timestamps
+         VkDescriptorPool pool = VK_NULL_HANDLE;
+         std::vector<VkDescriptorPool> extra_pools; // exhausted pools, reset with `pool`
++        // Legacy render-pass framebuffers retain their image views through submission.
++        std::vector<VkFramebuffer> framebuffers;
+         // The bytes ring: host-visible, reset when the Cmd is recycled.
+         VkBuffer ring = VK_NULL_HANDLE;
+         VkDeviceMemory ring_memory = VK_NULL_HANDLE;
+@@ -231,6 +236,10 @@ class VulkanDevice final : public Device {
+     void destroy_buf(Buf &b);
+     void bury(Tex tex, Buf buf);         // mutex held
+     void retire_graves(uint64_t cmd_id); // mutex held
++    void retire_framebuffers(Cmd &c);    // after execution, before image-view graves
++    VkRenderPass legacy_render_pass(const Format *formats, int color_count, bool depth,
++                                    const VkRenderingAttachmentInfo *color,
++                                    const VkRenderingAttachmentInfo *depth_info); // mutex held
+ 
+     VkInstance instance_ = VK_NULL_HANDLE;
+     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
+@@ -265,6 +274,7 @@ class VulkanDevice final : public Device {
+     bool anisotropy_ = false;
+     VkPhysicalDeviceFeatures enabled_features_{};
+     bool core13_ = false;
++    bool dynamic_rendering_ = false;
+     bool full_subgroups_ = false; // computeFullSubgroups enabled
+     bool failed_ = false;
+     bool trace_ = false;     // RECOMP_GPU_TRACE=1
+@@ -306,7 +316,8 @@ class VulkanDevice final : public Device {
+     std::unordered_map<uint64_t, ComputePipe> computes_;
+     std::unordered_map<std::string, uint64_t> compute_by_name_;
+     std::unordered_map<std::string, VkShaderModule> modules_;
+-    std::map<uint64_t, VkSampler> samplers_; // key from SamplerState fields
++    std::map<uint64_t, VkSampler> samplers_;         // key from SamplerState fields
++    std::map<uint64_t, VkRenderPass> render_passes_; // formats and load/store operations
+     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+     Buf dummy_buffer_;
+diff --git a/host/gpu/vulkan/vulkan_pipeline.cpp b/host/gpu/vulkan/vulkan_pipeline.cpp
+index 62729b8..259b0b5 100644
+--- a/host/gpu/vulkan/vulkan_pipeline.cpp
++++ b/host/gpu/vulkan/vulkan_pipeline.cpp
+@@ -311,7 +311,14 @@ VkPipeline VulkanDevice::variant_for(Cmd &c) {
+     ri.pColorAttachmentFormats = formats;
+     ri.depthAttachmentFormat = c.pass_depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
+     VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+-    gci.pNext = &ri;
++    if (dynamic_rendering_)
++        gci.pNext = &ri;
++    else {
++        gci.renderPass = legacy_render_pass(f.state.color_format, f.state.color_count, c.pass_depth,
++                                            nullptr, nullptr);
++        if (!gci.renderPass)
++            return VK_NULL_HANDLE;
++    }
+     gci.stageCount = 2;
+     gci.pStages = stages;
+     gci.pVertexInputState = &vi;
+@@ -371,10 +378,83 @@ int VulkanDevice::thread_execution_width(Pipeline p) {
+ 
+ // ------------------------------------------------------------------ passes
+ 
++// Cache single-subpass render passes independently of image views. Load/store
++// operations distinguish cache entries but not pipeline compatibility. All shared
++// backend textures are single-sampled and remain in GENERAL between passes.
++VkRenderPass VulkanDevice::legacy_render_pass(const Format *formats, int color_count, bool depth,
++                                              const VkRenderingAttachmentInfo *color,
++                                              const VkRenderingAttachmentInfo *depth_info) {
++    uint64_t key = uint64_t(color_count) | uint64_t(depth) << 2;
++    VkAttachmentDescription attachments[3] = {};
++    VkAttachmentReference colors[2] = {};
++    VkAttachmentReference depth_ref{};
++    const int count = color_count + int(depth);
++    for (int i = 0; i < count; ++i) {
++        const bool is_depth = i == color_count;
++        const VkRenderingAttachmentInfo *info = is_depth ? depth_info : color ? &color[i] : nullptr;
++        auto &a = attachments[i];
++        a.format = is_depth ? VK_FORMAT_D32_SFLOAT : vk_format(formats[i]);
++        a.samples = VK_SAMPLE_COUNT_1_BIT;
++        a.loadOp = info ? info->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD;
++        a.storeOp = info ? info->storeOp : VK_ATTACHMENT_STORE_OP_STORE;
++        a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++        a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
++        const uint64_t part = uint64_t(is_depth ? Format::Depth32F : formats[i]) |
++                              uint64_t(a.loadOp) << 3 | uint64_t(a.storeOp) << 5;
++        key |= part << (8 + 8 * i);
++        if (is_depth)
++            depth_ref = {uint32_t(i), VK_IMAGE_LAYOUT_GENERAL};
++        else
++            colors[i] = {uint32_t(i), VK_IMAGE_LAYOUT_GENERAL};
++    }
++    auto found = render_passes_.find(key);
++    if (found != render_passes_.end())
++        return found->second;
++    VkSubpassDescription subpass{};
++    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++    subpass.colorAttachmentCount = uint32_t(color_count);
++    subpass.pColorAttachments = colors;
++    subpass.pDepthStencilAttachment = depth ? &depth_ref : nullptr;
++    VkSubpassDependency dependency{};
++    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
++    dependency.dstSubpass = 0;
++    dependency.srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
++                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
++                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
++    dependency.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++    dependency.dstAccessMask =
++        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
++        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
++    VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
++    ci.attachmentCount = uint32_t(count);
++    ci.pAttachments = attachments;
++    ci.subpassCount = 1;
++    ci.pSubpasses = &subpass;
++    ci.dependencyCount = 1;
++    ci.pDependencies = &dependency;
++    VkRenderPass pass = VK_NULL_HANDLE;
++    if (vkCreateRenderPass(device_, &ci, nullptr, &pass) != VK_SUCCESS) {
++        fail("legacy render pass creation failed");
++        return VK_NULL_HANDLE;
++    }
++    render_passes_[key] = pass;
++    return pass;
++}
++
++// Called with the device mutex after the fence retires (or at idle shutdown).
++// Destroy before retire_graves can release any referenced texture image view.
++void VulkanDevice::retire_framebuffers(Cmd &c) {
++    for (VkFramebuffer framebuffer : c.framebuffers)
++        vkDestroyFramebuffer(device_, framebuffer, nullptr);
++    c.framebuffers.clear();
++}
++
+ void VulkanDevice::begin_render_pass(CommandBuffer cb, const RenderPass &pass) {
+     std::lock_guard lock(mutex_);
+     Cmd *c = cmd(cb);
+-    if (!c)
++    if (!c || pass.color_count < 0 || pass.color_count > 2)
+         return;
+     end_passes(*c);
+     full_barrier(c->buffer);
+@@ -418,7 +498,44 @@ void VulkanDevice::begin_render_pass(CommandBuffer cb, const RenderPass &pass) {
+     info.colorAttachmentCount = uint32_t(pass.color_count);
+     info.pColorAttachments = color;
+     info.pDepthAttachment = c->pass_depth ? &depth : nullptr;
+-    vkCmdBeginRendering(c->buffer, &info);
++    if (dynamic_rendering_) {
++        vkCmdBeginRendering(c->buffer, &info);
++    } else {
++        VkRenderPass render_pass =
++            legacy_render_pass(c->pass_formats, pass.color_count, c->pass_depth, color, &depth);
++        if (!render_pass)
++            return;
++        VkImageView views[3] = {};
++        VkClearValue clears[3] = {};
++        for (int i = 0; i < pass.color_count; ++i) {
++            views[i] = color[i].imageView;
++            clears[i] = color[i].clearValue;
++        }
++        if (c->pass_depth) {
++            views[pass.color_count] = depth.imageView;
++            clears[pass.color_count] = depth.clearValue;
++        }
++        VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
++        fci.renderPass = render_pass;
++        fci.attachmentCount = uint32_t(pass.color_count + int(c->pass_depth));
++        fci.pAttachments = views;
++        fci.width = uint32_t(w);
++        fci.height = uint32_t(h);
++        fci.layers = 1;
++        VkFramebuffer framebuffer = VK_NULL_HANDLE;
++        if (vkCreateFramebuffer(device_, &fci, nullptr, &framebuffer) != VK_SUCCESS) {
++            fail("legacy framebuffer creation failed");
++            return;
++        }
++        c->framebuffers.push_back(framebuffer);
++        VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
++        begin.renderPass = render_pass;
++        begin.framebuffer = framebuffer;
++        begin.renderArea = info.renderArea;
++        begin.clearValueCount = fci.attachmentCount;
++        begin.pClearValues = clears;
++        vkCmdBeginRenderPass(c->buffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
++    }
+     c->in_render = true;
+     c->pass_width = w;
+     c->pass_height = h;
+@@ -434,8 +551,12 @@ void VulkanDevice::begin_render_pass(CommandBuffer cb, const RenderPass &pass) {
+ }
+ 
+ void VulkanDevice::end_passes(Cmd &c) {
+-    if (c.in_render)
+-        vkCmdEndRendering(c.buffer);
++    if (c.in_render) {
++        if (dynamic_rendering_)
++            vkCmdEndRendering(c.buffer);
++        else
++            vkCmdEndRenderPass(c.buffer);
++    }
+     c.in_render = c.in_compute = false;
+     c.bound = VK_NULL_HANDLE;
+ }
 diff --git a/host/gpu/vulkan/vulkan_swapchain.cpp b/host/gpu/vulkan/vulkan_swapchain.cpp
-index fe40a38..020f8ea 100644
+index fe40a38..4ac1cd4 100644
 --- a/host/gpu/vulkan/vulkan_swapchain.cpp
 +++ b/host/gpu/vulkan/vulkan_swapchain.cpp
-@@ -196,7 +196,15 @@ Texture VulkanDevice::acquire(Swapchain s) {
+@@ -169,7 +169,8 @@ Swapchain VulkanDevice::create_swapchain(void *native_surface, int width, int he
+ }
+ 
+ void VulkanDevice::resize(Swapchain s, int width, int height) {
+-    // build_swapchain waits for the device to go idle itself.
++    // Retire completed framebuffers before build_swapchain releases image views.
++    wait_all_submitted();
+     std::lock_guard lock(mutex_);
+     auto it = swapchains_.find(s.id);
+     if (it != swapchains_.end())
+@@ -187,16 +188,34 @@ Texture VulkanDevice::acquire(Swapchain s) {
+     auto it = swapchains_.find(s.id);
+     if (it == swapchains_.end() || failed_)
+         return {};
++    // Waiting outside the table lock lets the reaper release framebuffers
++    // before either resize path destroys the swapchain's image views.
++    auto rebuild = [&]() {
++        const int width = it->second->width, height = it->second->height;
++        lock.unlock();
++        wait_all_submitted();
++        lock.lock();
++        it = swapchains_.find(s.id);
++        return it != swapchains_.end() && build_swapchain(*this, *it->second, width, height);
++    };
++    if (it->second->needs_recreate && !rebuild())
++        return {};
+     Chain &c = *it->second;
+-    if (c.needs_recreate && !build_swapchain(*this, c, c.width, c.height))
+-        return {}; // build_swapchain waits for the device to go idle
+     VkSemaphore sem = c.acquire_semaphores[c.next_acquire % c.acquire_semaphores.size()];
+     uint32_t index = 0;
+     VkResult r =
          vkAcquireNextImageKHR(device_, c.swapchain, UINT64_MAX, sem, VK_NULL_HANDLE, &index);
      if (r == VK_ERROR_OUT_OF_DATE_KHR) {
          c.needs_recreate = true;
@@ -1189,7 +1609,7 @@ index fe40a38..020f8ea 100644
 +        // Resize invalidates a swapchain without acquiring an image or
 +        // signalling its semaphore. Rebuild and retry once within acquire,
 +        // rather than reporting a presenter fault for a recoverable resize.
-+        if (!build_swapchain(*this, c, c.width, c.height))
++        if (!rebuild())
 +            return {};
 +        sem = c.acquire_semaphores[c.next_acquire % c.acquire_semaphores.size()];
 +        r = vkAcquireNextImageKHR(device_, c.swapchain, UINT64_MAX, sem, VK_NULL_HANDLE, &index);
@@ -1198,6 +1618,14 @@ index fe40a38..020f8ea 100644
      }
      if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
          return {};
+@@ -303,6 +322,7 @@ double VulkanDevice::refresh_period(Swapchain s) {
+ }
+ 
+ void VulkanDevice::destroy(Swapchain s) {
++    wait_all_submitted();
+     std::lock_guard lock(mutex_);
+     auto it = swapchains_.find(s.id);
+     if (it == swapchains_.end())
 diff --git a/host/input.cpp b/host/input.cpp
 index 091660f..979aef2 100644
 --- a/host/input.cpp
@@ -1440,7 +1868,7 @@ index 9525259..c5dcf13 100644
              break; // consumed
          host_input_key(m.mac, step.down != 0);
 diff --git a/host/tests/host_tests.cpp b/host/tests/host_tests.cpp
-index 8bc24e5..de0d90b 100644
+index 8bc24e5..3ef4019 100644
 --- a/host/tests/host_tests.cpp
 +++ b/host/tests/host_tests.cpp
 @@ -869,6 +869,7 @@ static void test_script_parsing() {
@@ -1488,7 +1916,7 @@ index 8bc24e5..de0d90b 100644
      CHECK(gate_next_message(&ctx, &wp) == 0x0102); //    and its WM_CHAR
      CHECK(wp == 'G');
      CHECK(gate_next_message(&ctx, nullptr) == 0);
-@@ -9758,6 +9775,54 @@ static void test_d3d9_gpu_renderer() {
+@@ -9758,7 +9775,115 @@ static void test_d3d9_gpu_renderer() {
      host_d9_texture_drop(DEPTH);
  }
  
@@ -1540,10 +1968,71 @@ index 8bc24e5..de0d90b 100644
 +    host_audio_offline_end();
 +}
 +
++// Exercise attachment load/store and lifetime through the real backend. A
++// destroyed attachment is retained until its framebuffer's submission retires.
++static void test_gpu_render_pass_contract() {
++    using namespace gpu;
++    auto color = g_gpu->create_texture({4, 4, Format::RGBA8, UsageRenderTarget | UsageCpu});
++    auto mask = g_gpu->create_texture({4, 4, Format::R8, UsageRenderTarget | UsageCpu});
++    auto depth = g_gpu->create_texture({4, 4, Format::Depth32F, UsageRenderTarget | UsageCpu});
++    auto copy = g_gpu->create_texture({4, 4, Format::RGBA8, UsageRenderTarget | UsageCpu});
++    CHECK(color && mask && depth && copy);
++    if (!color || !mask || !depth || !copy)
++        return;
++    RenderPass pass;
++    pass.color_count = 2;
++    pass.color[0].texture = color;
++    pass.color[0].load = Load::Clear;
++    pass.color[0].clear[0] = 1;
++    pass.color[1].texture = mask;
++    pass.color[1].load = Load::Clear;
++    pass.color[1].clear[0] = 1;
++    pass.depth.texture = depth;
++    pass.depth.load = Load::Clear;
++    pass.depth.clear = 0.25f;
++    auto cb = g_gpu->begin();
++    g_gpu->begin_render_pass(cb, pass);
++    g_gpu->end_render_pass(cb);
++    // A compatible pass with different load operations must retain the clear.
++    pass.color[0].load = pass.color[1].load = pass.depth.load = Load::Load;
++    g_gpu->begin_render_pass(cb, pass);
++    g_gpu->end_render_pass(cb);
++    g_gpu->blit(cb, color, {0, 0, 4, 4}, copy, 0, 0);
++    g_gpu->destroy(color);
++    g_gpu->commit(cb);
++    g_gpu->wait(cb);
++    CHECK(g_gpu->status(cb) == CommandStatus::Completed);
++    uint32_t pixels[16] = {};
++    uint8_t masks[16] = {};
++    float depths[16] = {};
++    CHECK(g_gpu->readback(copy, {0, 0, 4, 4}, pixels, 16));
++    CHECK(g_gpu->readback(mask, {0, 0, 4, 4}, masks, 4));
++    CHECK(g_gpu->readback(depth, {0, 0, 4, 4}, depths, 16));
++    for (int i = 0; i < 16; ++i) {
++        CHECK_EQ(pixels[i], 0xff0000ffu);
++        CHECK_EQ(masks[i], 255);
++        CHECK_NEAR(depths[i], 0.25, 0.00001);
++    }
++    g_gpu->destroy(copy);
++    g_gpu->destroy(mask);
++    g_gpu->destroy(depth);
++}
++
  int main(int argc, char **argv) {
++    if (argc == 2 && !strcmp(argv[1], "--render-pass-gpu")) {
++        g_gpu = gpu::create_default_device();
++        if (!g_gpu) {
++            printf("no GPU device: render pass contracts did not run\n");
++            return 2;
++        }
++        test_gpu_render_pass_contract();
++        printf("render pass GPU: %d checks, %d failures\n", g_checks, g_failures);
++        return g_failures ? 1 : 0;
++    }
      if (argc == 2 && !strcmp(argv[1], "--dumpat-only")) {
          test_dumpat_present_and_seal();
-@@ -9818,6 +9883,27 @@ int main(int argc, char **argv) {
+         printf("dumpat integration: %d checks, %d failures\n", g_checks, g_failures);
+@@ -9818,6 +9943,27 @@ int main(int argc, char **argv) {
          }
      }
      mem_init();
@@ -10726,7 +11215,7 @@ index 4f45372..e9d41f1 100644
              game = Path(tmp) / "g"
              game.mkdir()
 diff --git a/tools/build.py b/tools/build.py
-index 6c3d908..6c24fd7 100644
+index 6c3d908..51c8fa2 100644
 --- a/tools/build.py
 +++ b/tools/build.py
 @@ -165,6 +165,23 @@ def android_project(build_root, cfg, *, gen_dir):
@@ -10788,6 +11277,17 @@ index 6c3d908..6c24fd7 100644
      apk = out / "app/build/outputs/apk/debug/app-debug.apk"
      if not apk.is_file():
          raise FileNotFoundError("No APK after assembleDebug: %s" % apk)
+@@ -264,6 +299,10 @@ def android_push_game(command, cfg, build_root):
+     subprocess.run(command + ["shell", "mkdir", "-p", destination], check=True)
+     # Push game/ into its parent on every run: never create game/game/.
+     subprocess.run(command + ["push", str(staged), destination + "/"], check=True)
++    # adb sync creates this directory as shell with a group-only search bit.
++    # The app's own scoped-storage root still controls access; make the copied
++    # game directory traversable by its app UID before native path discovery.
++    subprocess.run(command + ["shell", "chmod", "0755", destination + "/game"], check=True)
+ 
+ 
+ def android_install_and_launch(apk, bundle_id, device=None, console=False, *, game_cfg=None, build_root=None):
 diff --git a/tools/game_config.py b/tools/game_config.py
 index 20838eb..dd42c54 100644
 --- a/tools/game_config.py
@@ -11632,6 +12132,21 @@ index 0aea3f4..a0adf75 100644
          else:
              run([sys.executable, "-m", "pytest", "-q"] + PORTABLE_TESTS, env)
      except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError, TimeoutError) as error:
+diff --git a/tools/tests/test_build.py b/tools/tests/test_build.py
+index 4e1f116..85e9b25 100644
+--- a/tools/tests/test_build.py
++++ b/tools/tests/test_build.py
+@@ -182,8 +182,9 @@ def test_android_push_stages_only_included_game_files(tmp_path, monkeypatch):
+     monkeypatch.setattr(build.subprocess, "run", run)
+     build.android_install_and_launch(output / "app-debug.apk", "dev.recompkit.stub",
+                                      game_cfg=cfg, build_root=output)
+-    assert [command[3] for command in calls[1:]] == ["install", "shell", "push", "shell"]
++    assert [command[3] for command in calls[1:]] == ["install", "shell", "push", "shell", "shell"]
+     assert calls[2][4:] == ["mkdir", "-p", "/sdcard/Android/data/dev.recompkit.stub/files"]
++    assert calls[-2][4:] == ["chmod", "0755", "/sdcard/Android/data/dev.recompkit.stub/files/game"]
+     assert calls[-1][4:7] == ["am", "start", "-n"]
+ 
+ 
 diff --git a/tools/tests/test_package_desktop.py b/tools/tests/test_package_desktop.py
 index f94a129..c25c6b6 100644
 --- a/tools/tests/test_package_desktop.py
