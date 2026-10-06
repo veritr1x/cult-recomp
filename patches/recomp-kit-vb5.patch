@@ -1,11 +1,14 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..0687517 100644
+index 20fdc15..bc04f1c 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,146 @@
+@@ -2,6 +2,149 @@
  
  ## Unreleased
  
++- Allow verbose subsystem diagnostics with import traffic suppressed through
++  `RECOMP_TRACE_IMPORTS=0`, and include string resource IDs in LoadString traces.
++
 +- Emit live exception checkpoints for SEH prologues that push a proven register
 +  copy of FS:[0], including Visual Basic and MSVC frames; reject mutated copies
 +  and alternate entries that bypass the load.
@@ -1632,6 +1635,18 @@ index 10a5e39..4499b0c 100644
    misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
+diff --git a/runtime/README.md b/runtime/README.md
+index 85b7a4b..7b2048d 100644
+--- a/runtime/README.md
++++ b/runtime/README.md
+@@ -217,6 +217,7 @@ paths resolve against the guest current directory, which starts at
+ | variable | effect |
+ | --- | --- |
+ | `RECOMP_LOG` | `0` silent, `1` warnings and one-shot notices (default), `2` traces every import call and returned EAX |
++| `RECOMP_TRACE_IMPORTS=0` | suppress import call/return traces while retaining verbose subsystem diagnostics |
+ | `RECOMP_REGISTRY` | registry backing file (default `build/recomp/registry.json`) |
+ | `RECOMP_CREATETHREAD=skip` | record `CreateThread` without running the thread body |
+ | `RECOMP_CREATETHREAD=sync` | run a thread body to completion inside `CreateThread` (pre-scheduler behaviour, for bisection) |
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
 index 06d5e2b..c2683c7 100644
 --- a/runtime/cpu.cpp
@@ -3001,7 +3016,7 @@ index a6dd8fa..d62f5d6 100644
                                         G("EnumFontsW", 4, enumerate),
                                         G("EnumFontFamiliesExW", 5, enumerate),
 diff --git a/runtime/imports.cpp b/runtime/imports.cpp
-index ec1d2b1..be30212 100644
+index ec1d2b1..08d9886 100644
 --- a/runtime/imports.cpp
 +++ b/runtime/imports.cpp
 @@ -1,4 +1,5 @@
@@ -3010,10 +3025,15 @@ index ec1d2b1..be30212 100644
  #include "gdi32_internal.h"
  #include "user32_internal.h"
  #include "kernel32_internal.h"
-@@ -436,6 +437,23 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -436,7 +437,29 @@ bool imports_dispatch(X86 *c, uint32_t target) {
      ++g_import_calls;
  
      uint32_t ret_addr = rd32(c->r[R_ESP]);
+-    LOGV("-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
++    // Keep exception and subsystem diagnostics available without a flood of
++    // import traffic overwhelming a bounded browser console buffer.
++    const char *trace_imports = recomp_env("TRACE_IMPORTS");
++    const bool trace_calls = !trace_imports || strcmp(trace_imports, "0");
 +    const bool trace_abi = recomp_env("IMPORT_ABI_TRACE") != nullptr;
 +    const uint32_t saved_ebx = c->r[R_EBX], saved_esi = c->r[R_ESI], saved_edi = c->r[R_EDI],
 +                   saved_ebp = c->r[R_EBP], saved_esp = c->r[R_ESP];
@@ -3031,10 +3051,12 @@ index ec1d2b1..be30212 100644
 +    } else {
 +        watch_bytes = 0;
 +    }
-     LOGV("-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
++    if (trace_calls)
++        LOGV("-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
      recomp_seh_validate_chain(c, "import enter", desc);
  
-@@ -466,7 +484,20 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+     // The arguments as they are NOW, before the shim runs: a stdcall shim pops
+@@ -466,10 +489,24 @@ bool imports_dispatch(X86 *c, uint32_t target) {
          log_once(desc, "unimplemented import %s: returning 0", desc);
          set_eax(c, 0);
      }
@@ -3054,8 +3076,13 @@ index ec1d2b1..be30212 100644
 +             saved_ebp, c->r[R_EBP], saved_esp, c->r[R_ESP]);
      if (g_return_observer)
          g_return_observer(desc, c->r[R_EAX]);
-     LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
-@@ -537,8 +568,28 @@ void recomp_callback_return(X86 *c) {
+-    LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
++    if (trace_calls)
++        LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
+ 
+     uint32_t pop = 4;
+     if (argc == ARGC_CDECL) {
+@@ -537,8 +574,28 @@ void recomp_callback_return(X86 *c) {
      // live guest_call. Match the guest return slot as well: a completing SEH
      // landing may RET to an older callback's identical sentinel, in which
      // case intercept must finish that function through its SEH checkpoint.
@@ -3086,7 +3113,7 @@ index ec1d2b1..be30212 100644
      mods_hooks_unwind_to_esp(call->return_sp);
      recomp_profile_truncate(call->profile_depth);
      longjmp(call->env, 1);
-@@ -582,6 +633,7 @@ void imports_init() {
+@@ -582,6 +639,7 @@ void imports_init() {
      imports_register(g_kernel32_shims, g_kernel32_shim_count);
      kernel32_wide_register();
      oleaut32_register();
@@ -9975,7 +10002,7 @@ index dea756d..440c277 100644
  
  void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y) {
 diff --git a/runtime/user32_wide.cpp b/runtime/user32_wide.cpp
-index ff9b21d..a92baa6 100644
+index ff9b21d..58a6461 100644
 --- a/runtime/user32_wide.cpp
 +++ b/runtime/user32_wide.cpp
 @@ -122,21 +122,44 @@ void unregister_w(X86 *c) {
@@ -10026,7 +10053,7 @@ index ff9b21d..a92baa6 100644
  void class_long(X86 *c, bool set) {
      Window *w = find_window(arg(c, 0));
      auto it = w ? classes().find(w->cls) : classes().end();
-@@ -234,9 +257,10 @@ void find_ex_w(X86 *c) {
+@@ -234,9 +257,11 @@ void find_ex_w(X86 *c) {
      find_named(c, true);
  }
  // RT_STRING blocks contain sixteen WORD-length-prefixed UTF-16 strings.
@@ -10034,12 +10061,13 @@ index ff9b21d..a92baa6 100644
 +void load_string_encoded(X86 *c, bool wide) {
      uint32_t id = arg(c, 1) & 0xffff, out = arg(c, 2), cap = arg(c, 3), bytes = 0;
 -    uint32_t p = resource_data(resource_find(6, (id >> 4) + 1), &bytes), end = p + bytes;
++    LOGV("LoadString%c: instance=%08x id=%u capacity=%u", wide ? 'W' : 'A', arg(c, 0), id, cap);
 +    uint32_t p = resource_data(resource_find(6, (id >> 4) + 1, nullptr, arg(c, 0)), &bytes),
 +             end = p + bytes;
      for (uint32_t i = 0; p && i < 16; ++i) {
          if (end - p < 2)
              break;
-@@ -248,12 +272,37 @@ void load_string(X86 *c) {
+@@ -248,12 +273,37 @@ void load_string(X86 *c) {
              if (!out)
                  break;
              if (!cap) {
@@ -10077,7 +10105,7 @@ index ff9b21d..a92baa6 100644
              n = std::min(n, cap - 1);
              if (!gm_valid(out, (n + 1) * 2))
                  break;
-@@ -266,8 +315,14 @@ void load_string(X86 *c) {
+@@ -266,8 +316,14 @@ void load_string(X86 *c) {
      }
      set_eax(c, 0);
  }
@@ -10093,7 +10121,7 @@ index ff9b21d..a92baa6 100644
      GdiImage image;
      set_eax(c, p && gdi_decode_image(p, bytes, &image) ? gdi_image_bitmap(image) : 0);
  }
-@@ -276,12 +331,12 @@ void load_icon(X86 *c) {
+@@ -276,12 +332,12 @@ void load_icon(X86 *c) {
          alias_ansi(c, "LoadIconA");
          return;
      }
@@ -10108,7 +10136,7 @@ index ff9b21d..a92baa6 100644
      GdiImage image;
      // Icon DIB heights include the AND mask. Decode the XOR plane at half height.
      if (!p || bytes < 40 || rd32(p) < 40) {
-@@ -296,9 +351,93 @@ void load_icon(X86 *c) {
+@@ -296,9 +352,93 @@ void load_icon(X86 *c) {
      memcpy(g_mem + copy, g_mem + p, bytes);
      wr32(copy + 8, rd32(copy + 8) / 2);
      bool ok = gdi_decode_image(copy, bytes, &image);
@@ -10202,7 +10230,7 @@ index ff9b21d..a92baa6 100644
  void draw_text(X86 *c) {
      set_eax(c, gdi::draw_text(arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4)));
  }
-@@ -370,6 +509,11 @@ void next_char(X86 *c) {
+@@ -370,6 +510,11 @@ void next_char(X86 *c) {
      uint32_t p = arg(c, 0);
      set_eax(c, p && rd16(p) ? p + 2 : p);
  }
@@ -10214,7 +10242,7 @@ index ff9b21d..a92baa6 100644
  void map_key(X86 *c) {
      // Set 1 scan codes for the US layout used by the host input gate.
      static const uint8_t letters[26] = {30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
-@@ -506,11 +650,15 @@ const ImportShim shims[] = {
+@@ -506,11 +651,15 @@ const ImportShim shims[] = {
      W("RegisterClassW", 1, register_w),
      W("UnregisterClassW", 2, unregister_w),
      W("GetClassInfoW", 3, class_info),
@@ -10230,7 +10258,7 @@ index ff9b21d..a92baa6 100644
      W("PeekMessageW", 5, peek_message),
      W("DispatchMessageW", 1, dispatch_message),
      W("SendMessageW", 4, send_w),
-@@ -524,7 +672,10 @@ const ImportShim shims[] = {
+@@ -524,7 +673,10 @@ const ImportShim shims[] = {
      W("FindWindowExW", 4, find_ex_w),
      W("LoadBitmapW", 2, load_bitmap),
      W("LoadIconW", 2, load_icon),
@@ -10241,7 +10269,7 @@ index ff9b21d..a92baa6 100644
      W("DrawTextW", 5, draw_text),
      W("DrawTextExW", 6, draw_text_ex),
      W("CharUpperW", 1, upper),
-@@ -534,6 +685,7 @@ const ImportShim shims[] = {
+@@ -534,6 +686,7 @@ const ImportShim shims[] = {
      W("CharUpperBuffA", 2, upper_buff_a),
      W("CharLowerBuffA", 2, lower_buff_a),
      W("CharNextW", 1, next_char),

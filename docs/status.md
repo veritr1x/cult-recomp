@@ -129,17 +129,24 @@ The exported P4 and R6R6 browser saves also load from the refreshed Windows
 diagnostic host's startup menu: each presents 603 frames and renders the street
 without missing imports, unknown transfers or runtime errors.
 
-Cult II's refreshed browser still aborts when loading P4 from the startup menu.
-Its trace now reaches the handler, then exposes a callback ownership error:
+Cult II's earlier refreshed browser aborted when loading P4 from the startup
+menu. Its trace exposed a callback ownership error:
 the guest restores an older callback's stack and returns at ESP=0efffe94, while
 the runtime still expects the handler callback below ESP=0efff864. The resumable
 driver mistakes this completed older callback for a handler disposition of zero.
 A regression reproduces the erroneous disposition and abort before the source
 fix. The correction finds the owning callback and retires abandoned callback
 and SEH records, while preserving active SEH landings through their checkpoints.
-It passes **365 SEH checks on both Windows and Linux**. The refreshed Cult browser
-and Cult II Linux build, and browser verification of the callback correction
-are in progress. No successful browser startup Load has been established.
+It passes **365 SEH checks on both Windows and Linux**. Both browser builds now
+include this correction. Cult II's browser startup Load opens P4.fcg and reads
+its 124 bytes, then reports Visual Basic error 5 (invalid procedure call or
+argument) and exits the guest with code zero. The saved scene does not render;
+a successful browser startup Load has not been established. A concise trace
+preserves the error after verbose import traffic had displaced it from the
+browser console. Import tracing can now be suppressed independently of other
+verbose diagnostics through RECOMP_TRACE_IMPORTS=0.
+The corrected Cult II diagnostics repeat the 2,510-frame movement/save/load
+round trip on Windows and Linux, restoring identical save bytes.
 Browser serialization/restoration has not received the native byte comparison.
 Browser save/load,
 sustained gameplay and physical/touch device compatibility remain unverified.
@@ -149,13 +156,17 @@ failures. The latest broader runtime run has 1,617 checks, 24 failures and two
 skips, including file overlay, version/image resources, timing fixtures and
 translation metadata contracts; it is not a full pass. Its window-model checks
 pass.
-The current Windows/Linux player packages include the control text changes;
-both Windows players and Cult's Linux player also include the checkpoint lifetime
-fix. The latest five-second Windows launcher probes render and exit cleanly
+All four Windows/Linux player packages include the control text changes,
+checkpoint lifetime fix and callback ownership correction. The previous
+five-second Windows launcher probes render and exit cleanly
 with running audio devices: Cult captures 227,328 PCM frames and Cult II captures
 233,472, both with peak 17,341 PCM16. Audible output is still unverified.
 Cult's refreshed Linux player completes twenty seconds with 927,672 PCM frames,
 peak 17,341, zero late or starved pulls and a clean exit.
+Cult II's newest Linux player exits cleanly in a twenty-second startup and
+captures 166,133 PCM frames, peak 17,341, but reports 16 late audio pulls out
+of 78 and zero starved pulls. This run does not establish smooth playback;
+the earlier zero-late timing result does not describe this newest run.
 The rebuilt Linux players pass twenty-second startup with nonzero device PCM:
 Cult has 933,435 frames, and Cult II has 943,508 frames, both peaking at 17,341
 PCM16. An initial Cult II run during concurrent compilation records late audio
