@@ -30,3 +30,11 @@ results are not fresh validation of this pin. Full campaigns, original-save
 compatibility, physical/touch input, audible output and refreshed mobile runtime
 checks remain outside the established coverage. No assets or private evidence
 are published. The implementation is not a distribution of the original games.
+
+A clean recursive checkout with no original inputs also passes the 18 portable
+project tests. The source patch applies once and accepts a second invocation
+without changing it. Both profiles link their Windows app, headless and smoke
+hosts against stub translations through the kit build API; all 44 game-independent
+Windows native suites pass with the patch applied, including the 237 drawing
+checks. These verify source reproducibility and compatibility contracts, not
+additional real-game or device coverage.
