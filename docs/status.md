@@ -1,4 +1,6 @@
-# Status: 6 October 2026
+# Historical status: 6 October 2026
+
+For the current published kit pin and verification, see [analysis.md](analysis.md).
 
 Local builds are available for the requested Windows x64, Linux x86_64 and
 WebGPU browser targets. Both games and four supplied libraries are statically

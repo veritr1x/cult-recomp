@@ -1,11 +1,11 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20fdc15..b6d8cc8 100644
+index cb53d91..6fe981f 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,184 @@
- 
- ## Unreleased
- 
+@@ -223,6 +223,183 @@
+   interpreter and the generated MSL/GLSL/WGSL, and bind the stage that
+   `texm3x2tex` samples: the sampler mask counted only `tex`/`texldl`, so on
+   Metal it sampled black. Fixes #20.
 +- Map equal GDI window/viewport extents with saturated integer translation,
 +  avoiding per-pixel software long-double arithmetic in browser raster draws.
 +  Copy opaque 32-bit DIBs directly into separate window surfaces for SRCCOPY,
@@ -183,46 +183,45 @@ index 20fdc15..b6d8cc8 100644
 +  operations whose complex coverage retains holes in GDI clipping.
 +- Allow static ports to disable runtime instruction interpretation with
 +  `[translate] allow_runtime_interpreter = false`.
-+
+ 
  - Allow native game adapters to place their own cursors at absolute touch
    positions in logical game pixels. Placement can discard pending DirectInput
-   X/Y movement without losing button, wheel or keyboard input.
 diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
-index e1e1d88..0c07a4b 100644
+index b3a880e..9c8ffd5 100644
 --- a/CONTRIBUTING.md
 +++ b/CONTRIBUTING.md
-@@ -28,6 +28,12 @@ portable tests and mod examples. Open an issue before a large architecture chang
- Windows; `--regenerate` runs the Python translator on each. Only the iOS
- packager (`--target ios`, including `--stub`) requires macOS.
- 
+@@ -35,6 +35,11 @@ for CMake, Ninja and the decoder used by generated integration fixtures. They
+ configure through `tools/build.py` so generation uses that same interpreter.
+ SDL3/glslang archives are pinned to commits
+ and SHA-256 digests in `cmake/Dependencies.cmake`.
 +Android builds default to ARM64. For a native x86_64 emulator test use
 +`tools/build.py --target android --android-abi x86_64 --no-install`.
 +These builds use separate `build/cmake/android-x86_64/` and
 +`build/android-x86_64/` directories and preserve existing ARM64 packages.
 +Building or installing an APK alone does not verify gameplay or touch input.
-+
+ 
  ## Prepare a game installation
  
- Building the app, running it, the game-backed suites and regenerating the
 diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
-index 2735492..196eba3 100644
+index be88420..f9b79c6 100644
 --- a/cmake/Dependencies.cmake
 +++ b/cmake/Dependencies.cmake
-@@ -22,10 +22,12 @@ set(SDL_GPU OFF CACHE BOOL "" FORCE)
+@@ -22,11 +22,13 @@ set(SDL_GPU OFF CACHE BOOL "" FORCE)
  if(EMSCRIPTEN)
    set(SDL_PTHREADS ON CACHE BOOL "" FORCE) # the game runs on a thread of its own
  endif()
 +file(TO_CMAKE_PATH "${Python3_EXECUTABLE}" RECOMP_PATCH_PYTHON)
  FetchContent_Declare(SDL3
-   GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-   GIT_TAG release-3.4.16
--  GIT_SHALLOW TRUE)
-+  GIT_SHALLOW TRUE
+   # release-3.4.16
+   URL https://codeload.github.com/libsdl-org/SDL/tar.gz/fa2c02bb6e21974a89ea9824bc53c9932abe5f9c
+   URL_HASH SHA256=d246967187a4f37cc850608dbaf5cff9d1df4d731259903d25539755cdfcc657
+-  DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
++  DOWNLOAD_EXTRACT_TIMESTAMP FALSE
 +  PATCH_COMMAND "${RECOMP_PATCH_PYTHON}" "${POP_ROOT}/tools/patch_sdl_pulseaudio.py" <SOURCE_DIR>)
  FetchContent_MakeAvailable(SDL3)
  
  # glslang compiles the Direct3D 9 renderer's GLSL to SPIR-V at run time
-@@ -132,9 +134,16 @@ if(RECOMP_VIDEO)
+@@ -134,9 +136,16 @@ if(RECOMP_VIDEO)
      # API-29 wrapper so configure and every FFmpeg probe target Android 10.
      get_filename_component(RECOMP_FFMPEG_TOOLCHAIN_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
      get_filename_component(RECOMP_FFMPEG_SYSROOT "${RECOMP_FFMPEG_TOOLCHAIN_BIN}/../sysroot" ABSOLUTE)
@@ -242,10 +241,10 @@ index 2735492..196eba3 100644
        --nm=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-nm
        --ranlib=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-ranlib
 diff --git a/docs/testing.md b/docs/testing.md
-index bb8776b..e6e75fd 100644
+index 28ab147..4849166 100644
 --- a/docs/testing.md
 +++ b/docs/testing.md
-@@ -3,6 +3,14 @@
+@@ -137,6 +137,14 @@ Direct3D 8 combiner cases also run in the Metal and Vulkan CI jobs.
  Run checks appropriate to your change. Every suite's output belongs under ignored
  `build/`; requested tests must report failure rather than silently skip prerequisites.
  
@@ -260,7 +259,7 @@ index bb8776b..e6e75fd 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
-@@ -63,6 +71,19 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
+@@ -200,6 +208,19 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
  
  ## Manual gameplay checks
  
@@ -281,10 +280,10 @@ index bb8776b..e6e75fd 100644
  - Compare Classic/Enhanced and Wide on/off in a window wider than an 800×600 canvas.
  - Cycle resolution through 640×480, 800×600 and 3840×2160, then resume play.
 diff --git a/dx/dx.cpp b/dx/dx.cpp
-index 72e0d0a..db76bf7 100644
+index 761494e..7c11e54 100644
 --- a/dx/dx.cpp
 +++ b/dx/dx.cpp
-@@ -626,6 +626,7 @@ void dx_reset() {
+@@ -628,6 +628,7 @@ void dx_reset() {
      qmixer_reset();
      fmod_reset();
      soundlib_reset();
@@ -689,7 +688,7 @@ index 2ecf49b..64dac87 100644
      if (opened)
          host_midi_close();
 diff --git a/dx/tests/dx_tests.cpp b/dx/tests/dx_tests.cpp
-index 7771a52..0c3af84 100644
+index 77e89a4..af11f23 100644
 --- a/dx/tests/dx_tests.cpp
 +++ b/dx/tests/dx_tests.cpp
 @@ -405,6 +405,7 @@ static uint32_t g_voice_remaining = 0;
@@ -720,7 +719,7 @@ index 7771a52..0c3af84 100644
  static void check(bool ok, const char *what, const char *file, int line) {
      ++g_checks;
      if (!ok) {
-@@ -2733,7 +2740,12 @@ static void test_v4_unlock_takes_a_rect() {
+@@ -2769,7 +2776,12 @@ static void test_v4_unlock_takes_a_rect() {
  // and the cursor draw at 004fd370 is the only code that uses them.
  static void test_cursor_surface_learned() {
      rec_reset();
@@ -734,7 +733,7 @@ index 7771a52..0c3af84 100644
      const uint32_t kPtrA = ptrs[0], kPtrB = ptrs[1];
      wr32(kPtrA, 0);
      wr32(kPtrB, 0);
-@@ -6884,6 +6896,93 @@ static void test_soundlib_stub() {
+@@ -6952,6 +6964,93 @@ static void test_soundlib_stub() {
      CHECK_EQ(os_rmdir(dir), 0);
  }
  
@@ -828,7 +827,7 @@ index 7771a52..0c3af84 100644
  static void test_riff_parse() {
      cpu_reset();
      uint32_t wav = build_test_wave();
-@@ -12270,6 +12369,78 @@ static void test_media_foundation_session() {
+@@ -12494,6 +12593,78 @@ static void test_media_foundation_session() {
  
  // Driver output pointers, master gain, named MP3, and WAVEHDR completion are
  // observable API contracts: success without these leaves real games silent.
@@ -907,7 +906,7 @@ index 7771a52..0c3af84 100644
  static void test_legacy_audio() {
      cpu_reset();
      g_plays.clear();
-@@ -12738,9 +12909,11 @@ int main() {
+@@ -12967,9 +13138,11 @@ int main() {
          {"FMOD samples", test_fmod},
          {"FMOD streams", test_fmod_stream},
          {"Soundlib MIDI", test_soundlib_stub},
@@ -919,7 +918,7 @@ index 7771a52..0c3af84 100644
          {"Legacy audio", test_legacy_audio},
          {"AVI reader", test_avi_reader},
          {"Miles streams", test_mss32_stream},
-@@ -12798,11 +12971,15 @@ int main() {
+@@ -13028,11 +13201,15 @@ int main() {
      };
      for (auto &t : tests) {
          int before = g_failures;
@@ -1132,7 +1131,7 @@ index 9246458..e0dd58f 100644
  }
  void waveout_frame_pump(X86 *c) {
 diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
-index 58e79fd..c286bee 100644
+index 120cb71..6c9304a 100644
 --- a/host/CMakeLists.txt
 +++ b/host/CMakeLists.txt
 @@ -266,6 +266,12 @@ if(TARGET recomp_gen)
@@ -1148,16 +1147,16 @@ index 58e79fd..c286bee 100644
      if(EXISTS ${POP_BUILD_ROOT}/recomp/symbols.json)
        file(COPY ${POP_BUILD_ROOT}/recomp/symbols.json DESTINATION ${web_resources})
      endif()
-@@ -327,6 +333,7 @@ pop_host(host_tests UI_LAYER
-           ${POP_ROOT}/dx/d3d11.cpp ${POP_ROOT}/dx/dxgi.cpp
+@@ -331,6 +337,7 @@ pop_host(host_tests UI_LAYER
            ${POP_ROOT}/dx/d3dcompiler.cpp ${POP_ROOT}/dx/d3dx10.cpp
            ${POP_ROOT}/dx/d3d9_shader.cpp ${POP_ROOT}/dx/d3d9_shadergen.cpp
+             ${POP_ROOT}/dx/d3d8_program.cpp ${POP_ROOT}/dx/d3d8_fixed.cpp
 +          ${POP_ROOT}/dx/soundlib.cpp
            ${POP_ROOT}/dx/host_d9_default.cpp
    LIBS recomp_platform recomp_runtime gpu_backend gpu_fake ${POP_D9_LIBS}
    FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
 diff --git a/host/boot.cpp b/host/boot.cpp
-index f5e287c..69b65d7 100644
+index 111c84a..709f10c 100644
 --- a/host/boot.cpp
 +++ b/host/boot.cpp
 @@ -407,6 +407,14 @@ void fault_handler(const char *name) {
@@ -1175,16 +1174,16 @@ index f5e287c..69b65d7 100644
      sig_write("\n");
      if (c->r[R_ESP] < STACK_LIMIT || c->r[R_ESP] >= STACK_TOP)
          sig_write("[host] the guest stack pointer is outside the main stack: it "
-@@ -506,7 +514,7 @@ bool boot_load(const BootOptions &opts) {
-     // code it hooks can run.
+@@ -507,7 +515,7 @@ bool boot_load(const BootOptions &opts) {
      const bool mods_enabled = g_opt.load_mods && !recomp_env("NO_MODS");
+     mods_overlay_reset(); // Saves retain a writable profile even with mods disabled.
      bool page_enabled = false;
 -    if (mods_enabled) {
 +    if (g_opt.load_mods) {
          // The host-only APIs belong to the thread that boots.
          mods_host_set_main_thread();
          // What applies a queued registry mutation from inside the scheduler.
-@@ -517,7 +525,7 @@ bool boot_load(const BootOptions &opts) {
+@@ -518,7 +526,7 @@ bool boot_load(const BootOptions &opts) {
              LOGW("boot: the mod loader reported a failure");
          // The host display rows exist even when the built-in mod root is
          // empty. RECOMP_NO_MODS still leaves the page and its input unregistered.
@@ -1210,10 +1209,10 @@ index a2dba69..d3ee018 100644
  
      // An absolute run deadline in seconds, 0 for none. The host is told
 diff --git a/host/game_path.cpp b/host/game_path.cpp
-index 71c41d8..add93cd 100644
+index 7e5fd4b..68cb5c2 100644
 --- a/host/game_path.cpp
 +++ b/host/game_path.cpp
-@@ -69,7 +69,12 @@ GamePath game_path_resolve(const char *flag, const char *data_root) {
+@@ -71,7 +71,12 @@ GamePath game_path_resolve(const char *flag, const char *data_root) {
      // app runs; a relative spelling is taken from the checkout root.
      const HostLayout &l = host_layout();
      std::string candidate = RECOMP_DEVELOPER_EXE;
@@ -1228,10 +1227,10 @@ index 71c41d8..add93cd 100644
      OsStat st;
      if (!candidate.empty() && os_stat(candidate.c_str(), &st) == 0) {
 diff --git a/host/gpu/tests/gpu_contract_tests.cpp b/host/gpu/tests/gpu_contract_tests.cpp
-index db35284..a5da31b 100644
+index 8dab5c4..da84a20 100644
 --- a/host/gpu/tests/gpu_contract_tests.cpp
 +++ b/host/gpu/tests/gpu_contract_tests.cpp
-@@ -186,9 +186,20 @@ static void test_swapchain_from_surface() {
+@@ -234,9 +234,20 @@ static void test_swapchain_from_surface() {
      CHECK(s && d->swapchain_format(s) == Format::BGRA8);
      Texture t = d->acquire(s);
      CHECK(t && d->describe(t).width == 32 && d->describe(t).height == 16);
@@ -1254,10 +1253,10 @@ index db35284..a5da31b 100644
      CHECK(t2 && d->describe(t2).width == 64);
      d->release_drawable(s, t2);
 diff --git a/host/gpu/vulkan/d3d9_vulkan.cpp b/host/gpu/vulkan/d3d9_vulkan.cpp
-index cae581c..567e803 100644
+index 2bcd1ac..f18b098 100644
 --- a/host/gpu/vulkan/d3d9_vulkan.cpp
 +++ b/host/gpu/vulkan/d3d9_vulkan.cpp
-@@ -2692,7 +2692,9 @@ class VkRenderer final : public D9Backend {
+@@ -2714,7 +2714,9 @@ class VkRenderer final : public D9Backend {
  
  D9Backend *d9_vulkan_create(gpu::Device *device) {
      auto *vulkan = dynamic_cast<VulkanDevice *>(device);
@@ -1269,7 +1268,7 @@ index cae581c..567e803 100644
      auto *r = new VkRenderer(vulkan);
      if (!r->ok()) {
 diff --git a/host/gpu/vulkan/vulkan_device.cpp b/host/gpu/vulkan/vulkan_device.cpp
-index e0ea1c5..18b5c89 100644
+index 5725a01..ce35489 100644
 --- a/host/gpu/vulkan/vulkan_device.cpp
 +++ b/host/gpu/vulkan/vulkan_device.cpp
 @@ -84,9 +84,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
@@ -1354,7 +1353,7 @@ index e0ea1c5..18b5c89 100644
      for (auto &[id, c] : swapchains_) {
          for (auto &[tid, idx] : c->acquired)
              textures_.erase(tid);
-@@ -320,6 +332,8 @@ VulkanDevice::~VulkanDevice() {
+@@ -326,6 +338,8 @@ VulkanDevice::~VulkanDevice() {
      for (auto &[id, f] : families_)
          for (auto &[k, p] : f.variants)
              vkDestroyPipeline(device_, p, nullptr);
@@ -1363,7 +1362,7 @@ index e0ea1c5..18b5c89 100644
      for (auto &[id, cp] : computes_)
          vkDestroyPipeline(device_, cp.pipeline, nullptr);
      for (auto &[name, m] : modules_)
-@@ -376,6 +390,9 @@ static bool make_host_buffer(VulkanDevice &d, uint64_t bytes, VkBufferUsageFlags
+@@ -391,6 +405,9 @@ static bool make_host_buffer(VulkanDevice &d, uint64_t bytes, VkBufferUsageFlags
          *buffer = VK_NULL_HANDLE;
          return false;
      }
@@ -1373,17 +1372,7 @@ index e0ea1c5..18b5c89 100644
      return true;
  }
  
-@@ -600,6 +617,9 @@ bool VulkanDevice::upload(Texture tex, Region region, const void *bytes, int pit
-     if (!make_host_buffer(*this, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging.buffer,
-                           &staging.memory, &staging.map))
-         return false;
-+    if (trace_)
-+        fprintf(stderr, "gpu/vulkan: upload %dx%d, row %llu, pitch %d, map %p, source %p\n",
-+                region.w, region.h, (unsigned long long)row, pitch, staging.map, bytes);
-     for (int y = 0; y < region.h; ++y)
-         memcpy(static_cast<uint8_t *>(staging.map) + y * row,
-                static_cast<const uint8_t *>(bytes) + uint64_t(y) * pitch, size_t(row));
-@@ -996,6 +1016,7 @@ void VulkanDevice::submit_cmd(uint64_t id, std::unique_ptr<Cmd> c) {
+@@ -1087,6 +1104,7 @@ void VulkanDevice::submit_cmd(uint64_t id, std::unique_ptr<Cmd> c) {
          auto callbacks = std::move(c->callbacks);
          retired_[cb.id] = CommandStatus::Error;
          retired_order_.push_back(cb.id);
@@ -1391,7 +1380,7 @@ index e0ea1c5..18b5c89 100644
          retire_graves(cb.id);
          free_cmds_.push_back(std::move(c));
          for (auto &fn : callbacks)
-@@ -1048,6 +1069,7 @@ void VulkanDevice::reap_loop() {
+@@ -1139,6 +1157,7 @@ void VulkanDevice::reap_loop() {
          s.cmd->presented = nullptr;
          retired_[s.id] = status;
          retired_order_.push_back(s.id);
@@ -1400,7 +1389,7 @@ index e0ea1c5..18b5c89 100644
          while (retired_order_.size() > 1024) {
              retired_.erase(retired_order_.front());
 diff --git a/host/gpu/vulkan/vulkan_device.h b/host/gpu/vulkan/vulkan_device.h
-index 5f84c42..88b712c 100644
+index 9cc8295..1df205a 100644
 --- a/host/gpu/vulkan/vulkan_device.h
 +++ b/host/gpu/vulkan/vulkan_device.h
 @@ -99,6 +99,9 @@ class VulkanDevice final : public Device {
@@ -1413,7 +1402,7 @@ index 5f84c42..88b712c 100644
      // Submits `cb` on the device's queue, behind the transfers the device has
      // pending, so it runs before any command buffer committed after it.
      bool submit_native(VkCommandBuffer cb, VkFence fence);
-@@ -145,6 +148,8 @@ class VulkanDevice final : public Device {
+@@ -146,6 +149,8 @@ class VulkanDevice final : public Device {
          VkQueryPool queries = VK_NULL_HANDLE; // 2 timestamps
          VkDescriptorPool pool = VK_NULL_HANDLE;
          std::vector<VkDescriptorPool> extra_pools; // exhausted pools, reset with `pool`
@@ -1422,7 +1411,7 @@ index 5f84c42..88b712c 100644
          // The bytes ring: host-visible, reset when the Cmd is recycled.
          VkBuffer ring = VK_NULL_HANDLE;
          VkDeviceMemory ring_memory = VK_NULL_HANDLE;
-@@ -231,6 +236,10 @@ class VulkanDevice final : public Device {
+@@ -232,6 +237,10 @@ class VulkanDevice final : public Device {
      void destroy_buf(Buf &b);
      void bury(Tex tex, Buf buf);         // mutex held
      void retire_graves(uint64_t cmd_id); // mutex held
@@ -1433,7 +1422,7 @@ index 5f84c42..88b712c 100644
  
      VkInstance instance_ = VK_NULL_HANDLE;
      VkPhysicalDevice physical_ = VK_NULL_HANDLE;
-@@ -265,6 +274,7 @@ class VulkanDevice final : public Device {
+@@ -266,6 +275,7 @@ class VulkanDevice final : public Device {
      bool anisotropy_ = false;
      VkPhysicalDeviceFeatures enabled_features_{};
      bool core13_ = false;
@@ -1441,7 +1430,7 @@ index 5f84c42..88b712c 100644
      bool full_subgroups_ = false; // computeFullSubgroups enabled
      bool failed_ = false;
      bool trace_ = false;     // RECOMP_GPU_TRACE=1
-@@ -306,7 +316,8 @@ class VulkanDevice final : public Device {
+@@ -315,7 +325,8 @@ class VulkanDevice final : public Device {
      std::unordered_map<uint64_t, ComputePipe> computes_;
      std::unordered_map<std::string, uint64_t> compute_by_name_;
      std::unordered_map<std::string, VkShaderModule> modules_;
@@ -1785,7 +1774,7 @@ index 9211514..7296ba1 100644
  // the click never happened. That is what the DirectInput shim's buffered
  // events are built from, and what a window's click handling comes down to. The
 diff --git a/host/script.cpp b/host/script.cpp
-index 19d5522..8ec9ab7 100644
+index bd1192e..ed0dc93 100644
 --- a/host/script.cpp
 +++ b/host/script.cpp
 @@ -11,8 +11,18 @@ double host_script_counter_metric(const char *name, uint32_t (*guest_u32)(uint32
@@ -1810,7 +1799,7 @@ index 19d5522..8ec9ab7 100644
      if (view) {
          const uint32_t observed = view();
 diff --git a/host/sdl/main.cpp b/host/sdl/main.cpp
-index d983f15..b7ea940 100644
+index 35e96cb..3031b24 100644
 --- a/host/sdl/main.cpp
 +++ b/host/sdl/main.cpp
 @@ -137,8 +137,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1823,7 +1812,7 @@ index d983f15..b7ea940 100644
          return;
      }
      uint32_t hwnd = host_main_window();
-@@ -328,9 +327,13 @@ void deliver_pending_input() {
+@@ -347,9 +346,13 @@ void deliver_pending_input() {
      // is in input_gate.cpp, where it is tested without a window.
      std::vector<HostInputStep> steps;
      steps.reserve(batch.size());
@@ -1840,7 +1829,7 @@ index d983f15..b7ea940 100644
      const uint32_t limit = host_input_batch_limit(steps.data(), uint32_t(steps.size()));
      // Applied outside the lock, in arrival order. Order is the whole point: a
      // focus loss sits in this queue among the presses it must follow, so
-@@ -1278,6 +1281,18 @@ controls::Screen controls_screen() {
+@@ -1324,6 +1327,18 @@ controls::Screen controls_screen() {
  
  // The housekeeping every turn does once the events are in.
  void after_events() {
@@ -1856,11 +1845,11 @@ index d983f15..b7ea940 100644
 +    }();
 +    if (diagnostic_seconds > 0.0 && boot_elapsed() >= diagnostic_seconds && !boot_close_requested())
 +        boot_request_close("desktop diagnostic time limit");
-     {
-         // Time-based gestures (a long press) fire from the clock, not an event,
-         // and deferred clicks go out once the game's cursor has caught up and
+     // idle_wait() calls this on every guest block, which happens thousands of
+     // times a second (frame-limit waits, scheduler yields, clock-spin sleeps).
+     // The controls/gamepad/pump work below is far too heavy to run that often:
 diff --git a/host/smoke_main.cpp b/host/smoke_main.cpp
-index 9525259..c5dcf13 100644
+index f35bdb1..ef9f778 100644
 --- a/host/smoke_main.cpp
 +++ b/host/smoke_main.cpp
 @@ -191,6 +191,8 @@ void pointer_space(uint32_t *w, uint32_t *h) {
@@ -1919,10 +1908,10 @@ index 9525259..c5dcf13 100644
              break; // consumed
          host_input_key(m.mac, step.down != 0);
 diff --git a/host/tests/host_tests.cpp b/host/tests/host_tests.cpp
-index 8bc24e5..3ef4019 100644
+index 32049db..e99c748 100644
 --- a/host/tests/host_tests.cpp
 +++ b/host/tests/host_tests.cpp
-@@ -869,6 +869,7 @@ static void test_script_parsing() {
+@@ -897,6 +897,7 @@ static void test_script_parsing() {
      CHECK_EQ(steps[11].threshold, 840.0);
      CHECK(steps[11].at_least);
      // This host test binary has no mod runtime/game view linked or loaded.
@@ -1930,7 +1919,7 @@ index 8bc24e5..3ef4019 100644
      const uint32_t saved_turn = rd32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR);
      const uint32_t saved_command = rd32(RECOMP_GLOBAL_COMMAND_FRAME_ADDR);
      wr32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR, 820);
-@@ -888,6 +889,9 @@ static void test_script_parsing() {
+@@ -916,6 +917,9 @@ static void test_script_parsing() {
      CHECK_EQ(host_script_counter_metric("turn", rd32), 860.0);
      wr32(RECOMP_GLOBAL_SIMULATION_TURN_ADDR, saved_turn);
      wr32(RECOMP_GLOBAL_COMMAND_FRAME_ADDR, saved_command);
@@ -1940,7 +1929,7 @@ index 8bc24e5..3ef4019 100644
  
      // Five malformed forms for each of the five verbs. The categories the
      // brief names are missing operand, non-integer, unknown enum, extra token
-@@ -6754,6 +6758,16 @@ static void test_input_batch_limit() {
+@@ -6785,6 +6789,16 @@ static void test_input_batch_limit() {
      // Two clicks: only the first release matters, the rest waits its turn.
      const HostInputStep two[] = {down, up, right_down, right_up};
      CHECK_EQ(host_input_batch_limit(two, 4), 1u);
@@ -1957,7 +1946,7 @@ index 8bc24e5..3ef4019 100644
  }
  
  static void test_script_input_hold_frames() {
-@@ -7098,6 +7112,9 @@ static void test_input_gate() {
+@@ -7129,6 +7143,9 @@ static void test_input_gate() {
      uint32_t wp = 0;
      CHECK(gate_next_message(&ctx, &wp) == 0x0100); // 4. WM_KEYDOWN
      CHECK(wp == m.vk);
@@ -1967,7 +1956,7 @@ index 8bc24e5..3ef4019 100644
      CHECK(gate_next_message(&ctx, &wp) == 0x0102); //    and its WM_CHAR
      CHECK(wp == 'G');
      CHECK(gate_next_message(&ctx, nullptr) == 0);
-@@ -9758,7 +9775,115 @@ static void test_d3d9_gpu_renderer() {
+@@ -10140,7 +10157,115 @@ static void test_d3d9_gpu_renderer() {
      host_d9_texture_drop(DEPTH);
  }
  
@@ -2083,7 +2072,7 @@ index 8bc24e5..3ef4019 100644
      if (argc == 2 && !strcmp(argv[1], "--dumpat-only")) {
          test_dumpat_present_and_seal();
          printf("dumpat integration: %d checks, %d failures\n", g_checks, g_failures);
-@@ -9818,6 +9943,27 @@ int main(int argc, char **argv) {
+@@ -10236,6 +10361,27 @@ int main(int argc, char **argv) {
          }
      }
      mem_init();
@@ -2110,7 +2099,7 @@ index 8bc24e5..3ef4019 100644
 +    }
      test_fullscreen_edge_presentation();
      test_native_frame_metrics();
-     test_wide_cursor_bound();
+     test_clock_spin_detection();
 diff --git a/platform/android/app/build.gradle.kts.in b/platform/android/app/build.gradle.kts.in
 index 6e666fd..d901371 100644
 --- a/platform/android/app/build.gradle.kts.in
@@ -2183,23 +2172,23 @@ index 4c2fa4e..f474f76 100644
       * Same-sized edits are copied too; user mods and profiles live elsewhere.
       */
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
-index 10a5e39..4499b0c 100644
+index 3a00ea1..5a52c41 100644
 --- a/runtime/CMakeLists.txt
 +++ b/runtime/CMakeLists.txt
 @@ -2,7 +2,7 @@
  # consumer exactly as the shell scripts linked every object.
  set(POP_RUNTIME_SOURCES
-   memory.cpp loader.cpp imports.cpp cpu.cpp thunks.cpp seh.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
+   memory.cpp loader.cpp imports.cpp cpu.cpp thunks.cpp seh.cpp msvc_eh.cpp crt_core.cpp crt_strings.cpp crt_math.cpp crt_stdio.cpp crt_startup.cpp crt_cpp.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
 -  resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
 +  resources.cpp oleaut32.cpp structured_storage.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp user32_listbox.cpp user32_edit.cpp
    misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
    media_foundation.cpp layout.cpp interp.cpp discovery.cpp)
  
 diff --git a/runtime/README.md b/runtime/README.md
-index 85b7a4b..670c03f 100644
+index ec4752c..c34e20e 100644
 --- a/runtime/README.md
 +++ b/runtime/README.md
-@@ -217,6 +217,10 @@ paths resolve against the guest current directory, which starts at
+@@ -248,6 +248,10 @@ paths resolve against the guest current directory, which starts at
  | variable | effect |
  | --- | --- |
  | `RECOMP_LOG` | `0` silent, `1` warnings and one-shot notices (default), `2` traces every import call and returned EAX |
@@ -2211,10 +2200,10 @@ index 85b7a4b..670c03f 100644
  | `RECOMP_CREATETHREAD=skip` | record `CreateThread` without running the thread body |
  | `RECOMP_CREATETHREAD=sync` | run a thread body to completion inside `CreateThread` (pre-scheduler behaviour, for bisection) |
 diff --git a/runtime/cpu.cpp b/runtime/cpu.cpp
-index 06d5e2b..c2683c7 100644
+index 74c6d71..c81a7a7 100644
 --- a/runtime/cpu.cpp
 +++ b/runtime/cpu.cpp
-@@ -95,9 +95,25 @@ const int recomp_resumable_stacks = RECOMP_RESUMABLE_STACKS;
+@@ -100,9 +100,25 @@ const int recomp_resumable_stacks = RECOMP_RESUMABLE_STACKS;
  // this opt-in translation mode; ordinary games retain their existing path.
  void recomp_run(X86 *c, uint32_t target) {
      c->eip = target;
@@ -2241,7 +2230,7 @@ index 06d5e2b..c2683c7 100644
  }
  
  void recomp_module_register(const RecompModule *m) {
-@@ -148,6 +164,10 @@ int recomp_module_call(X86 *c, uint32_t target) {
+@@ -153,6 +169,10 @@ int recomp_module_call(X86 *c, uint32_t target) {
      int32_t i = module_index(m, target);
      if (i < 0)
          return 0;
@@ -2252,7 +2241,7 @@ index 06d5e2b..c2683c7 100644
  #ifdef RECOMP_NO_HOOKS
      m->base_ptrs[i](c);
  #else
-@@ -156,6 +176,12 @@ int recomp_module_call(X86 *c, uint32_t target) {
+@@ -161,6 +181,12 @@ int recomp_module_call(X86 *c, uint32_t target) {
      else
          m->base_ptrs[i](c);
  #endif
@@ -2265,7 +2254,7 @@ index 06d5e2b..c2683c7 100644
      return 1;
  }
  
-@@ -209,7 +235,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
+@@ -214,7 +240,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
      // call through a null pointer faults at the call, and there are no
      // instructions at it to interpret. Reading them would be the very
      // dereference this page exists to refuse.
@@ -2275,10 +2264,10 @@ index 06d5e2b..c2683c7 100644
      if (target == GUEST_RETURN_SENTINEL) {
          recomp_callback_return(c);
 diff --git a/runtime/gdi32.cpp b/runtime/gdi32.cpp
-index 13ba56f..e13f36c 100644
+index cb2f9a8..d41b3a7 100644
 --- a/runtime/gdi32.cpp
 +++ b/runtime/gdi32.cpp
-@@ -6,6 +6,7 @@
+@@ -7,6 +7,7 @@
  #include "user32_internal.h"
  #include "display_seam.h"
  #include <climits>
@@ -2286,7 +2275,7 @@ index 13ba56f..e13f36c 100644
  #include <algorithm>
  #include "memory.h"
  #include "win32.h"
-@@ -105,6 +106,8 @@ struct Dib {
+@@ -106,6 +107,8 @@ struct Dib {
      uint32_t size = 0;
      uint32_t compression = 0;
      bool owned = true;
@@ -2295,7 +2284,7 @@ index 13ba56f..e13f36c 100644
      uint32_t masks[3] = {0, 0, 0};
      std::vector<uint32_t> colors; // RGBQUADs for bpp <= 8
  };
-@@ -392,12 +395,12 @@ void g_CreateCompatibleBitmap(X86 *c) {
+@@ -394,12 +397,12 @@ void g_CreateCompatibleBitmap(X86 *c) {
  
  // GetObjectA(handle, bytes, out): BITMAP (24 bytes) or DIBSECTION (84) for a
  // bitmap, the entry count (a WORD) for a palette.
@@ -2311,7 +2300,7 @@ index 13ba56f..e13f36c 100644
              return;
          }
          if (bytes < 24 || !gm_valid(out, have)) {
-@@ -411,7 +414,9 @@ void g_GetObjectA(X86 *c) {
+@@ -413,7 +416,9 @@ void g_GetObjectA(X86 *c) {
          wr32(out + 12, d->stride);
          wr16(out + 16, 1);
          wr16(out + 18, d->bpp);
@@ -2322,7 +2311,7 @@ index 13ba56f..e13f36c 100644
          if (have == 84) {
              uint32_t bmih = out + 24;
              wr32(bmih + 0, 40);
-@@ -436,7 +441,7 @@ void g_GetObjectA(X86 *c) {
+@@ -438,7 +443,7 @@ void g_GetObjectA(X86 *c) {
      auto object = objects().find(handle);
      if (object != objects().end()) {
          const Object &o = object->second;
@@ -2331,7 +2320,7 @@ index 13ba56f..e13f36c 100644
          if (!out) {
              set_eax(c, size);
              return;
-@@ -446,9 +451,15 @@ void g_GetObjectA(X86 *c) {
+@@ -448,9 +453,15 @@ void g_GetObjectA(X86 *c) {
              return;
          }
          memset(g_mem + out, 0, size);
@@ -2350,7 +2339,7 @@ index 13ba56f..e13f36c 100644
              wr32(out, o.style);
              wr32(out + 4, o.kind == Object::Pen ? o.width : o.color);
              if (o.kind == Object::Pen)
-@@ -467,6 +478,13 @@ void g_GetObjectA(X86 *c) {
+@@ -469,6 +480,13 @@ void g_GetObjectA(X86 *c) {
      set_eax(c, 0);
  }
  
@@ -2364,7 +2353,7 @@ index 13ba56f..e13f36c 100644
  // DeleteObject(handle): a bitmap gives its pixels back; a palette goes away;
  // a stock object is fine to delete, as on Windows.
  void g_DeleteObject(X86 *c) {
-@@ -504,6 +522,50 @@ void g_CreateCompatibleDC(X86 *c) {
+@@ -506,6 +524,50 @@ void g_CreateCompatibleDC(X86 *c) {
  void g_DeleteDC(X86 *c) {
      set_eax(c, dcs().erase(arg(c, 0)) ? 1 : 0);
  }
@@ -2415,7 +2404,7 @@ index 13ba56f..e13f36c 100644
  
  // SelectObject(hdc, object): a bitmap goes into the DC and the previous one
  // comes back; a pen, brush or font is accepted as selected.
-@@ -533,8 +595,12 @@ void g_SelectObject(X86 *c) {
+@@ -535,8 +597,12 @@ void g_SelectObject(X86 *c) {
      *slot = obj;
      if (it->second.kind == Object::Region) {
          dc.clipped = true;
@@ -2430,44 +2419,7 @@ index 13ba56f..e13f36c 100644
      } else
          set_eax(c, prev);
  }
-@@ -623,31 +689,12 @@ void g_SetSystemPaletteUse(X86 *c) {
-     set_eax(c, 1); // the previous use
- }
- 
--// GetDIBits(hdc, hbm, start, lines, bits, bmi, usage): the rows as stored.
-+namespace {
-+void get_dibits(X86 *c);
-+}
-+// Convert to the caller's requested format, including scan orientation.
- void g_GetDIBits(X86 *c) {
--    Dib *d = dib_of(arg(c, 1));
--    uint32_t start = arg(c, 2), lines = arg(c, 3), out = arg(c, 4), bmi = arg(c, 5);
--    if (!d) {
--        set_eax(c, 0);
--        return;
--    }
--    uint32_t rows = (uint32_t)(d->height < 0 ? -d->height : d->height);
--    if (!out) {
--        if (bmi && gm_valid(bmi, 40)) {
--            wr32(bmi + 4, (uint32_t)d->width);
--            wr32(bmi + 8, (uint32_t)d->height);
--            wr16(bmi + 12, 1);
--            wr16(bmi + 14, d->bpp);
--            wr32(bmi + 16, d->compression);
--            wr32(bmi + 20, d->size);
--        }
--        set_eax(c, rows);
--        return;
--    }
--    uint32_t n = 0;
--    for (; n < lines && start + n < rows; ++n)
--        memcpy(g_mem + out + n * d->stride, g_mem + d->bits + (start + n) * d->stride, d->stride);
--    set_eax(c, n);
-+    get_dibits(c);
- }
- 
- // Report the display dimensions and 32-bit canvas capabilities. The indexed
-@@ -689,43 +736,6 @@ void g_GetDeviceCaps(X86 *c) {
+@@ -669,43 +735,6 @@ void g_GetDeviceCaps(X86 *c) {
      set_eax(c, value);
  }
  
@@ -2511,7 +2463,7 @@ index 13ba56f..e13f36c 100644
  void g_SetTextColor(X86 *c) {
      auto *found = dc_of(arg(c, 0));
      if (!found) {
-@@ -765,13 +775,14 @@ const ImportShim g_gdi32_shims[] = {
+@@ -745,13 +774,14 @@ const ImportShim g_gdi32_shims[] = {
      {"GDI32.dll", "ExtTextOutA", 8, nullptr},
      {"GDI32.dll", "CreateCompatibleBitmap", 3, g_CreateCompatibleBitmap},
      // Named for its argument count; the result is ERROR, which is honest.
@@ -2528,7 +2480,7 @@ index 13ba56f..e13f36c 100644
      {"GDI32.dll", "SetDIBColorTable", 4, g_SetDIBColorTable},
      {"GDI32.dll", "CreatePalette", 1, g_CreatePalette},
      {"GDI32.dll", "SelectPalette", 3, g_SelectPalette},
-@@ -781,9 +792,6 @@ const ImportShim g_gdi32_shims[] = {
+@@ -761,9 +791,6 @@ const ImportShim g_gdi32_shims[] = {
      {"GDI32.dll", "SetSystemPaletteUse", 2, g_SetSystemPaletteUse},
      {"GDI32.dll", "GetDIBits", 7, g_GetDIBits},
      {"GDI32.dll", "GetDeviceCaps", 2, g_GetDeviceCaps},
@@ -2538,7 +2490,7 @@ index 13ba56f..e13f36c 100644
      {"GDI32.dll", "SetTextColor", 2, g_SetTextColor},
      {"GDI32.dll", "SetBkColor", 2, g_SetBkColor},
      {"GDI32.dll", "SetBkMode", 2, g_SetBkMode},
-@@ -861,8 +869,17 @@ Surface *surface_of(DeviceContext &dc) {
+@@ -841,8 +868,17 @@ Surface *surface_of(DeviceContext &dc) {
      return &s;
  }
  void offset(DeviceContext &dc, int64_t *x, int64_t *y) {
@@ -2558,7 +2510,7 @@ index 13ba56f..e13f36c 100644
      if (dc.window && dc.window != dc.surface) {
          int32_t wx = 0, wy = 0, sx = 0, sy = 0;
          user32::client_origin(dc.window, &wx, &wy);
-@@ -886,7 +903,7 @@ Rect client_bounds(DeviceContext &dc, int w, int h) {
+@@ -866,7 +902,7 @@ Rect client_bounds(DeviceContext &dc, int w, int h) {
      for (size_t hop = 0; current && current != dc.surface && hop < user32::windows().size();
           ++hop) {
          auto *window = user32::find_window(current);
@@ -2567,7 +2519,7 @@ index 13ba56f..e13f36c 100644
              return {};
          int32_t x = 0, y = 0;
          user32::client_origin(current, &x, &y);
-@@ -1058,6 +1075,83 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
+@@ -1038,6 +1074,83 @@ bool read_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t *p, bool preserve_al
  bool write_pixel(uint32_t dc, int64_t x, int64_t y, uint32_t p, bool blend) {
      return pixel(dc, x, y, &p, true, blend);
  }
@@ -2651,7 +2603,7 @@ index 13ba56f..e13f36c 100644
  bool drawable(uint32_t dc, int64_t x, int64_t y) {
      uint32_t p;
      return read_pixel(dc, x, y, &p);
-@@ -1084,6 +1178,8 @@ Rect clip_box(uint32_t hdc) {
+@@ -1064,6 +1177,8 @@ Rect clip_box(uint32_t hdc) {
          return {};
      auto &dc = *dc_of(hdc);
      Rect r = dc.bitmap ? Rect{0, 0, w, h} : client_bounds(dc, w, h);
@@ -2660,7 +2612,7 @@ index 13ba56f..e13f36c 100644
      if (dc.clipped) {
          Rect bound{INT_MAX, INT_MAX, INT_MIN, INT_MIN};
          for (Rect p : dc.clip) {
-@@ -1099,10 +1195,29 @@ Rect clip_box(uint32_t hdc) {
+@@ -1079,10 +1194,29 @@ Rect clip_box(uint32_t hdc) {
      }
      int64_t x = 0, y = 0;
      offset(dc, &x, &y);
@@ -2692,7 +2644,7 @@ index 13ba56f..e13f36c 100644
      Rect clip = clip_box(dc);
      for (int64_t y = std::max(r.t, clip.t); y < std::min(r.b, clip.b); ++y)
          for (int64_t x = std::max(r.l, clip.l); x < std::min(r.r, clip.r); ++x)
-@@ -1136,6 +1251,35 @@ std::vector<Rect> clipped_children(uint32_t hwnd, uint32_t surface) {
+@@ -1116,6 +1250,35 @@ std::vector<Rect> clipped_children(uint32_t hwnd, uint32_t surface) {
      }
      return out;
  }
@@ -2728,7 +2680,7 @@ index 13ba56f..e13f36c 100644
  } // namespace
  uint32_t gdi_window_dc(uint32_t hwnd) {
      DeviceContext dc;
-@@ -1154,6 +1298,7 @@ uint32_t gdi_window_dc(uint32_t hwnd) {
+@@ -1134,6 +1297,7 @@ uint32_t gdi_window_dc(uint32_t hwnd) {
          }
          dc.surface = w->hwnd;
          dc.excluded = clipped_children(hwnd, dc.surface);
@@ -2736,7 +2688,7 @@ index 13ba56f..e13f36c 100644
      }
      uint32_t handle = g_next_dc++;
      dcs()[handle] = dc;
-@@ -1293,6 +1438,9 @@ bool presented_pixels(PresentedSurface &s) {
+@@ -1273,6 +1437,9 @@ bool presented_pixels(PresentedSurface &s) {
  }
  } // namespace
  
@@ -2746,7 +2698,7 @@ index 13ba56f..e13f36c 100644
  void gdi_present_windows(bool refresh) {
      auto surfaces = visible_surfaces();
      auto &presented = presented_surface();
-@@ -1480,6 +1628,21 @@ void brush_indirect(X86 *c) {
+@@ -1460,6 +1627,21 @@ void brush_indirect(X86 *c) {
  void pen_indirect(X86 *c) {
      indirect_object(c, true);
  }
@@ -2768,7 +2720,7 @@ index 13ba56f..e13f36c 100644
  void stock_object(X86 *c) {
      uint32_t i = arg(c, 0);
      set_eax(c, i <= 19 ? 0x4f100 + i : 0);
-@@ -1494,6 +1657,10 @@ void set_pixel(X86 *c) {
+@@ -1474,6 +1656,10 @@ void set_pixel(X86 *c) {
                     ? arg(c, 3) & 0xffffff
                     : 0xffffffff);
  }
@@ -2779,7 +2731,7 @@ index 13ba56f..e13f36c 100644
  void save_dc(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      if (!dc) {
-@@ -1579,6 +1746,61 @@ void get_stretch_mode(X86 *c) {
+@@ -1559,6 +1745,61 @@ void get_stretch_mode(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      set_eax(c, dc ? dc->stretch_mode : 0);
  }
@@ -2841,7 +2793,7 @@ index 13ba56f..e13f36c 100644
  void rop2(X86 *c) {
      auto *dc = dc_of(arg(c, 0));
      int v = int(arg(c, 1));
-@@ -1589,6 +1811,10 @@ void rop2(X86 *c) {
+@@ -1569,6 +1810,10 @@ void rop2(X86 *c) {
      set_eax(c, dc->rop2);
      dc->rop2 = v;
  }
@@ -2852,7 +2804,7 @@ index 13ba56f..e13f36c 100644
  void flush(X86 *c) {
      set_eax(c, 1);
  }
-@@ -1642,12 +1868,20 @@ void gdi_model_register() {
+@@ -1622,12 +1867,20 @@ void gdi_model_register() {
      static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                         G("CreateBrushIndirect", 1, brush_indirect),
                                         G("CreatePenIndirect", 1, pen_indirect),
@@ -2873,7 +2825,7 @@ index 13ba56f..e13f36c 100644
                                         G("GetWindowOrgEx", 2, get_window_org),
                                         G("SetViewportOrgEx", 4, viewport_org),
                                         G("SetBrushOrgEx", 4, brush_org),
-@@ -1657,6 +1891,7 @@ void gdi_model_register() {
+@@ -1637,6 +1890,7 @@ void gdi_model_register() {
                                         G("SetStretchBltMode", 2, stretch_mode),
                                         G("GetStretchBltMode", 1, get_stretch_mode),
                                         G("SetROP2", 2, rop2),
@@ -2881,7 +2833,7 @@ index 13ba56f..e13f36c 100644
                                         G("GdiFlush", 0, flush),
                                         G("UnrealizeObject", 1, unrealize),
                                         G("ResizePalette", 2, resize_palette),
-@@ -1671,10 +1906,12 @@ Rect to_device(uint32_t hdc, Rect r) {
+@@ -1651,10 +1905,12 @@ Rect to_device(uint32_t hdc, Rect r) {
      auto *dc = dc_of(hdc);
      if (!dc)
          return {};
@@ -2896,7 +2848,7 @@ index 13ba56f..e13f36c 100644
  }
  } // namespace gdi
  namespace {
-@@ -1741,6 +1978,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
+@@ -1721,6 +1977,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
  }
  void create_section(X86 *c) {
      Dib d;
@@ -2904,95 +2856,7 @@ index 13ba56f..e13f36c 100644
      uint32_t out = arg(c, 3);
      if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
          !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
-@@ -1825,6 +2063,87 @@ struct DibDc {
-         dibs().erase(bitmap);
-     }
- };
-+// GetDIBits describes a requested output format, not the bitmap's storage.
-+// Copying internal rows can overrun a caller's 24-bpp buffer with 32-bpp data.
-+void get_dibits(X86 *c) {
-+    const Dib *bitmap = dib_of(arg(c, 1));
-+    uint32_t start = arg(c, 2), lines = arg(c, 3), out = arg(c, 4), bmi = arg(c, 5),
-+             usage = arg(c, 6);
-+    if (!bitmap || !bmi || !gm_valid(bmi, 40) || rd32(bmi) < 40 || usage > 1) {
-+        set_eax(c, 0);
-+        return;
-+    }
-+    Dib source = *bitmap;
-+    uint32_t rows = uint32_t(std::abs(int64_t(source.height)));
-+    if (!out && !rd16(bmi + 14)) {
-+        wr32(bmi + 4, uint32_t(source.width));
-+        wr32(bmi + 8, rows);
-+        wr16(bmi + 12, 1);
-+        wr16(bmi + 14, source.bpp);
-+        wr32(bmi + 16, source.compression);
-+        wr32(bmi + 20, source.size);
-+        wr32(bmi + 32, 0);
-+        set_eax(c, 1);
-+        return;
-+    }
-+    if (!out) {
-+        wr32(bmi + 4, uint32_t(source.width));
-+        wr32(bmi + 8, int32_t(rd32(bmi + 8)) < 0 ? uint32_t(-int64_t(rows)) : rows);
-+        wr16(bmi + 12, 1);
-+    }
-+    Dib dest;
-+    if (!describe_dib(bmi, usage, arg(c, 0), &dest) || dest.width != source.width ||
-+        uint64_t(std::abs(int64_t(dest.height))) != rows) {
-+        set_eax(c, 0);
-+        return;
-+    }
-+    // Indexed downloads preserve an existing bitmap palette. Synthesized
-+    // palette conversion remains unavailable instead of guessing colour indices.
-+    if (dest.bpp <= 8) {
-+        if (dest.bpp != source.bpp || source.colors.empty() || usage != 0) {
-+            set_eax(c, 0);
-+            return;
-+        }
-+        dest.colors = source.colors;
-+        uint32_t after = bmi + rd32(bmi);
-+        if (!gm_valid(after, uint32_t(dest.colors.size()) * 4)) {
-+            set_eax(c, 0);
-+            return;
-+        }
-+        for (uint32_t i = 0; i < dest.colors.size(); ++i)
-+            wr32(after + i * 4, dest.colors[i]);
-+        wr32(bmi + 32, uint32_t(dest.colors.size()));
-+    }
-+    wr32(bmi + 20, dest.size);
-+    if (!out) {
-+        set_eax(c, 1);
-+        return;
-+    }
-+    if (start >= rows) {
-+        set_eax(c, 0);
-+        return;
-+    }
-+    uint32_t count = std::min(lines, rows - start), bytes = count * dest.stride;
-+    if (!count || !gm_valid(out, bytes)) {
-+        set_eax(c, 0);
-+        return;
-+    }
-+    bool top = dest.height < 0;
-+    dest.height = top ? -int32_t(count) : int32_t(count);
-+    dest.bits = out;
-+    dest.size = bytes;
-+    memset(g_mem + out, 0, bytes); // deterministic padding, within requested rows
-+    DibDc input(source), output(dest);
-+    for (uint32_t scan = 0; scan < count; ++scan)
-+        for (int x = 0; x < dest.width; ++x) {
-+            uint32_t pixel;
-+            uint32_t y = top ? start + scan : rows - 1 - start - scan;
-+            if (read_pixel(input.dc, x, y, &pixel))
-+                write_pixel(output.dc, x, top ? scan : count - 1 - scan, pixel & 0xffffffu);
-+        }
-+    set_eax(c, count);
-+}
-+
- void set_dibits(X86 *c) {
-     auto *dest = dib_of(arg(c, 1));
-     Dib src;
-@@ -1864,6 +2183,12 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1934,6 +2191,12 @@ void dib_to_device(X86 *c, bool stretch) {
          set_eax(c, 0);
          return;
      }
@@ -3005,7 +2869,7 @@ index 13ba56f..e13f36c 100644
      uint32_t count = uint32_t(std::abs(int64_t(src.height))), start = stretch ? 0 : arg(c, 7);
      if (start >= count) {
          set_eax(c, 0);
-@@ -1882,11 +2207,23 @@ void dib_to_device(X86 *c, bool stretch) {
+@@ -1952,11 +2215,23 @@ void dib_to_device(X86 *c, bool stretch) {
      src.size = count * src.stride;
      DibDc input(src);
      if (stretch) {
@@ -3031,7 +2895,7 @@ index 13ba56f..e13f36c 100644
          for (int i = 10; i >= 0; --i) {
              c->r[R_ESP] -= 4;
              wr32(c->r[R_ESP], values[i]);
-@@ -1927,17 +2264,48 @@ void stretch_dibits(X86 *c) {
+@@ -1997,17 +2272,48 @@ void stretch_dibits(X86 *c) {
  void set_dibits_device(X86 *c) {
      dib_to_device(c, false);
  }
@@ -3650,16 +3514,18 @@ index a6dd8fa..d62f5d6 100644
                                         G("EnumFontsW", 4, enumerate),
                                         G("EnumFontFamiliesExW", 5, enumerate),
 diff --git a/runtime/imports.cpp b/runtime/imports.cpp
-index ec1d2b1..d2b3171 100644
+index ba46426..a0d4f2f 100644
 --- a/runtime/imports.cpp
 +++ b/runtime/imports.cpp
-@@ -1,4 +1,5 @@
+@@ -1,6 +1,7 @@
  #include "imports.h"
+ #include "msvc_eh.h"
+ #include "crt_internal.h"
 +#include "../platform/os.h"
  #include "gdi32_internal.h"
  #include "user32_internal.h"
  #include "kernel32_internal.h"
-@@ -392,6 +393,52 @@ ImportCallObserver imports_set_call_observer_get(void) {
+@@ -426,6 +427,52 @@ ImportCallObserver imports_set_call_observer_get(void) {
  // Copy dispatch metadata before calling a shim, then restore EIP/ESP according to its calling convention.
  namespace {
  uint64_t g_import_calls = 0;
@@ -3712,7 +3578,7 @@ index ec1d2b1..d2b3171 100644
  } // namespace
  uint64_t imports_call_count() {
      return g_import_calls;
-@@ -403,6 +450,7 @@ void imports_call_leaves_surfaces() {
+@@ -437,6 +484,7 @@ void imports_call_leaves_surfaces() {
  bool imports_dispatch(X86 *c, uint32_t target) {
      if (!imports_is_trampoline(target))
          return false;
@@ -3720,7 +3586,7 @@ index ec1d2b1..d2b3171 100644
      // A bounded scheduling checkpoint. Cooperative threads must not depend on
      // the guest happening to call a blocking API: the frame limiter spins on
      // GetTickCount and would otherwise starve the service threads for as long
-@@ -436,7 +484,29 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -481,7 +529,29 @@ bool imports_dispatch(X86 *c, uint32_t target) {
      ++g_import_calls;
  
      uint32_t ret_addr = rd32(c->r[R_ESP]);
@@ -3751,7 +3617,7 @@ index ec1d2b1..d2b3171 100644
      recomp_seh_validate_chain(c, "import enter", desc);
  
      // The arguments as they are NOW, before the shim runs: a stdcall shim pops
-@@ -466,10 +536,24 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -513,10 +583,24 @@ bool imports_dispatch(X86 *c, uint32_t target) {
          log_once(desc, "unimplemented import %s: returning 0", desc);
          set_eax(c, 0);
      }
@@ -3774,10 +3640,10 @@ index ec1d2b1..d2b3171 100644
 -    LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
 +    if (trace_calls)
 +        LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
+     current_import_target = previous_import;
  
      uint32_t pop = 4;
-     if (argc == ARGC_CDECL) {
-@@ -488,6 +572,8 @@ bool imports_dispatch(X86 *c, uint32_t target) {
+@@ -536,6 +620,8 @@ bool imports_dispatch(X86 *c, uint32_t target) {
      c->r[R_ESP] += pop;
      c->eip = ret_addr;
      recomp_seh_validate_chain(c, "import leave", desc);
@@ -3786,7 +3652,7 @@ index ec1d2b1..d2b3171 100644
      return true;
  }
  
-@@ -537,8 +623,28 @@ void recomp_callback_return(X86 *c) {
+@@ -588,8 +674,28 @@ void recomp_callback_return(X86 *c) {
      // live guest_call. Match the guest return slot as well: a completing SEH
      // landing may RET to an older callback's identical sentinel, in which
      // case intercept must finish that function through its SEH checkpoint.
@@ -3817,16 +3683,16 @@ index ec1d2b1..d2b3171 100644
      mods_hooks_unwind_to_esp(call->return_sp);
      recomp_profile_truncate(call->profile_depth);
      longjmp(call->env, 1);
-@@ -582,6 +688,7 @@ void imports_init() {
+@@ -633,6 +739,7 @@ void imports_init() {
      imports_register(g_kernel32_shims, g_kernel32_shim_count);
      kernel32_wide_register();
      oleaut32_register();
 +    structured_storage_register();
      misc_dlls_register();
-     comctl32_register();
-     media_foundation_register();
+     extern void msvc_eh_register();
+     msvc_eh_register();
 diff --git a/runtime/imports.h b/runtime/imports.h
-index d01eb0a..658e274 100644
+index e42135a..af67468 100644
 --- a/runtime/imports.h
 +++ b/runtime/imports.h
 @@ -14,6 +14,10 @@
@@ -3851,20 +3717,20 @@ index d01eb0a..658e274 100644
  void comctl32_register();
  void media_foundation_register();
 diff --git a/runtime/kernel32.cpp b/runtime/kernel32.cpp
-index 529d27d..8239797 100644
+index 5b1ea90..9344068 100644
 --- a/runtime/kernel32.cpp
 +++ b/runtime/kernel32.cpp
-@@ -533,6 +533,9 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
- 
- void win32_init(const std::string &game_dir) {
+@@ -548,6 +548,9 @@ void win32_init(const std::string &game_dir) {
+ void win32_init_layout(const std::string &game_dir, const std::string &exe_dir) {
+     host_reset_mm_timers();
      kernel32_wide_reset();
 +    win32_reset_task_allocator();
 +    oleaut32_reset();
 +    structured_storage_reset();
-     g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
-     g_cur_dir = RECOMP_GUEST_ROOT;
-     g_last_error = 0;
-@@ -664,6 +667,15 @@ void k_GlobalReAlloc(X86 *c) {
+     const bool matches =
+         guest_layout::root_from_exe(game_dir.empty() ? "." : game_dir, exe_dir, &g_game_dir);
+     if (g_game_dir.empty())
+@@ -703,6 +706,15 @@ void k_GlobalReAlloc(X86 *c) {
  void k_GlobalFree(X86 *c) {
      set_eax(c, heap_free(arg(c, 0)) ? 0 : arg(c, 0));
  }
@@ -3880,7 +3746,7 @@ index 529d27d..8239797 100644
  void k_GlobalLock(X86 *c) {
      set_eax(c, arg(c, 0));
  }
-@@ -827,6 +839,19 @@ void k_ReadFile(X86 *c) {
+@@ -866,6 +878,19 @@ void k_ReadFile(X86 *c) {
      int64_t n = os_fd_read(o->fd, g_mem + buf, want);
      if (recomp_env("TRACE_FILES"))
          LOGW("file: read handle=%08x want=%u got=%lld", arg(c, 0), want, (long long)n);
@@ -3900,7 +3766,7 @@ index 529d27d..8239797 100644
      if (n < 0) {
          set_last_error(ERROR_ACCESS_DENIED_);
          if (pread)
-@@ -935,6 +960,214 @@ void k_CloseHandle(X86 *c) {
+@@ -965,6 +990,214 @@ void k_CloseHandle(X86 *c) {
      set_eax(c, 1);
  }
  
@@ -4115,27 +3981,7 @@ index 529d27d..8239797 100644
  void k_FlushFileBuffers(X86 *c) {
      HObj *o = handle_get(arg(c, 0), H_FILE);
      if (o)
-@@ -1059,6 +1292,9 @@ void k_SetCurrentDirectoryA(X86 *c) {
- std::string module_file_name(uint32_t hmod) {
-     std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
-     if (hmod && hmod != IMAGE_BASE) {
-+        const LoaderModule *mapped = loader_module_containing(hmod);
-+        if (mapped && mapped->base == hmod)
-+            return std::string(RECOMP_GUEST_ROOT "\\") + mapped->name;
-         for (const auto &kv : modules())
-             if (kv.second == hmod) {
-                 path = RECOMP_GUEST_ROOT "\\" + kv.first;
-@@ -1163,7 +1399,8 @@ void load_library_named(X86 *c, const std::string &module_name) {
-             memcpy(g_mem + m->base, m->initial_image.data(), m->initial_image.size());
-             m->attached = true;
-             m->load_refs = 1;
--            if (!call_dll_entry(c, *m, 1)) { // DLL_PROCESS_ATTACH
-+            if (!win32_attach_static_imports(c, *m) ||
-+                !call_dll_entry(c, *m, 1)) { // DLL_PROCESS_ATTACH
-                 call_dll_entry(c, *m, 0);    // failed attach still receives detach
-                 m->attached = false;
-                 m->load_refs = 0;
-@@ -1195,6 +1432,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
+@@ -1317,6 +1550,26 @@ void load_library_named(X86 *c, const std::string &module_name) {
  void k_LoadLibraryA(X86 *c) {
      load_library_named(c, gm_str(arg(c, 0)));
  }
@@ -4162,55 +4008,18 @@ index 529d27d..8239797 100644
  
  void k_LoadLibraryW(X86 *c) {
      load_library_named(c, gm_wstr(arg(c, 0)));
-@@ -1306,6 +1563,47 @@ void win32_reset_command_line_for_test() {
-     kernel32_wide_reset_command_line();
-     g_cmdline_addr = 0;
- }
-+
+@@ -1435,6 +1688,10 @@ void win32_reset_command_line_for_test() {
+ // Open sched_atomic_enter stretches on this thread (defined with the scheduler).
+ extern __thread uint32_t t_atomic;
+ 
 +uint32_t win32_load_library(X86 *c, const std::string &name) {
 +    load_library_named(c, name);
 +    return c->r[R_EAX];
 +}
-+bool win32_attach_static_imports(X86 *c, const LoaderModule &m) {
-+    // The loader has already validated and bound this PE's import directory.
-+    // Marking a DLL attached before descending breaks cyclic dependencies;
-+    // its DllMain still runs only after its dependencies have initialized.
-+    const uint32_t saved_eax = c->r[R_EAX], saved_eip = c->eip;
-+    auto in_image = [&m](uint32_t offset, uint32_t bytes) {
-+        return offset < m.size && bytes <= m.size - offset;
-+    };
-+    if (!in_image(0x3c, 4))
-+        return false;
-+    uint32_t pe = rd32(m.base + 0x3c);
-+    if (!in_image(pe, 24 + 112))
-+        return false;
-+    uint32_t imports = rd32(m.base + pe + 24 + 104);
-+    for (uint32_t d = imports; imports && in_image(d, 20); d += 20) {
-+        uint32_t name_rva = rd32(m.base + d + 12);
-+        if (!name_rva)
-+            break;
-+        if (!in_image(name_rva, 1))
-+            return false;
-+        std::string name = gm_str(m.base + name_rva, 260);
-+        if (LoaderModule *dependency = loader_module_named(name.c_str())) {
-+            if (dependency->base == loader_image_base())
-+                continue;
-+            load_library_named(c, name);
-+            bool ok = c->r[R_EAX] != 0;
-+            c->r[R_EAX] = saved_eax;
-+            c->eip = saved_eip;
-+            if (!ok)
-+                return false;
-+        }
-+    }
-+    c->r[R_EAX] = saved_eax;
-+    c->eip = saved_eip;
-+    return true;
-+}
  namespace {
  
  // The environment block is a run of NUL-terminated strings ended by an extra
-@@ -1483,6 +1781,43 @@ void k_GetSystemDirectoryA(X86 *c) {
+@@ -1636,6 +1893,43 @@ void k_GetSystemDirectoryA(X86 *c) {
      memcpy(g_mem + buf, dir, len + 1);
      set_eax(c, len);
  }
@@ -4254,7 +4063,7 @@ index 529d27d..8239797 100644
  
  void k_GetLogicalDriveStringsA(X86 *c) {
      logical_drive_strings(c, false);
-@@ -1753,6 +2088,7 @@ void k_CreateSemaphoreA(X86 *c) {
+@@ -1923,6 +2217,7 @@ void k_CreateSemaphoreA(X86 *c) {
      uint32_t h = handle_new(H_SEM);
      handles()[h].count = (int32_t)arg(c, 1);
      handles()[h].max_count = (int32_t)arg(c, 2);
@@ -4262,7 +4071,7 @@ index 529d27d..8239797 100644
      LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
           h);
      set_eax(c, h);
-@@ -3547,9 +3883,31 @@ void k_RaiseException(X86 *c) {
+@@ -3852,9 +4147,31 @@ void k_RaiseException(X86 *c) {
              snprintf(b, sizeof b, " %08x", r);
              frames += b;
          }
@@ -4297,7 +4106,7 @@ index 529d27d..8239797 100644
      }
      if (recomp_seh_raise(c, arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3)))
          return; // only the testing runtime can return from an unhandled raise
-@@ -4742,6 +5100,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -5101,6 +5418,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GlobalAlloc", 2, k_GlobalAlloc},
      {"KERNEL32.dll", "GlobalReAlloc", 3, k_GlobalReAlloc},
      {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
@@ -4306,7 +4115,7 @@ index 529d27d..8239797 100644
      {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
      {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
      {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
-@@ -4758,6 +5118,13 @@ const ImportShim g_kernel32_shims[] = {
+@@ -5117,6 +5436,13 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
      {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
      {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
@@ -4320,7 +4129,7 @@ index 529d27d..8239797 100644
      {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
      {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
      {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
-@@ -4777,6 +5144,9 @@ const ImportShim g_kernel32_shims[] = {
+@@ -5136,6 +5462,9 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
      {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
      {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
@@ -4330,7 +4139,7 @@ index 529d27d..8239797 100644
      {"KERNEL32.dll", "GetLogicalDriveStringsA", 2, k_GetLogicalDriveStringsA},
      {"KERNEL32.dll", "GetDriveTypeA", 1, k_GetDriveTypeA},
      // modules and process state
-@@ -4785,6 +5155,7 @@ const ImportShim g_kernel32_shims[] = {
+@@ -5144,6 +5473,7 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetModuleHandleA", 1, k_GetModuleHandleA},
      {"KERNEL32.dll", "GetModuleHandleW", 1, k_GetModuleHandleW},
      {"KERNEL32.dll", "LoadLibraryA", 1, k_LoadLibraryA},
@@ -4338,7 +4147,7 @@ index 529d27d..8239797 100644
      {"KERNEL32.dll", "LoadLibraryW", 1, k_LoadLibraryW},
      {"KERNEL32.dll", "LoadLibraryExW", 3, k_LoadLibraryExW},
      {"KERNEL32.dll", "FreeLibrary", 1, k_FreeLibrary},
-@@ -4935,6 +5306,8 @@ const ImportShim g_kernel32_shims[] = {
+@@ -5294,6 +5624,8 @@ const ImportShim g_kernel32_shims[] = {
      {"KERNEL32.dll", "GetEnvironmentVariableA", 3, k_GetEnvironmentVariableA},
      {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
      {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
@@ -4348,10 +4157,10 @@ index 529d27d..8239797 100644
      {"KERNEL32.dll", "IsValidLocale", 2, k_IsValidLocale},
      {"KERNEL32.dll", "EnumSystemLocalesA", 2, k_EnumSystemLocalesA},
 diff --git a/runtime/kernel32_wide.cpp b/runtime/kernel32_wide.cpp
-index 85af1d5..f0dd230 100644
+index 3ba6165..59ab62f 100644
 --- a/runtime/kernel32_wide.cpp
 +++ b/runtime/kernel32_wide.cpp
-@@ -344,6 +344,40 @@ uint32_t wstrlen(uint32_t p) {
+@@ -490,6 +490,40 @@ uint32_t wstrlen(uint32_t p) {
  void k_lstrlenW(X86 *c) {
      set_eax(c, wstrlen(arg(c, 0)));
  }
@@ -4392,7 +4201,7 @@ index 85af1d5..f0dd230 100644
  void k_lstrcatW(X86 *c) {
      uint32_t dest = arg(c, 0), src = arg(c, 1), n = wstrlen(dest), extra = wstrlen(src);
      if (dest && gm_valid(dest, n * 2) && extra < (GUEST_SIZE - dest) / 2 - n) {
-@@ -769,19 +803,19 @@ void k_VirtualQuery(X86 *c) {
+@@ -966,19 +1000,19 @@ void k_VirtualQuery(X86 *c) {
  void k_VirtualQueryEx(X86 *c) {
      set_eax(c, virtual_query(arg(c, 1), arg(c, 2), arg(c, 3)));
  }
@@ -4416,7 +4225,7 @@ index 85af1d5..f0dd230 100644
      if (name.empty() || wide_units(name) > 255) {
          set_last_error(87);
          set_eax(c, 0);
-@@ -806,6 +840,12 @@ void k_GlobalAddAtomW(X86 *c) {
+@@ -1003,6 +1037,12 @@ void k_GlobalAddAtomW(X86 *c) {
      set_last_error(8);
      set_eax(c, 0);
  }
@@ -4429,7 +4238,7 @@ index 85af1d5..f0dd230 100644
  void k_GlobalFindAtomW(X86 *c) {
      uint32_t p = arg(c, 0);
      if (p < 0x10000) {
-@@ -833,7 +873,8 @@ void k_WaitForMultipleObjectsEx(X86 *c) {
+@@ -1030,7 +1070,8 @@ void k_WaitForMultipleObjectsEx(X86 *c) {
  }
  
  bool resource_module(uint32_t module) {
@@ -4439,7 +4248,7 @@ index 85af1d5..f0dd230 100644
          return true;
      set_last_error(1812);
      return false;
-@@ -844,7 +885,7 @@ void k_FindResourceW(X86 *c) {
+@@ -1041,7 +1082,7 @@ void k_FindResourceW(X86 *c) {
          return;
      }
      std::string why;
@@ -4448,7 +4257,7 @@ index 85af1d5..f0dd230 100644
      if (!entry) {
          set_last_error(1814);
          LOGV("FindResourceW: %s", why.c_str());
-@@ -872,7 +913,7 @@ void k_FreeResource(X86 *c) {
+@@ -1069,7 +1110,7 @@ void k_FreeResource(X86 *c) {
  void k_EnumResourceNamesW(X86 *c) {
      uint32_t module = arg(c, 0), type = arg(c, 1), callback = arg(c, 2), param = arg(c, 3);
      std::vector<ResourceName> names;
@@ -4457,7 +4266,7 @@ index 85af1d5..f0dd230 100644
          set_last_error(1814);
          set_eax(c, 0);
          return;
-@@ -919,6 +960,7 @@ static const ImportShim g_kernel32_wide[] = {
+@@ -1123,6 +1164,7 @@ static const ImportShim g_kernel32_wide[] = {
      {"KERNEL32.dll", "VirtualQuery", 3, k_VirtualQuery},
      {"KERNEL32.dll", "VirtualQueryEx", 4, k_VirtualQueryEx},
      {"KERNEL32.dll", "GlobalAddAtomW", 1, k_GlobalAddAtomW},
@@ -4465,7 +4274,7 @@ index 85af1d5..f0dd230 100644
      {"KERNEL32.dll", "GlobalFindAtomW", 1, k_GlobalFindAtomW},
      {"KERNEL32.dll", "GlobalDeleteAtom", 1, k_GlobalDeleteAtom},
      {"KERNEL32.dll", "WaitForMultipleObjectsEx", 5, k_WaitForMultipleObjectsEx},
-@@ -940,6 +982,8 @@ static const ImportShim g_kernel32_wide[] = {
+@@ -1144,6 +1186,8 @@ static const ImportShim g_kernel32_wide[] = {
      {"KERNEL32.dll", "GetConsoleOutputCP", 0, k_GetConsoleOutputCP},
  
      {"KERNEL32.dll", "lstrlenW", 1, k_lstrlenW},
@@ -4474,74 +4283,23 @@ index 85af1d5..f0dd230 100644
      {"KERNEL32.dll", "lstrcatW", 2, k_lstrcatW},
      {"KERNEL32.dll", "FormatMessageW", 7, k_FormatMessageW},
      {"KERNEL32.dll", "OutputDebugStringW", 1, k_OutputDebugStringW},
-diff --git a/runtime/loader.cpp b/runtime/loader.cpp
-index 75269f0..c747dc0 100644
---- a/runtime/loader.cpp
-+++ b/runtime/loader.cpp
-@@ -424,10 +424,8 @@ bool load_aux_module(const AuxSpec &spec) {
-             memcpy(g_mem + va, file.data() + raw_ptr, copy);
-         }
-     }
--    if (!patch_iat(file, opt_off, opt_magic, image_base, size_image)) {
--        g_error = std::string(spec.name) + ": " + g_error;
--        return false;
--    }
-+    // Keep pristine mapped bytes until every DLL's export table is visible.
-+    // Imports between auxiliary modules must not depend on profile ordering.
-     m.initial_image.assign(g_mem + image_base, g_mem + image_base + m.size);
-     g_aux.push_back(m);
-     LOGV("mapped auxiliary module %s: base %08x size %08x entry %08x", spec.name, m.base,
-@@ -749,11 +747,19 @@ bool loader_load(const char *exe_path) {
-         }
-     }
- 
--    if (!patch_iat(file, opt_off, opt_magic, g_base, g_size))
--        return false;
-     for (uint32_t i = 0; i < RECOMP_AUX_MODULE_COUNT; ++i)
-         if (!load_aux_module(g_aux_specs[i]))
-             return false;
-+    for (LoaderModule &m : g_aux) {
-+        size_t aux_opt = rd<uint32_t>(m.initial_image, 0x3c) + 24;
-+        if (!patch_iat(m.initial_image, aux_opt, 0x10b, m.base, m.size)) {
-+            g_error = m.name + ": " + g_error;
-+            return false;
-+        }
-+        m.initial_image.assign(g_mem + m.base, g_mem + m.base + m.size);
-+    }
-+    if (!patch_iat(file, opt_off, opt_magic, g_base, g_size))
-+        return false;
- 
-     if (g_entry != LOADER_EXPECTED_ENTRY)
-         LOGW("entry point is %08x, expected %08x", g_entry, LOADER_EXPECTED_ENTRY);
-@@ -829,6 +835,11 @@ void run_entry(X86 *c) {
-     sched_set_guest_thread(true);
-     // ExitProcess/TerminateProcess/ExitThread-outside-a-thread longjmp here.
-     if (setjmp(*process_exit_jmp()) == 0) {
-+        if (!win32_attach_static_imports(c, g_main)) {
-+            LOGW("static DLL initialization failed: error %u", get_last_error());
-+            sched_set_guest_thread(false);
-+            return;
-+        }
-         uint32_t count = 0;
-         for (uint32_t p = g_tls.callbacks; p && rva_ok(p - g_base, 4); p += 4) {
-             uint32_t cb = rd32(p);
 diff --git a/runtime/loader.h b/runtime/loader.h
-index bfe336c..1ad8db4 100644
+index fd49ada..4b215c3 100644
 --- a/runtime/loader.h
 +++ b/runtime/loader.h
-@@ -49,6 +49,7 @@ struct LoaderModule {
-     std::string name, path;
+@@ -50,6 +50,7 @@ struct LoaderModule {
      uint32_t base = 0, size = 0, entry = 0, export_rva = 0, export_size = 0;
      bool attached = false;
+     bool attaching = false, detaching = false, pinned = false;
 +    bool thread_notifications_disabled = false;
      uint32_t load_refs = 0;
+     std::vector<std::string> dependencies, owned_dependencies;
      std::vector<uint8_t> initial_image;
-     std::vector<SectionInfo> sections;
 diff --git a/runtime/memory.cpp b/runtime/memory.cpp
-index 714d83a..f72942d 100644
+index 7d5217b..9b2b8c7 100644
 --- a/runtime/memory.cpp
 +++ b/runtime/memory.cpp
-@@ -108,6 +108,10 @@ extern "C" void recomp_watch_hit(uint32_t addr, uint32_t n, uint64_t value) {
+@@ -114,6 +114,10 @@ extern "C" void recomp_watch_hit(uint32_t addr, uint32_t n, uint64_t value) {
      static uint32_t hits = 0;
      LOGW("watch: %08x %u = %llx by %s (hit %u)", addr, n, (unsigned long long)value, watch_writer(),
           ++hits);
@@ -4553,7 +4311,7 @@ index 714d83a..f72942d 100644
  
  // ---------------------------------------------------------------------------
 diff --git a/runtime/misc.cpp b/runtime/misc.cpp
-index 3c955d7..99d0dd3 100644
+index b62f001..539aedd 100644
 --- a/runtime/misc.cpp
 +++ b/runtime/misc.cpp
 @@ -760,6 +760,36 @@ void a_RegQueryValueExA(X86 *c) {
@@ -4827,7 +4585,7 @@ index 3c955d7..99d0dd3 100644
      set_eax(c, 0);
  }
  void o_IsEqualGUID(X86 *c) {
-@@ -1855,6 +2102,20 @@ void m_mciSendCommandA(X86 *c) {
+@@ -1952,6 +2199,20 @@ void m_mciSendCommandA(X86 *c) {
      log_once("mciSendCommandA", "mciSendCommandA(%08x): MCI is not implemented", arg(c, 1));
      set_eax(c, 266); // MCIERR_DEVICE_NOT_INSTALLED
  }
@@ -4848,7 +4606,7 @@ index 3c955d7..99d0dd3 100644
  
  } // namespace
  
-@@ -2007,10 +2268,12 @@ const ImportShim g_misc_shims[] = {
+@@ -2127,10 +2388,12 @@ const ImportShim g_misc_shims[] = {
      {"ADVAPI32.dll", "RegCreateKeyA", 3, a_RegCreateKeyA},
      {"ADVAPI32.dll", "RegCloseKey", 1, a_RegCloseKey},
      {"ADVAPI32.dll", "RegQueryValueExA", 6, a_RegQueryValueExA},
@@ -4861,7 +4619,7 @@ index 3c955d7..99d0dd3 100644
      {"ADVAPI32.dll", "RegSetValueExW", 6, a_RegSetValueExW},
      {"ADVAPI32.dll", "RegEnumKeyExW", 8, a_RegEnumKeyExW},
      {"ADVAPI32.dll", "RegEnumValueW", 8, a_RegEnumValueW},
-@@ -2036,8 +2299,15 @@ const ImportShim g_misc_shims[] = {
+@@ -2156,8 +2419,15 @@ const ImportShim g_misc_shims[] = {
      {"ole32.dll", "OleInitialize", 1, o_CoInitialize},
      {"ole32.dll", "OleUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "CoInitializeEx", 2, o_CoInitialize},
@@ -4877,7 +4635,7 @@ index 3c955d7..99d0dd3 100644
      {"ole32.dll", "IsEqualGUID", 2, o_IsEqualGUID},
      {"ole32.dll", "CoUninitialize", 0, o_CoUninitialize},
      {"ole32.dll", "PropVariantClear", 1, o_PropVariantClear},
-@@ -2093,6 +2363,8 @@ const ImportShim g_misc_shims[] = {
+@@ -2213,6 +2483,8 @@ const ImportShim g_misc_shims[] = {
      {"WINMM.dll", "midiOutPrepareHeader", 3, m_midiOutPrepareHeader},
      {"WINMM.dll", "midiOutUnprepareHeader", 3, m_midiOutUnprepareHeader},
      {"WINMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
@@ -4886,7 +4644,7 @@ index 3c955d7..99d0dd3 100644
      // _inmm exposes the same WinMM ABI. Until CD-file playback is modeled,
      // report the actual unavailable MCI device with its proper stack cleanup.
      {"_INMM.dll", "mciSendCommandA", 4, m_mciSendCommandA},
-@@ -2273,3 +2545,18 @@ const ImportShim g_misc_shims[] = {
+@@ -2393,3 +2665,18 @@ const ImportShim g_misc_shims[] = {
      {"weanetr.dll", "?SendChat@MLDPlay@@QAEHKPAGKPAK@Z", 4, nullptr},
  };
  const size_t g_misc_shim_count = sizeof(g_misc_shims) / sizeof(g_misc_shims[0]);
@@ -5495,18 +5253,19 @@ index d746097..3dc3b0d 100644
 -                    std::string *why = nullptr);
 +                    std::string *why = nullptr, uint32_t module = 0);
 diff --git a/runtime/seh.cpp b/runtime/seh.cpp
-index ac94a12..30181e1 100644
+index adeda12..49e4b8d 100644
 --- a/runtime/seh.cpp
 +++ b/runtime/seh.cpp
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,7 @@
 -// x86 registration-chain dispatch and host checkpoints for Delphi frames.
 +// x86 registration-chain dispatch and host checkpoints for guest SEH frames.
  #include "seh.h"
+ #include "msvc_eh.h"
 +#include "../platform/os.h"
  #include "imports.h"
  #include "memory.h"
  #include "mods_seam.h"
-@@ -8,6 +9,7 @@
+@@ -9,6 +10,7 @@
  void sched_atomic_unwind_to_esp(uint32_t esp);
  #include <cstdlib>
  #include <cstdio>
@@ -5514,7 +5273,7 @@ index ac94a12..30181e1 100644
  #include <map>
  #include <vector>
  
-@@ -117,6 +119,22 @@ void validate_registration(X86 *c, uint32_t reg, uint32_t target) {
+@@ -118,6 +120,22 @@ void validate_registration(X86 *c, uint32_t reg, uint32_t target) {
          invalid_chain(c, reg, target, "registration outside guest stack");
  }
  
@@ -5537,16 +5296,16 @@ index ac94a12..30181e1 100644
  // Trivial automatic storage only: a handler can leave this walk by longjmp.
  struct ChainWalk {
      uint32_t visited[MAX_LINKS];
-@@ -176,6 +194,8 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
-          rd32(d->record + 4));
-     uint32_t args[] = {d->record, reg, d->context, 0};
+@@ -179,6 +197,8 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+     recomp_msvc_seh_enter(c);
      uint32_t disposition = guest_call(c, handler, args, 4);
+     recomp_msvc_seh_leave(c);
 +    LOGV("SEH handler returned: disposition=%u EIP=%08x ESP=%08x context EIP=%08x ESP=%08x",
 +         disposition, c->eip, c->r[R_ESP], rd32(d->context + 0xb8), rd32(d->context + 0xc4));
      if (disposition == 0) {
          LOGW("ExceptionContinueExecution requested; not supported (record=%08x code=%08x "
               "registration=%08x handler=%08x)",
-@@ -191,6 +211,13 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
+@@ -194,6 +214,13 @@ uint32_t call_handler(X86 *c, uint32_t reg, SehDispatch *d) {
  }
  } // namespace
  
@@ -5559,8 +5318,8 @@ index ac94a12..30181e1 100644
 +
  extern "C" {
  
- // Inspection only: do not repair or dereference an invalid link. Retain the
-@@ -257,6 +284,43 @@ jmp_buf *recomp_seh_frame_enter(X86 *c) {
+ void recomp_seh_capture_context(X86 *c, uint32_t context) {
+@@ -266,6 +293,43 @@ jmp_buf *recomp_seh_frame_enter(X86 *c) {
      state.frames.push_back(f); // individually allocated: growing the vector cannot move env
      LOGV("SEH enter: registration=%08x established=%08x ESP=%08x handler=%08x", f->registration,
           f->establishing_eip, c->r[R_ESP], rd32(f->registration + 4));
@@ -5604,7 +5363,7 @@ index ac94a12..30181e1 100644
      return &f->env;
  }
  
-@@ -282,6 +346,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -291,6 +355,7 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
          if (f->registration < c->r[R_ESP] || chain_head(c) != f->registration)
              return nullptr;
          f->orphan = false;
@@ -5612,7 +5371,7 @@ index ac94a12..30181e1 100644
          f->profile_depth = recomp_profile_depth();
          f->dispatch_depth = state.dispatches.size();
          LOGV("SEH adopt: registration=%08x established=%08x EIP=%08x ESP=%08x", f->registration,
-@@ -291,13 +356,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
+@@ -300,13 +365,30 @@ jmp_buf *recomp_seh_frame_adopt(X86 *c) {
      return nullptr;
  }
  
@@ -5646,7 +5405,7 @@ index ac94a12..30181e1 100644
                   f->establishing_eip, c->eip, c->r[R_ESP]);
              if (f->active_landing)
 diff --git a/runtime/seh.h b/runtime/seh.h
-index b457d2f..6bba6c4 100644
+index 385f544..b426235 100644
 --- a/runtime/seh.h
 +++ b/runtime/seh.h
 @@ -15,7 +15,10 @@ jmp_buf *recomp_seh_frame_enter(X86 *c);
@@ -6408,7 +6167,7 @@ index 0000000..37c89a1
 +    storage_vtable = stream_vtable = 0;
 +}
 diff --git a/runtime/tests/gdi_tests.cpp b/runtime/tests/gdi_tests.cpp
-index cf0d171..ec876df 100644
+index ad9f84d..160f7b8 100644
 --- a/runtime/tests/gdi_tests.cpp
 +++ b/runtime/tests/gdi_tests.cpp
 @@ -11,6 +11,7 @@
@@ -6485,10 +6244,10 @@ index cf0d171..ec876df 100644
 +    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
 +    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
 +}
- static void test_dib_rows_and_regions() {
-     X86 c;
-     loader_init_context(&c);
-@@ -337,7 +386,7 @@ static void test_dib_rows_and_regions() {
+ // GetDIBits owns the requested output stride, not the source's backing stride.
+ // A 32-bpp source copied verbatim into a 24-bpp caller buffer corrupts the next
+ // allocation; guard both ends and check scan orientation and partial transfers.
+@@ -460,7 +509,7 @@ static void test_dib_rows_and_regions() {
      uint32_t hwnd = make_test_window(&c, s, 16, 16),
               dc = call_import(&c, "USER32.dll", "GetDC", {hwnd});
      uint32_t child = call_import(&c, "USER32.dll", "CreateWindowExW",
@@ -6497,7 +6256,7 @@ index cf0d171..ec876df 100644
      uint32_t child_dc = call_import(&c, "USER32.dll", "GetDC", {child});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 0, 0, 0xff});
      call_import(&c, "GDI32.dll", "SetPixel", {child_dc, 2, 0, 0xff});
-@@ -380,7 +429,14 @@ static void test_dib_rows_and_regions() {
+@@ -503,7 +552,14 @@ static void test_dib_rows_and_regions() {
      uint32_t pen = call_import(&c, "GDI32.dll", "GetStockObject", {8});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, pen});
      call_import(&c, "GDI32.dll", "SetPixel", {dc, 11, 11, 0xff});
@@ -6512,7 +6271,7 @@ index cf0d171..ec876df 100644
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      call_import(&c, "GDI32.dll", "Rectangle", {dc, 10, 10, 14, 14});
      check(call_import(&c, "GDI32.dll", "GetPixel", {dc, 11, 11}) == 0xff,
-@@ -390,6 +446,49 @@ static void test_dib_rows_and_regions() {
+@@ -513,6 +569,49 @@ static void test_dib_rows_and_regions() {
      call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
      call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
  }
@@ -6562,7 +6321,7 @@ index cf0d171..ec876df 100644
  static void test_text() {
      X86 c;
      loader_init_context(&c);
-@@ -415,6 +514,29 @@ static void test_text() {
+@@ -538,6 +637,29 @@ static void test_text() {
                rd32(s + 340) == 16 && rd32(s + 344) == 16 && rd8(s + 375) == 0x30 &&
                rd8(s + 376) == 0,
            "TEXTMETRICW layout and scaled metrics");
@@ -6592,7 +6351,7 @@ index cf0d171..ec876df 100644
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0xff});
      call_import(&c, "GDI32.dll", "SetBkColor", {dc, 0xff0000});
      check(call_import(&c, "GDI32.dll", "ExtTextOutW", {dc, 0, 0, 0, 0, s + 256, 1, 0}) == 1 &&
-@@ -877,9 +999,59 @@ static void test_static_control() {
+@@ -1000,9 +1122,59 @@ static void test_static_control() {
      call_import(&c, "USER32.dll", "DestroyWindow", {child});
      call_import(&c, "USER32.dll", "DestroyWindow", {parent});
  }
@@ -6655,7 +6414,7 @@ index cf0d171..ec876df 100644
  static void test_clip_children() {
      X86 c;
      loader_init_context(&c);
-@@ -911,11 +1083,77 @@ static void test_clip_children() {
+@@ -1034,11 +1206,77 @@ static void test_clip_children() {
      check(pixel(parent, 0, 0) == 0xff && pixel(child, 1, 1) == 0,
            "a WS_CLIPCHILDREN parent paints around its visible child, not over it");
      call_import(&c, "USER32.dll", "ShowWindow", {child, 0});
@@ -6734,7 +6493,7 @@ index cf0d171..ec876df 100644
  // DrawThemeParentBackground: the parent paints into the child's DC, shifted so
  // its own coordinates land on the child, with WM_ERASEBKGND then
  // WM_PRINTCLIENT. It is how a transparent VCL control shows the form behind it.
-@@ -1070,11 +1308,31 @@ static void test_memory_truetype_font() {
+@@ -1193,11 +1431,31 @@ static void test_memory_truetype_font() {
      check(rd32(s + 0x220) == 160 && rd32(s + 0x224) == 100,
            "the extent is the font's advances and height (%u x %u)", rd32(s + 0x220),
            rd32(s + 0x224));
@@ -6766,7 +6525,7 @@ index cf0d171..ec876df 100644
      call_import(&c, "GDI32.dll", "SetBkMode", {dc, 1});
      call_import(&c, "GDI32.dll", "SetTextColor", {dc, 0x0000ffu});
      // Drawn at (0,0) its baseline is at y 80, so the box covers x 10..50, y 10..80.
-@@ -1124,15 +1382,379 @@ static void test_windows_face_substitute() {
+@@ -1247,15 +1505,379 @@ static void test_windows_face_substitute() {
          return rd32(s + 0x220);
      };
      uint32_t w;
@@ -6786,9 +6545,9 @@ index cf0d171..ec876df 100644
 +    check(w == 96, "a fixed-pitch face keeps the 8x16 cells (%u)", w);
 +    w = width("RecompUnknown", 400);
 +    check(w == 96, "an unknown face keeps the 8x16 cells (%u)", w);
-+    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-+    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
-+}
+     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
+     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+ }
 +// OLE pictures draw in HIMETRIC coordinates. A scaled 2x2 source must cover
 +// every device pixel, and a negative viewport extent must invert the image.
 +static void test_window_copy_equivalence() {
@@ -6997,9 +6756,9 @@ index cf0d171..ec876df 100644
 +            red += a == 0x0000ff;
 +        }
 +    check(same && red > 0, "ANSI text leaves visible pixels matching its decoded wide text");
-     call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
-     call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
- }
++    call_import(&c, "USER32.dll", "ReleaseDC", {hwnd, dc});
++    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
++}
 +// Retained window pixels require a real erase pass; validation and a non-erasing
 +// invalidation must preserve drawings instead of clearing every paint.
 +static void test_background_erasing() {
@@ -7152,7 +6911,7 @@ index cf0d171..ec876df 100644
  int main(int argc, char **argv) {
      mem_init();
      imports_init();
-@@ -1147,8 +1769,18 @@ int main(int argc, char **argv) {
+@@ -1270,9 +1892,19 @@ int main(int argc, char **argv) {
          test_layered_window();
          test_msimg32();
          test_dib_rows_and_regions();
@@ -7164,6 +6923,7 @@ index cf0d171..ec876df 100644
 +        test_anisotropic_picture_mapping();
 +        test_window_copy_equivalence();
 +        test_plain_ansi_text();
+         test_get_dibits_conversion();
          test_static_control();
          test_clip_children();
 +        test_set_window_text_repaint();
@@ -7172,7 +6932,7 @@ index cf0d171..ec876df 100644
          test_draw_theme_text_ex();
          test_blit_into_moved_child_origin();
 diff --git a/runtime/tests/runtime_tests.cpp b/runtime/tests/runtime_tests.cpp
-index 7016990..6910a83 100644
+index 1ac038e..c82d95f 100644
 --- a/runtime/tests/runtime_tests.cpp
 +++ b/runtime/tests/runtime_tests.cpp
 @@ -6,9 +6,11 @@
@@ -7197,7 +6957,7 @@ index 7016990..6910a83 100644
      const char *cmd = cmd_s.c_str();
      FILE *p = popen(cmd, "r");
      if (!p) {
-@@ -350,6 +353,1043 @@ static void test_modules_and_wide() {
+@@ -350,6 +353,1078 @@ static void test_modules_and_wide() {
            "gm_put_wstr rejects addresses outside the arena");
  }
  
@@ -7608,6 +7368,41 @@ index 7016990..6910a83 100644
 +    X86 c;
 +    loader_init_context(&c);
 +    uint32_t s = scratch;
++    struct Fixture {
++        static std::string &directory() {
++            static std::string value;
++            return value;
++        }
++        static int resolve(const char *relative, int, char *out, size_t capacity) {
++            std::string name(relative);
++            for (char &ch : name)
++                ch = char(tolower(static_cast<unsigned char>(ch)));
++            if (directory().empty() || name != "recomp-legacy-contract.txt")
++                return 0;
++            std::string file = directory() + "/recomp-legacy-contract.txt";
++            if (file.size() >= capacity)
++                return 0;
++            memcpy(out, file.c_str(), file.size() + 1);
++            return 1;
++        }
++        Fixture() {
++            char path[1024];
++            snprintf(path, sizeof path, "%s/recomp-cult-legacy-XXXXXX", os_temp_dir());
++            if (os_mkdtemp(path) == 0)
++                directory() = path;
++            win32_set_file_ops(resolve, nullptr);
++        }
++        ~Fixture() {
++            win32_set_file_ops(nullptr, nullptr);
++            if (!directory().empty()) {
++                os_unlink((directory() + "/recomp-legacy-contract.txt").c_str());
++                os_rmdir(directory().c_str());
++                directory().clear();
++            }
++        }
++    } fixture;
++    if (!check(!Fixture::directory().empty(), "created an isolated legacy-file overlay"))
++        return;
 +    const std::string path = std::string(RECOMP_GUEST_ROOT) + "\\recomp-legacy-contract.txt";
 +    gm_put_str(s, path.c_str(), 260);
 +    uint32_t created = call_import(&c, "KERNEL32.dll", "CreateFileA",
@@ -8241,7 +8036,7 @@ index 7016990..6910a83 100644
  static void test_session_notification_service_unavailable() {
      section("session notification service");
      X86 c;
-@@ -755,18 +1795,27 @@ static void test_loader() {
+@@ -755,18 +1830,27 @@ static void test_loader() {
              uint32_t data = imports_data_address(import.dll.c_str(), import.name.c_str());
              uint32_t trampoline = imports_trampoline_for(import.dll.c_str(), import.name.c_str());
              uint32_t value = rd32(import.slot);
@@ -8272,7 +8067,7 @@ index 7016990..6910a83 100644
          check(loader_iat_data_imports() == data_slots,
                "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
                data_slots);
-@@ -3244,6 +4293,98 @@ static void test_scheduling(X86 *c) {
+@@ -3292,6 +4376,98 @@ static void test_scheduling(X86 *c) {
      }
  }
  
@@ -8371,7 +8166,7 @@ index 7016990..6910a83 100644
  static uint32_t thunk_hits, thunk_return, thunk_ecx, thunk_arg;
  static void thunk_probe(X86 *c) {
      ++thunk_hits;
-@@ -3782,6 +4923,41 @@ static void test_registry(X86 *c) {
+@@ -3943,6 +5119,41 @@ static void test_registry(X86 *c) {
      uint32_t hk = rd32(phk);
      check(rd32(pdisp) == 1, "the key was created, not opened");
  
@@ -8413,7 +8208,7 @@ index 7016990..6910a83 100644
      uint32_t vname = put_str("InstallPath");
      uint32_t vdata = put_str(RECOMP_GUEST_ROOT);
      check(call_import(c, "ADVAPI32.dll", "RegSetValueExA",
-@@ -5952,6 +7128,29 @@ static void test_user32_window_model() {
+@@ -6113,6 +7324,29 @@ static void test_user32_window_model() {
      host_set_cursor_pos(55, 89);
      check(call_import(&c, "USER32.dll", "GetMessagePos", {}) == ((34u << 16) | 21u),
            "GetMessagePos retains the retrieved message coordinates");
@@ -8443,7 +8238,7 @@ index 7016990..6910a83 100644
      gm_put_str(s + 0x700, "unsafe queued text", 32);
      check(call_import(&c, "USER32.dll", "PostMessageA", {hwnd, 0xc, 0, s + 0x700}) == 0,
            "posted text pointers are rejected instead of escaping a synchronous call");
-@@ -6078,6 +7277,16 @@ static void test_host_mouse_routing() {
+@@ -6239,6 +7473,16 @@ static void test_host_mouse_routing() {
      check(activations == 1, "release does not activate again");
      uint32_t child = window(0, 0x50000000, 10, 12, top);
      take(0x200, 2, 125, 150, child, 15, 18);
@@ -8460,7 +8255,7 @@ index 7016990..6910a83 100644
      // The game's rendered frame supplies client points, unlike the virtual
      // desktop events above. Pumping a message must not undo the cursor's
      // conversion to screen pixels or offset the routed click a second time.
-@@ -6277,6 +7486,11 @@ static void test_user32_services() {
+@@ -6438,6 +7682,11 @@ static void test_user32_services() {
               bits = rd32(s + 0x900);
      uint32_t dc = call_import(&c, "GDI32.dll", "CreateCompatibleDC", {0});
      call_import(&c, "GDI32.dll", "SelectObject", {dc, bmp});
@@ -8472,7 +8267,7 @@ index 7016990..6910a83 100644
      wr32(s + 0xa00, 0);
      wr32(s + 0xa04, 0);
      wr32(s + 0xa08, 4);
-@@ -6305,6 +7519,12 @@ static void test_user32_services() {
+@@ -6466,6 +7715,12 @@ static void test_user32_services() {
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc0c)});
      call_import(&c, "GDI32.dll", "DeleteObject", {rd32(s + 0xc10)});
      call_import(&c, "USER32.dll", "DestroyIcon", {icon});
@@ -8485,29 +8280,22 @@ index 7016990..6910a83 100644
      call_import(&c, "GDI32.dll", "DeleteDC", {dc});
      call_import(&c, "GDI32.dll", "DeleteObject", {bmp});
  }
-@@ -6434,6 +7654,21 @@ static void test_dll_lifetime() {
+@@ -6595,6 +7850,14 @@ static void test_dll_lifetime() {
      gm_put_wstr(s + 128, mapped->name.c_str(), 128);
      check(call_import(&c, "KERNEL32.dll", "GetModuleHandleA", {s}) == 0 && attaches == 0,
            "lookup of a mapped but unloaded DLL does not initialize it");
-+    LoaderModule importing;
-+    importing.base = 0x0e120000;
-+    importing.size = 0x1000;
-+    memset(g_mem + importing.base, 0, importing.size);
-+    wr32(importing.base + 0x3c, 0x80);
-+    wr32(importing.base + 0x80 + 24 + 104, 0x200);
-+    wr32(importing.base + 0x200 + 12, 0x300);
-+    gm_put_str(importing.base + 0x300, mapped->name.c_str(), 128);
 +    c.r[R_EAX] = 0x1234;
 +    c.eip = 0x5678;
-+    check(win32_attach_static_imports(&c, importing) && attaches == 1 && mapped->attached &&
-+              c.r[R_EAX] == 0x1234 && c.eip == 0x5678 && c.r[R_ESP] == esp,
-+          "static imports initialize dependencies before entry and preserve caller state");
++    check(win32_load_library(&c, mapped->name) == mapped->base && attaches == 1 &&
++              mapped->attached && c.r[R_EAX] == mapped->base && c.eip == 0x5678 &&
++              c.r[R_ESP] == esp,
++          "native OLE module loads initialize dependencies and preserve caller state");
 +    call_import(&c, "KERNEL32.dll", "FreeLibrary", {mapped->base});
 +    attaches = detaches = 0;
      fail_attach = true;
      check(call_import(&c, "KERNEL32.dll", "LoadLibraryA", {s}) == 0 &&
                call_import(&c, "KERNEL32.dll", "GetLastError", {}) == 1114 && attaches == 1 &&
-@@ -6687,14 +7922,49 @@ int main(int argc, char **argv) {
+@@ -6863,14 +8126,49 @@ int main(int argc, char **argv) {
          // remaining platform APIs or optional resources are supported.
          scratch = 0x0ee00000;
          test_startup_apis(loader_context());
@@ -8894,7 +8682,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 2ef5486..3a7b0ca 100644
+index 3ae2d62..3c65848 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -8905,7 +8693,7 @@ index 2ef5486..3a7b0ca 100644
  #include "win32.h"
  #include "../platform/os.h"
  #include "memory.h"
-@@ -35,6 +36,10 @@ std::deque<Msg> &queue() {
+@@ -36,6 +37,10 @@ std::deque<Msg> &queue() {
      static std::deque<Msg> q;
      return q;
  }
@@ -8916,7 +8704,7 @@ index 2ef5486..3a7b0ca 100644
  
  uint32_t g_next_hwnd = 0x00020004;
  uint32_t g_next_gdi = 0x00028004;
-@@ -47,6 +52,12 @@ bool g_clipped = false;
+@@ -48,6 +53,12 @@ bool g_clipped = false;
  bool (*g_message_waiter)() = nullptr;
  void (*g_window_shown)(uint32_t) = nullptr;
  uint8_t g_key_state[256] = {0};
@@ -8926,10 +8714,10 @@ index 2ef5486..3a7b0ca 100644
 +uint32_t g_message_key_generation = 1;
 +thread_local uint32_t g_mouse_key_generation = 0;
 +thread_local uint32_t g_message_mouse_buttons = 0;
+ static uint8_t g_async_pressed[256] = {0};
  
  // WS_VISIBLE: a window created with it is shown as part of creation.
- const uint32_t WS_VISIBLE = 0x10000000u;
-@@ -98,6 +109,13 @@ static void post_geometry(uint32_t hwnd, const Window *w, bool moved, bool sized
+@@ -100,6 +111,13 @@ static void post_geometry(uint32_t hwnd, const Window *w, bool moved, bool sized
  void store_msg(uint32_t p, const Msg &m) {
      if (!p)
          return;
@@ -8943,7 +8731,7 @@ index 2ef5486..3a7b0ca 100644
      wr32(p + 0, m.hwnd);
      wr32(p + 4, m.message);
      wr32(p + 8, m.wparam);
-@@ -105,6 +123,11 @@ void store_msg(uint32_t p, const Msg &m) {
+@@ -107,6 +125,11 @@ void store_msg(uint32_t p, const Msg &m) {
      wr32(p + 16, m.time);
      wr32(p + 20, m.ptx);
      wr32(p + 24, m.pty);
@@ -8955,7 +8743,7 @@ index 2ef5486..3a7b0ca 100644
  }
  
  } // namespace user32
-@@ -147,11 +170,21 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
+@@ -173,16 +196,24 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h) {
          win->w = w;
          win->h = h;
          win->update_pending = true;
@@ -8964,21 +8752,23 @@ index 2ef5486..3a7b0ca 100644
      }
  }
  void host_set_key_state(int vk, bool down) {
--    if (vk >= 0 && vk < 256)
-+    if (vk >= 0 && vk < 256) {
+     if (vk >= 0 && vk < 256) {
 +        if ((g_key_state[vk] != 0) != down && recomp_env("TRACE_KEYS"))
 +            LOGW("KEY host state: vk=%02x down=%d", vk, int(down));
+         // A press survives release until this key's next asynchronous poll.
+         if (down && !(g_key_state[vk] & 0x80))
+             g_async_pressed[vk] = 1;
          g_key_state[vk] = down ? 0x80 : 0x00;
-+    }
-+}
-+void host_reset_message_key_state() {
-+    // Focus loss invalidates every receiving thread's snapshot. Host input
-+    // mutations hold the guest baton, so this generation needs no host lock.
-+    ++g_message_key_generation;
+     }
  }
++void host_reset_message_key_state() {
++    // Focus loss invalidates every receiving thread's retrieved input snapshot.
++    ++g_message_key_generation;
++}
  void host_set_cursor_pos(int32_t x, int32_t y) {
      g_cursor_x = x;
-@@ -163,6 +196,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
+     g_cursor_y = y;
+@@ -193,6 +224,18 @@ void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y) {
      host_set_cursor_pos(int32_t(uint32_t(x) + uint32_t(origin_x)),
                          int32_t(uint32_t(y) + uint32_t(origin_y)));
  }
@@ -8997,7 +8787,7 @@ index 2ef5486..3a7b0ca 100644
  void host_set_message_waiter(bool (*fn)()) {
      g_message_waiter = fn;
  }
-@@ -198,8 +243,107 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
+@@ -228,8 +271,107 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t
      return guest_call(c, proc, hwnd, msg, wparam, lparam);
  }
  
@@ -9105,7 +8895,7 @@ index 2ef5486..3a7b0ca 100644
  // ---------------------------------------------------------------------------
  // Classes and windows
  // ---------------------------------------------------------------------------
-@@ -358,6 +502,8 @@ void create_window_body(X86 *c, bool wide) {
+@@ -388,6 +530,8 @@ void create_window_body(X86 *c, bool wide) {
              nw->visible = true;
              nw->shown = true;
              nw->update_pending = true;
@@ -9114,7 +8904,7 @@ index 2ef5486..3a7b0ca 100644
              if (g_window_shown)
                  g_window_shown(hwnd);
          }
-@@ -383,13 +529,15 @@ void u_DestroyWindow(X86 *c) {
+@@ -413,13 +557,15 @@ void u_DestroyWindow(X86 *c) {
      set_eax(c, destroy_window(c, arg(c, 0)));
  }
  
@@ -9134,7 +8924,7 @@ index 2ef5486..3a7b0ca 100644
      if (!w->shown) {
          w->shown = true;
          post_geometry(w->hwnd, w, false, true);
-@@ -427,6 +575,11 @@ void u_ShowWindow(X86 *c) {
+@@ -457,6 +603,11 @@ void u_ShowWindow(X86 *c) {
      set_eax(c, was ? 1 : 0);
      if (!was && w->visible)
          became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
@@ -9146,7 +8936,7 @@ index 2ef5486..3a7b0ca 100644
  }
  
  // UpdateWindow sends WM_PAINT directly to the window procedure, synchronously,
-@@ -467,7 +620,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -497,7 +648,7 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
          w->w = cx;
          w->h = cy;
          if (!(flags & 0x0008)) // SWP_NOREDRAW
@@ -9155,7 +8945,7 @@ index 2ef5486..3a7b0ca 100644
      } // SWP_NOSIZE
      LOGV("SetWindowPos(%08x): %dx%d at %d,%d, flags=%08x changed=%d/%d", w->hwnd, w->w, w->h, w->x,
           w->y, flags, moved, sized);
-@@ -481,6 +634,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
+@@ -511,6 +662,11 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
      } else if ((flags & 0x0080) && w->visible) {
          w->visible = false;
          w->style &= ~WS_VISIBLE;
@@ -9167,7 +8957,7 @@ index 2ef5486..3a7b0ca 100644
      }
      if (moved || sized) {
          // SetWindowPos sends this before returning. VCL updates its cached
-@@ -506,6 +664,21 @@ void u_SetWindowPos(X86 *c) {
+@@ -536,6 +692,21 @@ void u_SetWindowPos(X86 *c) {
                         int32_t(arg(c, 5)), arg(c, 6));
      set_eax(c, 1);
  }
@@ -9189,7 +8979,7 @@ index 2ef5486..3a7b0ca 100644
  // The bounds a window had before a display took it over, by handle.
  std::map<uint32_t, std::array<int32_t, 4>> &covered_bounds() {
      static std::map<uint32_t, std::array<int32_t, 4>> m;
-@@ -572,6 +745,9 @@ void u_AdjustWindowRectEx(X86 *c) {
+@@ -602,6 +773,9 @@ void u_AdjustWindowRectEx(X86 *c) {
  void u_ScreenToClient(X86 *c) {
      Window *w = find_window(arg(c, 0));
      uint32_t p = arg(c, 1);
@@ -9199,7 +8989,7 @@ index 2ef5486..3a7b0ca 100644
      if (p && w) {
          LOGV("ScreenToClient(%08x): (%d,%d) through a window at %d,%d", arg(c, 0), (int32_t)rd32(p),
               (int32_t)rd32(p + 4), w->x, w->y);
-@@ -617,12 +793,19 @@ void u_SetRect(X86 *c) {
+@@ -647,12 +821,19 @@ void u_SetRect(X86 *c) {
  // A null hwnd invalidates every window, which is what Windows does.
  void u_InvalidateRect(X86 *c) {
      uint32_t hwnd = arg(c, 0);
@@ -9223,7 +9013,7 @@ index 2ef5486..3a7b0ca 100644
      set_eax(c, 1);
  }
  
-@@ -747,10 +930,13 @@ void u_GetWindowLongA(X86 *c) {
+@@ -777,10 +958,13 @@ void u_GetWindowLongA(X86 *c) {
  }
  
  void u_SetWindowTextA(X86 *c) {
@@ -9241,7 +9031,7 @@ index 2ef5486..3a7b0ca 100644
  }
  
  void u_SetDlgItemTextA(X86 *c) {
-@@ -813,6 +999,27 @@ bool paint_pending() {
+@@ -860,6 +1044,27 @@ bool paint_pending() {
      return pending_paint(0, 0, 0, 0);
  }
  
@@ -9256,7 +9046,7 @@ index 2ef5486..3a7b0ca 100644
 +        for (auto it = queue().begin(); it != queue().end(); ++it) {
 +            if (it->generated_timer != timer || !msg_matches(*it, hwnd, min_msg, max_msg))
 +                continue;
-+            last_message = *it;
++            last_message() = *it;
 +            store_msg(p, *it);
 +            if (remove)
 +                queue().erase(it);
@@ -9269,14 +9059,14 @@ index 2ef5486..3a7b0ca 100644
  void peek_message(X86 *c) {
      // The game's message loop is PeekMessageA and nothing else: it never calls
      // GetMessageA, so anything hung off that one never runs. Windows services
-@@ -826,17 +1033,7 @@ void peek_message(X86 *c) {
-     gdi_present_windows();
+@@ -898,17 +1103,7 @@ void peek_message(X86 *c) {
+         gdi_present_windows();
      uint32_t p = arg(c, 0), filter_hwnd = arg(c, 1);
      uint32_t min_msg = arg(c, 2), max_msg = arg(c, 3), flags = arg(c, 4);
 -    for (auto it = queue().begin(); it != queue().end(); ++it) {
 -        if (!msg_matches(*it, filter_hwnd, min_msg, max_msg))
 -            continue;
--        last_message = *it;
+-        last_message() = *it;
 -        store_msg(p, *it);
 -        if (flags & 1)
 -            queue().erase(it); // PM_REMOVE
@@ -9288,16 +9078,16 @@ index 2ef5486..3a7b0ca 100644
  }
  
  // GetMessage blocks until a message arrives. The runtime cannot block on its
-@@ -863,18 +1060,8 @@ void u_GetMessageA(X86 *c) {
-         pump_window_timers();
-         pump_mouse_input(c);
-         gdi_present_windows();
+@@ -940,18 +1135,8 @@ void u_GetMessageA(X86 *c) {
+             pump_mouse_input(c);
+             gdi_present_windows();
+         }
 -        for (auto it = queue().begin(); it != queue().end(); ++it) {
 -            if (!msg_matches(*it, filter_hwnd, min_msg, max_msg))
 -                continue;
 -            Msg m = *it;
 -            queue().erase(it);
--            last_message = m;
+-            last_message() = m;
 -            store_msg(p, m);
 -            set_eax(c, m.message == 0x0012 ? 0 : 1); // WM_QUIT ends the loop
 -            return;
@@ -9305,11 +9095,11 @@ index 2ef5486..3a7b0ca 100644
 -        if (pending_paint(p, filter_hwnd, min_msg, max_msg)) {
 -            set_eax(c, 1);
 +        if (retrieve_message(p, filter_hwnd, min_msg, max_msg, true)) {
-+            set_eax(c, last_message.message == 0x0012 ? 0 : 1); // WM_QUIT ends the loop
++            set_eax(c, last_message().message == 0x0012 ? 0 : 1);
              return;
          }
-         host_pump_timers(c);
-@@ -911,6 +1098,15 @@ void u_TranslateMessage(X86 *c) {
+         if (!drives_host) {
+@@ -992,6 +1177,15 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
@@ -9325,7 +9115,7 @@ index 2ef5486..3a7b0ca 100644
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
          uint32_t ch = 0;
          if (vk >= 0x30 && vk <= 0x5a)
-@@ -943,6 +1139,12 @@ void dispatch_message(X86 *c) {
+@@ -1024,6 +1218,12 @@ void dispatch_message(X86 *c) {
      }
      uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
      uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
@@ -9338,7 +9128,7 @@ index 2ef5486..3a7b0ca 100644
      if (msg == 0x113 && lp)
          set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
      else
-@@ -969,6 +1171,16 @@ void u_PostMessageA(X86 *c) {
+@@ -1069,6 +1269,16 @@ void u_PostThreadMessage(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -9355,7 +9145,7 @@ index 2ef5486..3a7b0ca 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -991,9 +1203,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1091,9 +1301,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -9379,7 +9169,7 @@ index 2ef5486..3a7b0ca 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1015,8 +1239,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1115,8 +1337,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -9398,7 +9188,7 @@ index 2ef5486..3a7b0ca 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1050,20 +1283,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1150,20 +1381,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -9437,7 +9227,7 @@ index 2ef5486..3a7b0ca 100644
      }
      set_eax(c, hdc);
  }
-@@ -1226,8 +1469,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1326,8 +1567,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -9449,7 +9239,7 @@ index 2ef5486..3a7b0ca 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1235,15 +1480,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1335,15 +1578,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -9499,7 +9289,7 @@ index 2ef5486..3a7b0ca 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1268,20 +1541,39 @@ void u_DestroyIcon(X86 *c) {
+@@ -1368,20 +1639,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -9540,9 +9330,9 @@ index 2ef5486..3a7b0ca 100644
      if (p) {
          wr32(p, (uint32_t)g_cursor_x);
          wr32(p + 4, (uint32_t)g_cursor_y);
-@@ -1294,13 +1586,31 @@ void u_GetMessagePos(X86 *c) {
+@@ -1394,8 +1684,21 @@ void u_GetMessagePos(X86 *c) {
  void u_GetMessageTime(X86 *c) {
-     set_eax(c, last_message.time);
+     set_eax(c, last_message().time);
  }
 +// Record the first poll in each state without flooding the game's timer loop.
 +static void trace_key_query(X86 *c, uint32_t vk, bool down, bool async) {
@@ -9559,7 +9349,10 @@ index 2ef5486..3a7b0ca 100644
  void u_GetAsyncKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
 +    trace_key_query(c, vk, vk < 256 && g_key_state[vk], true);
-     set_eax(c, vk < 256 && g_key_state[vk] ? 0x8000 : 0);
+     uint32_t state = 0;
+     if (vk < 256) {
+         state = (g_key_state[vk] ? 0x8000u : 0) | g_async_pressed[vk];
+@@ -1405,7 +1708,12 @@ void u_GetAsyncKeyState(X86 *c) {
  }
  void u_GetKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
@@ -9573,7 +9366,7 @@ index 2ef5486..3a7b0ca 100644
  }
  void u_ShowCursor(X86 *c) {
      g_cursor_show += arg(c, 0) ? 1 : -1;
-@@ -1398,6 +1708,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1503,6 +1811,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -9592,7 +9385,7 @@ index 2ef5486..3a7b0ca 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1695,6 +2017,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1800,6 +2120,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -9600,7 +9393,7 @@ index 2ef5486..3a7b0ca 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1707,6 +2030,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1812,6 +2133,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "SetWindowLongA", 3, u_SetWindowLongA},
      {"USER32.dll", "GetWindowLongA", 2, u_GetWindowLongA},
      {"USER32.dll", "SetWindowTextA", 2, u_SetWindowTextA},
@@ -9608,7 +9401,7 @@ index 2ef5486..3a7b0ca 100644
      {"USER32.dll", "SetDlgItemTextA", 3, u_SetDlgItemTextA},
      {"USER32.dll", "CreateDialogParamA", 5, u_CreateDialogParamA},
      {"USER32.dll", "PeekMessageA", 5, u_PeekMessageA},
-@@ -1716,15 +2040,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1821,15 +2143,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -9627,7 +9420,7 @@ index 2ef5486..3a7b0ca 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1741,6 +2068,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1846,6 +2171,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -9943,7 +9736,7 @@ index 0000000..22e2204
 +}
 +} // namespace user32
 diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
-index ae4313f..0a0fffe 100644
+index 4409399..f69e6fe 100644
 --- a/runtime/user32_internal.h
 +++ b/runtime/user32_internal.h
 @@ -24,6 +24,11 @@ struct WndClass {
@@ -9986,16 +9779,18 @@ index ae4313f..0a0fffe 100644
      // SetLayeredWindowAttributes: LWA_COLORKEY (1) makes every pixel of that
      // colour transparent, LWA_ALPHA (2) applies one opacity to the whole
      // window. Both are honoured where the window surfaces are composited.
-@@ -57,6 +75,8 @@ struct Window {
+@@ -57,7 +75,9 @@ struct Window {
  
  struct Msg {
      uint32_t hwnd, message, wparam, lparam, time, ptx, pty;
+-    uint32_t thread = 0; // explicit target for windowless messages
++    uint32_t thread = 0;             // explicit target for windowless messages
 +    bool text_pretranslated = false; // host already queued the matching character
 +    bool generated_timer = false; // SetTimer notifications follow pending paint, unlike PostMessage
  };
  
  std::map<std::string, WndClass> &classes();
-@@ -92,8 +112,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
+@@ -94,8 +114,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
  void client_origin(uint32_t hwnd, int32_t *x, int32_t *y);
  void display_rect(uint32_t out);
  void alias_ansi(X86 *c, const char *name);
@@ -10712,7 +10507,7 @@ index 4b3b30d..35a675b 100644
  }
  } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
-index dea756d..679affd 100644
+index 1c56d62..e7c4e25 100644
 --- a/runtime/user32_vcl.cpp
 +++ b/runtime/user32_vcl.cpp
 @@ -4,6 +4,8 @@
@@ -11355,7 +11150,7 @@ index ff9b21d..58a6461 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index b59ecac..9b49f72 100644
+index c20146e..02501d5 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,12 @@
@@ -11371,19 +11166,15 @@ index b59ecac..9b49f72 100644
  // The guest root's own directory name (the last component of RECOMP_GUEST_ROOT), so
  // C:\<root>\data\x and \data\x resolve to the same host file.
  static inline const char *win32_guest_root_name() {
-@@ -34,6 +40,11 @@ void win32_forget_scrollbars(uint32_t hwnd);
- // directory that backs the guest root RECOMP_GUEST_ROOT (the directory holding the
- // loaded EXE).
- void win32_init(const std::string &game_dir);
-+struct LoaderModule;
-+// Initialize mapped PE import dependencies before the importing entry point.
-+bool win32_attach_static_imports(X86 *c, const LoaderModule &module);
-+// Acquire a mapped guest DLL using the same attach/reference path as LoadLibrary.
+@@ -38,6 +44,7 @@ void win32_init(const std::string &game_dir);
+ // The first argument is the loaded EXE's host directory; a suffix mismatch
+ // falls back to the legacy root-at-EXE layout.
+ void win32_init_layout(const std::string &exe_folder, const std::string &exe_dir);
 +uint32_t win32_load_library(X86 *c, const std::string &name);
  const std::string &win32_game_dir();
+ std::string win32_executable_guest_path();
  // Guest spelling shared by shell folder APIs; creation uses the write overlay.
- std::string shell_folder_guest_path(uint32_t csidl, bool create);
-@@ -348,10 +359,16 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
+@@ -356,10 +363,16 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
  void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
  // The same routed event, starting in a specific window's client pixels.
  void host_post_client_mouse_message(uint32_t hwnd, uint32_t msg, uint32_t mk, int32_t x, int32_t y);
@@ -11398,10 +11189,10 @@ index b59ecac..9b49f72 100644
 +// An optional host character is queued with KEYDOWN and marked so a guest
 +// TranslateMessage on the retrieved MSG does not generate a second character.
 +void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam, uint32_t character = 0);
- uint32_t host_main_window();              // first created top-level HWND, or 0
- uint32_t host_window_proc(uint32_t hwnd); // guest WNDPROC address, or 0
- bool host_window_rect(uint32_t hwnd, int32_t *x, int32_t *y, int32_t *w, int32_t *h);
-@@ -359,6 +376,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
+ uint32_t host_main_window(); // first created top-level HWND, or 0
+ // Visible top-level form to close, following visible owners past modal dialogs.
+ uint32_t host_close_target();
+@@ -369,6 +382,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
  // Host input is in client pixels; GetCursorPos/MSG.pt are screen pixels.
  void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y);
  void host_set_key_state(int vk, bool down); // feeds GetAsyncKeyState
@@ -11479,13 +11270,13 @@ index b57433e..50d6a91 100644
          self.assertEqual(build_py.default_preset("Darwin"), "macos")
          self.assertEqual(build_py.default_preset("Linux"), "linux")
 diff --git a/tests/test_game_config.py b/tests/test_game_config.py
-index 4f45372..e9d41f1 100644
+index 577382b..04b83e9 100644
 --- a/tests/test_game_config.py
 +++ b/tests/test_game_config.py
-@@ -20,6 +20,22 @@ gen_game_config = load_module("gen_game_config")
+@@ -119,6 +119,22 @@ class LoadTests(unittest.TestCase):
+                     with self.assertRaisesRegex(ValueError, key):
+                         game_config.load(game)
  
- 
- class LoadTests(unittest.TestCase):
 +    def test_runtime_interpreter_can_be_disabled_and_requires_a_boolean(self):
 +        with tempfile.TemporaryDirectory() as tmp:
 +            game = Path(tmp)
@@ -11505,7 +11296,7 @@ index 4f45372..e9d41f1 100644
      def test_cd_tracks_preserve_disc_order_and_reject_non_strings(self):
          with tempfile.TemporaryDirectory() as tmp:
              game = Path(tmp)
-@@ -169,6 +185,7 @@ class LoadTests(unittest.TestCase):
+@@ -268,6 +284,7 @@ class LoadTests(unittest.TestCase):
          self.assertEqual(base["game"]["guest_size"], 0x10000000)
          self.assertIn("#define RECOMP_GUEST_SIZE 0x10000000u", gen_game_config.render_header(base))
          self.assertIn("#define RECOMP_AUX_MODULE_COUNT 0", gen_game_config.render_header(base))
@@ -11514,7 +11305,7 @@ index 4f45372..e9d41f1 100644
              game = Path(tmp) / "g"
              game.mkdir()
 diff --git a/tools/build.py b/tools/build.py
-index 6c3d908..070ac66 100644
+index ef3fe3e..7b63b2d 100644
 --- a/tools/build.py
 +++ b/tools/build.py
 @@ -69,8 +69,10 @@ def build_root_for(game_dir, root=ROOT):
@@ -11664,12 +11455,12 @@ index 6c3d908..070ac66 100644
          # The lock lives at <build root>/recomp/.lock: BuildLock joins build/recomp/.lock onto its argument.
          with buildlock.BuildLock(args.build_root.parent, "tools/build.py"):
 diff --git a/tools/game_config.py b/tools/game_config.py
-index 20838eb..dd42c54 100644
+index 0d49a4c..112ae0e 100644
 --- a/tools/game_config.py
 +++ b/tools/game_config.py
-@@ -154,6 +154,9 @@ def load(game_dir):
-     windows_version(game.setdefault("windows_version", "4.10"))
-     translate = cfg.setdefault("translate", {})
+@@ -219,6 +219,9 @@ def load(game_dir):
+         if len(set(intrinsics.values())) != len(intrinsics):
+             raise ValueError("%s: [translate] intrinsic addresses must be distinct" % source)
      resumable = translate.setdefault("resumable_stacks", False)
 +    interpreter = translate.setdefault("allow_runtime_interpreter", True)
 +    if type(interpreter) is not bool:
@@ -11678,10 +11469,10 @@ index 20838eb..dd42c54 100644
          raise ValueError("%s: [translate] resumable_stacks must be a boolean" % source)
      alignment = translate.setdefault("function_alignment", 16)
 diff --git a/tools/gen_game_config.py b/tools/gen_game_config.py
-index e9d2983..7ccaf4b 100644
+index f1e5ddd..59e3508 100644
 --- a/tools/gen_game_config.py
 +++ b/tools/gen_game_config.py
-@@ -64,6 +64,8 @@ def render_header(cfg):
+@@ -76,6 +76,8 @@ def render_header(cfg):
      lines.append("#define RECOMP_GUEST_SIZE %s" % c_hex(game["guest_size"]))
      lines.append("#define RECOMP_RESUMABLE_STACKS %d" %
                   int(cfg["translate"].get("resumable_stacks", False)))
@@ -11773,13 +11564,13 @@ index 0000000..9321d1b
 +if __name__ == "__main__":
 +    main()
 diff --git a/tools/recomp/tests/test_translate_driver.py b/tools/recomp/tests/test_translate_driver.py
-index 71465b7..4a7003b 100644
+index 14428e5..adc3a0e 100644
 --- a/tools/recomp/tests/test_translate_driver.py
 +++ b/tools/recomp/tests/test_translate_driver.py
-@@ -73,6 +73,21 @@ def synthetic_image(code_at, base=0x00400000, size=0x2000):
-     return img
- 
- 
+@@ -127,6 +127,19 @@ def test_pointer_callback_keeps_branch_past_early_return(tmp_path,monkeypatch,po
+     assert "goto L_%08x;" % tail in text
+     assert "UD2" not in text and "HLT" not in text
+     assert "recomp_unknown_call(c, 0x%xu)" % callback not in text
 +def test_branch_successors_preserve_debug_breakpoints_without_sweeping_padding():
 +    base = 0x00401000
 +    # JNE past an intentional breakpoint; the unrelated padding after RET
@@ -11793,12 +11584,10 @@ index 71465b7..4a7003b 100644
 +    img = synthetic_image({base: b"\xeb\x01\x90\xcc\xc3"})
 +    assert [(i.addr, i.mnem) for i in img.recover(base, set())] == [
 +        (base, "JMP"), (base + 3, "INT3")]
-+
-+
+ 
+ 
  def _walker_image(slots):
-     """A __initterm-shaped walker, a caller naming a range, and that range."""
-     import struct
-@@ -101,6 +116,39 @@ def _walker_image(slots):
+@@ -157,6 +170,39 @@ def _walker_image(slots):
      return img, fns
  
  
@@ -11838,7 +11627,7 @@ index 71465b7..4a7003b 100644
  def test_initterm_takes_a_table_of_function_pointers():
      """The walker is found by its shape, whatever registers it happens to use."""
      img, fns = _walker_image([0x00401000, 0, 0x00401005])
-@@ -1672,3 +1720,59 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
+@@ -1924,3 +1970,59 @@ def test_a_wide_literal_behind_a_halt_is_not_code(tmp_path, monkeypatch):
      import re
      placed = set(re.findall(r"^(L_[0-9a-f]{8}): ;", text, re.M))
      assert set(re.findall(r"goto (L_[0-9a-f]{8});", text)) <= placed
@@ -11899,10 +11688,10 @@ index 71465b7..4a7003b 100644
 +    fn.insns[2] = T.parse_listing_text("00601013  SHR EAX,0x2\n")[0]
 +    assert not T.return_address_dispatcher(fn)
 diff --git a/tools/recomp/tests/test_translate_noreturn.py b/tools/recomp/tests/test_translate_noreturn.py
-index f569db1..2d0d44d 100644
+index b97e63a..f719b89 100644
 --- a/tools/recomp/tests/test_translate_noreturn.py
 +++ b/tools/recomp/tests/test_translate_noreturn.py
-@@ -70,3 +70,52 @@ def test_a_popped_jump_goes_only_to_pushed_continuations():
+@@ -99,3 +99,52 @@ def test_a_popped_jump_goes_only_to_pushed_continuations():
      text = translate(listing)
      assert "L_0040110e:" in text
      assert "00401117" not in text
@@ -11956,7 +11745,7 @@ index f569db1..2d0d44d 100644
 +    text = translate(listing)
 +    assert "00401105" not in text and "goto L_00401120" not in text
 diff --git a/tools/recomp/tests/test_translate_seh.py b/tools/recomp/tests/test_translate_seh.py
-index e31c835..e0a17a7 100644
+index aa1261b..e4caee9 100644
 --- a/tools/recomp/tests/test_translate_seh.py
 +++ b/tools/recomp/tests/test_translate_seh.py
 @@ -7,7 +7,7 @@ import pytest
@@ -11968,7 +11757,7 @@ index e31c835..e0a17a7 100644
  
  BASE = 0x0D02A000
  
-@@ -141,6 +141,49 @@ def test_other_teb_writes_do_not_create_checkpoints():
+@@ -265,6 +265,49 @@ def test_other_teb_writes_do_not_create_checkpoints():
      assert "recomp_seh_" not in translate_case(case)
  
  
@@ -12019,7 +11808,7 @@ index e31c835..e0a17a7 100644
                                                   ("ESP", True, False)])
  def test_frame_establishment_through_edx_needs_a_zero_base(reg, zeroed, checkpoint):
 diff --git a/tools/recomp/translate.py b/tools/recomp/translate.py
-index 944f2ca..7a64cbb 100644
+index 43a0dc4..7eb9f9d 100644
 --- a/tools/recomp/translate.py
 +++ b/tools/recomp/translate.py
 @@ -18,6 +18,7 @@ are enabled by the native host, never by the baseline/differential build.
@@ -12061,7 +11850,7 @@ index 944f2ca..7a64cbb 100644
  # Set by configure(): the game's listings, binary and curated symbols, and the
  # audited reads of its animation counter (game.toml [translate].volatile_reads:
  # reads that only select a visual phase or blink, never interpolation,
-@@ -1336,11 +1354,17 @@ class Image(object):
+@@ -1610,13 +1628,17 @@ class Image(object):
                    "repne": "REPNE", "repnz": "REPNE"}
      #: Mnemonics capstone spells differently from the listing grammar.
      MNEM_ALIAS = {"POPAL": "POPAD", "PUSHAL": "PUSHAD",
@@ -12071,6 +11860,8 @@ index 944f2ca..7a64cbb 100644
                    "IRETD": "IRET"}
  
      def _size_word(self, nbytes, mnem):
+-        if mnem in ("FNSTENV", "FSTENV", "FLDENV", "FSAVE", "FNSAVE", "FRSTOR") and nbytes in (28, 108):
+-            return "dword"
 +        # Environment/save operands are structured blocks, not scalar values.
 +        # Their emitters use the address and encode the architectural layout.
 +        if (mnem in ("FNSTENV", "FSTENV", "FLDENV") and nbytes == 28
@@ -12079,7 +11870,7 @@ index 944f2ca..7a64cbb 100644
          if mnem.startswith("F") and mnem not in self.X87_INT:
              return {4: "float", 8: "double", 10: "extended double"}.get(nbytes)
          return {1: "byte", 2: "word", 4: "dword", 8: "qword",
-@@ -1369,7 +1393,7 @@ class Image(object):
+@@ -1645,7 +1667,7 @@ class Image(object):
                               else "0x%x" % op.mem.disp)
              inner = " + ".join(parts)
              seg = ci.reg_name(op.mem.segment).upper() if op.mem.segment else ""
@@ -12088,7 +11879,7 @@ index 944f2ca..7a64cbb 100644
          raise TranslateError("unknown capstone operand type %d" % op.type)
  
      def to_insn(self, ci):
-@@ -1433,6 +1457,7 @@ class Image(object):
+@@ -1709,6 +1731,7 @@ class Image(object):
          self.md.detail = True
          seen = {}
          pending = [start]
@@ -12096,7 +11887,7 @@ index 944f2ca..7a64cbb 100644
          truncated = False
          while pending and len(seen) < limit:
              va = pending.pop()
-@@ -1452,6 +1477,11 @@ class Image(object):
+@@ -1729,6 +1752,11 @@ class Image(object):
                  if index < len(boundaries) and ci.address + ci.size > boundaries[index]:
                      break  # Do not consume another candidate's first opcode byte.
                  if ci.mnemonic in ("int3", "hlt", "(bad)"):
@@ -12108,7 +11899,7 @@ index 944f2ca..7a64cbb 100644
                      if bounds is not None:
                          self.md.detail = False
                          return []
-@@ -1467,6 +1497,9 @@ class Image(object):
+@@ -1744,6 +1772,9 @@ class Image(object):
                  if ci.op_str.startswith("0x") and (
                          ci.mnemonic == "jmp" or ci.mnemonic.startswith("j")):
                      t = int(ci.op_str, 16)
@@ -12118,7 +11909,7 @@ index 944f2ca..7a64cbb 100644
                      if (abs(t - start) <= self.RECOVER_WINDOW and t not in listed
                              and lo <= t < hi and self.is_exec(t)):
                          pending.append(t)
-@@ -1548,7 +1581,7 @@ TERMINATORS = frozenset(("RET", "JMP"))
+@@ -1826,7 +1857,7 @@ TERMINATORS = frozenset(("RET", "JMP"))
  
  
  def seh_chain_operand(op, zero_base=0):
@@ -12127,7 +11918,7 @@ index 944f2ca..7a64cbb 100644
      return (op.kind == "mem" and op.size == 32 and op.seg == "FS"
              and op.base in (None, zero_base) and op.index is None and op.disp == 0)
  
-@@ -1594,6 +1627,31 @@ def seh_restore_sites(fn):
+@@ -1872,6 +1903,31 @@ def seh_restore_sites(fn):
      return result
  
  
@@ -12159,7 +11950,7 @@ index 944f2ca..7a64cbb 100644
  def seh_frame_sites(fn, image=None):
      """Map establishing MOV/helper CALL indices to their handler addresses."""
      sites = {}
-@@ -1635,7 +1693,7 @@ def seh_frame_sites(fn, image=None):
+@@ -1913,7 +1969,7 @@ def seh_frame_sites(fn, image=None):
              # register operand can address a different TEB field.
              zero_base = dst.base if seh_zero_base(fn, i, dst.base) else 0
              if (not seh_chain_operand(dst, zero_base) or src.kind != "reg" or src.reg != 4
@@ -12168,8 +11959,8 @@ index 944f2ca..7a64cbb 100644
                      or not fn.contiguous[i - 1]):
                  continue
              for j in range(i - 2, max(-1, i - 4), -1):
-@@ -1656,6 +1714,42 @@ NORETURN_IMPORTS = frozenset(("RaiseException", "ExitProcess", "TerminateProcess
-                               "ExitThread", "FatalAppExitA", "FatalExit"))
+@@ -2020,6 +2076,42 @@ def noreturn_import(ins, iat_names):
+             and iat_names.get(op.disp) in exits)
  
  
 +def return_address_dispatcher(fn):
@@ -12211,7 +12002,7 @@ index 944f2ca..7a64cbb 100644
  def noreturn_callees_from(parsed, iat_names, image=None):
      """Callees that never return, as the listings show them.
  
-@@ -1679,7 +1773,20 @@ def noreturn_callees_from(parsed, iat_names, image=None):
+@@ -2043,7 +2135,20 @@ def noreturn_callees_from(parsed, iat_names, image=None):
  
      returns = {fn.addr for fn in parsed
                 if any(i.mnem == "RET" for i in fn.insns) and not ends_process(fn)}
@@ -12233,7 +12024,7 @@ index 944f2ca..7a64cbb 100644
      for fn in parsed:
          # A loop that cannot fall out of itself never returns either.
          if Translator.closed_noreturn_loop(fn):
-@@ -1734,6 +1841,7 @@ class Translator(object):
+@@ -2098,6 +2203,7 @@ class Translator(object):
          #: A CALL to one ends its block: the emitter leaves a trap in place of
          #: the fall-through instead of a jump onto the padding that follows.
          self.noreturn_callees = set()
@@ -12241,7 +12032,7 @@ index 944f2ca..7a64cbb 100644
          self.seh_helpers = set()
          #: Does a pointer to this address name data rather than code? The
          #: driver installs its judgement before the first translation pass
-@@ -2050,9 +2158,9 @@ class Translator(object):
+@@ -2416,9 +2522,9 @@ class Translator(object):
          through the bytes behind the call, and Delphi keeps string literals
          there: Siege of Avalon's single-instance check ends CALL _Halt0 and is
          followed by L"DigitalTomeSiegeOfAvalon", whose 16-bit addressing the
@@ -12254,7 +12045,7 @@ index 944f2ca..7a64cbb 100644
          (RTL fill routines compute addresses into unrolled code), so a body
          holding one keeps everything. POP reg; JMP reg goes where a
          continuation was pushed, or out of the function.
-@@ -2060,13 +2168,11 @@ class Translator(object):
+@@ -2426,13 +2532,11 @@ class Translator(object):
          if not any(self.never_returns(ins) for ins in fn.insns):
              return set()
          live = self.reached(fn, {fn.addr} | set(entries))
@@ -12273,7 +12064,7 @@ index 944f2ca..7a64cbb 100644
  
      def reached(self, fn, roots):
          """Indices control flow reaches from `roots` and the pushed
-@@ -2094,6 +2200,9 @@ class Translator(object):
+@@ -2460,6 +2564,9 @@ class Translator(object):
                  t = fn.fallthrough[i]
                  if t in fn.index:
                      work.append(fn.index[t])
@@ -12283,7 +12074,7 @@ index 944f2ca..7a64cbb 100644
                  continue
              work.extend(j for j in self.successors(fn, i) if j is not None)
          return live
-@@ -2465,11 +2574,9 @@ class Translator(object):
+@@ -2843,12 +2950,9 @@ class Translator(object):
              if target is not None and self.image.is_exec(target):
                  self.unlisted_targets.add(target)
              return
@@ -12291,16 +12082,17 @@ index 944f2ca..7a64cbb 100644
 -        # body, so bound recovery by a generous window past the entry rather
 -        # than by fn.end.
 -        if (not self.strict and target is not None
--                and fn.addr <= target < fn.addr + 0x10000):
+-                and min(fn.addr, fn.insns[0].addr) <= target < max(fn.end, fn.addr + 0x10000)
+-                and self.image.is_exec(target)):
 +        # Hot and cold switch arms can be far apart. Defer any in-image code
 +        # target on the first pass; the strict pass still requires a boundary.
 +        if (not self.strict and target is not None and self.image.is_exec(target)):
              self.unlisted_targets.add(target)
              return
          raise TranslateError(
-@@ -2608,6 +2715,10 @@ class Translator(object):
-             entries = [e for e in entries if e in fn.index]
-         fn.return_jumps = self.popped_return_jumps(fn, entries)
+@@ -3102,6 +3206,10 @@ class Translator(object):
+         fn.primary_return_jumps = (self.popped_return_jumps(fn, ()) - fn.return_jumps
+                                    if entries else set())
          fn.seh_escapes = self.seh_escaping_returns(fn)
 +        seh_scope = RESUMABLE_STACKS and (fn.seh_sites or any(
 +            ins.mnem == "CALL" and self.branch_target(ins) in self.seh_helpers
@@ -12309,16 +12101,18 @@ index 944f2ca..7a64cbb 100644
          if self.opts.eager_flags:
              live_out = [ALL_FLAGS] * len(fn.insns)
          else:
-@@ -2664,7 +2775,7 @@ class Translator(object):
+@@ -3155,8 +3263,8 @@ class Translator(object):
          if head:
              labels.add(fn.addr)
          prologue = 0                 # lines before the first instruction
+-        fn.multi = bool(entries)     # body_ (two parameters): jumps use TAIL_FN2
 -        if entries:
++        fn.multi = bool(shared_body)  # shared body has the two-parameter signature
 +        if shared_body:
              out.append("static void body_%08x(X86 *c, uint32_t entry_) {" % fn.addr)
              if fn.seh_escapes:
                  out.append("    uint64_t seh_mark_ = recomp_seh_frame_mark(c);")
-@@ -2725,11 +2836,24 @@ class Translator(object):
+@@ -3217,11 +3325,24 @@ class Translator(object):
                      "was %s" % (fn.addr, fn.insns[0].addr,
                                  " | ".join(l.strip() for l in out[:prologue])))
          out.append("}")
@@ -12348,7 +12142,7 @@ index 944f2ca..7a64cbb 100644
          return out
  
      # ---- helpers used by emit -------------------------------------------
-@@ -3202,6 +3326,9 @@ class Translator(object):
+@@ -3712,6 +3833,9 @@ class Translator(object):
                      L.append("{ jmp_buf *b_ = recomp_seh_frame_adopt(c); "
                               "if (b_) { if (setjmp(*b_)) { recomp_seh_land(c); return; } } }")
                  if t in self.noreturn_callees:
@@ -12358,7 +12152,7 @@ index 944f2ca..7a64cbb 100644
                      # The callee throws or exits; what follows is padding and
                      # tables, never code.  Reaching this line means it came
                      # back after all, which the runtime then reports by address.
-@@ -4186,6 +4313,7 @@ def main():
+@@ -4816,6 +4940,7 @@ def main():
      rejected = set()
      tr = Translator(image, all_addrs, args)
      tr.noreturn_callees = image.noreturn_callees
@@ -12366,8 +12160,8 @@ index 944f2ca..7a64cbb 100644
  
      if args.check_flags:
          for fn in parsed:
-@@ -4426,8 +4554,8 @@ def main():
-         own_interior = home is not None and t in home.addrs
+@@ -5064,8 +5189,8 @@ def main():
+                         or (t in switch_owners and owner.get(t) is switch_owners[t]))
          independent = why != "branch" or protected_source(home)
          if (t in scan_aliases and t in owner
 -                and entry_strength.get(owner[t].addr, 0) > strength):
@@ -12377,7 +12171,7 @@ index 944f2ca..7a64cbb 100644
          if not own_interior and independent:
              remember_candidate(t)
          entry_strength[t] = strength
-@@ -4968,7 +5096,10 @@ def main():
+@@ -5718,7 +5843,10 @@ def main():
                              dst = parse_operand(ins.ops[0])
                          except TranslateError:
                              continue
@@ -12389,7 +12183,7 @@ index 944f2ca..7a64cbb 100644
                              continue
                      immediates.add(src.imm)
              # Collect all scan candidates against the settled protected code
-@@ -5020,6 +5151,20 @@ def main():
+@@ -5770,6 +5898,20 @@ def main():
                  # boundary. In particular, a bare pointer to its RET must not
                  # withdraw the method by stopping it one instruction early.
                  scan_aliases.update(fn.addrs & guesses)
@@ -12410,7 +12204,7 @@ index 944f2ca..7a64cbb 100644
                  for i, ins in enumerate(probe):
                      end = fn.fallthrough[i] or ins.addr + 1
                      weaker_interiors.update(a for a in range(ins.addr + 1, end) if a in guesses)
-@@ -5680,7 +5825,7 @@ def main():
+@@ -6432,7 +6574,7 @@ def main():
                               ", ".join("%08x" % a for a in missing_patches))
  
      # funcs.h ---------------------------------------------------------------
@@ -12418,8 +12212,8 @@ index 944f2ca..7a64cbb 100644
 +    with generated_source(os.path.join(args.out, "funcs.h")) as fh:
          fh.write("/* generated by tools/recomp/translate.py -- do not edit */\n")
          fh.write("#ifndef RECOMP_FUNCS_H\n#define RECOMP_FUNCS_H\n")
-         fh.write('#include "x86.h"\n#include "intrinsics.h"\n#include "seh.h"\n')
-@@ -5730,7 +5875,7 @@ def main():
+         fh.write('#include "x86.h"\n#include "intrinsics.h"\n#include "seh.h"\n#include "msvc_eh.h"\n')
+@@ -6509,7 +6651,7 @@ def main():
      for start in range(0, len(ok), FUNCS_PER_CHUNK):
          group = ok[start:start + FUNCS_PER_CHUNK]
          path = os.path.join(args.out, "chunk_%03d.c" % nchunk)
@@ -12428,7 +12222,7 @@ index 944f2ca..7a64cbb 100644
              fh.write("/* generated by tools/recomp/translate.py -- do not edit */\n")
              fh.write('#include "funcs.h"\n\n')
              for fn in group:
-@@ -5787,11 +5932,12 @@ def main():
+@@ -6566,11 +6708,12 @@ def main():
  
      # table.c ---------------------------------------------------------------
      P = SYMBOL_PREFIX
@@ -12442,7 +12236,7 @@ index 944f2ca..7a64cbb 100644
              fh.write("/* Baseline and differential hosts retain exact guest timing. */\n"
                       "__attribute__((weak)) uint32_t recomp_visual_animation_tick(uint32_t tick) { return tick; }\n\n")
          fh.write("const uint32_t %sfunc_addrs[] = {\n" % P)
-@@ -5988,7 +6134,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
+@@ -6767,7 +6910,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
       * --discovered, then let the interpreter carry the run past the gap so
       * one run can report every gap it reaches rather than the first. */
      discovery_note("jump", target, c->eip);
@@ -12452,7 +12246,7 @@ index 944f2ca..7a64cbb 100644
      fprintf(stderr, "recomp: no block entry for indirect jump to 0x%08x from 0x%08x\\n",
              target, c->eip);
 diff --git a/tools/test.py b/tools/test.py
-index 0aea3f4..a0adf75 100644
+index 2592a7d..8e7c64a 100644
 --- a/tools/test.py
 +++ b/tools/test.py
 @@ -10,6 +10,7 @@ import json
@@ -12463,7 +12257,7 @@ index 0aea3f4..a0adf75 100644
  import subprocess
  import sys
  import tempfile
-@@ -56,12 +57,17 @@ def configure(preset, game_dir, build_root):
+@@ -61,12 +62,17 @@ def configure(preset, game_dir, build_root):
      return build_dir
  
  
@@ -12484,7 +12278,7 @@ index 0aea3f4..a0adf75 100644
  
  
  def mods_targets(game_dir):
-@@ -163,9 +169,13 @@ def main():
+@@ -168,9 +174,13 @@ def main():
      group.add_argument("--compile-only", action="store_true", help="Build the native test binaries only")
      parser.add_argument("--preset", default=build_py.default_preset())
      parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
@@ -12498,7 +12292,7 @@ index 0aea3f4..a0adf75 100644
      if not args.game_dir.is_absolute() or not (args.game_dir / "game.toml").is_file():
          parser.error("--game-dir must be an absolute directory holding game.toml: %s" % args.game_dir)
      cfg = build_py.game_config.load(args.game_dir)
-@@ -188,7 +198,7 @@ def main():
+@@ -193,7 +203,7 @@ def main():
          elif args.integration:
              integration(env, args.game_dir, build_root)
          elif args.native or args.compile_only:
@@ -12508,7 +12302,7 @@ index 0aea3f4..a0adf75 100644
              run([sys.executable, "-m", "pytest", "-q"] + PORTABLE_TESTS, env)
      except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError, TimeoutError) as error:
 diff --git a/tools/tests/test_build.py b/tools/tests/test_build.py
-index 4e1f116..5ffb0e3 100644
+index 28d9baa..c797566 100644
 --- a/tools/tests/test_build.py
 +++ b/tools/tests/test_build.py
 @@ -48,6 +48,62 @@ def test_android_templates_render(tmp_path):
@@ -12574,7 +12368,7 @@ index 4e1f116..5ffb0e3 100644
  def test_android_core_assets_replace_stale_manifests_without_shipping_binaries(tmp_path):
      game = tmp_path / "game"
      core = game / "mods/core/display"
-@@ -182,8 +238,9 @@ def test_android_push_stages_only_included_game_files(tmp_path, monkeypatch):
+@@ -184,8 +240,9 @@ def test_android_push_stages_only_included_game_files(tmp_path, monkeypatch, exe
      monkeypatch.setattr(build.subprocess, "run", run)
      build.android_install_and_launch(output / "app-debug.apk", "dev.recompkit.stub",
                                       game_cfg=cfg, build_root=output)
@@ -12618,20 +12412,14 @@ index f94a129..c25c6b6 100644
  def test_video_libraries_and_notice(tmp_path, monkeypatch, system):
      exe = tmp_path / "recomp_app"
 diff --git a/web/player/index.html b/web/player/index.html
-index 66254e1..e8f0cf2 100644
+index b65741c..2ef2c60 100644
 --- a/web/player/index.html
 +++ b/web/player/index.html
-@@ -15,10 +15,13 @@
-   #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-             text-align: center; padding: 0 16px; white-space: pre-line; pointer-events: none; }
-   #status a { pointer-events: auto; color: #8cf; }
-+  #keyboard-hint { position: fixed; bottom: 10px; left: 12px; right: 12px; text-align: center;
-+                   color: #bbb; font-size: 12px; pointer-events: none; }
- </style>
+@@ -14,6 +14,7 @@
  </head>
  <body>
  <canvas id="canvas" tabindex="-1"></canvas>
 +<div id="keyboard-hint">Click the game to focus keyboard input.</div>
  <div id="status">Loading…</div>
- <script>
- "use strict";
+ <script type="module" src="player.js"></script>
+ </body>

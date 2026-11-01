@@ -1,310 +1,96 @@
-# Cult / Cult II RecompKit bring-up
+# Cult Recomp
 
-**Local builds for Windows x64, Linux x86_64 and WebGPU browsers. Full playthroughs remain unverified.**
-Both games contain native x86 code compiled with Visual Basic 5. Their code and
-four supporting libraries are statically translated to C with RecompKit;
-runtime x86 interpretation is disabled.
+[Build & contribute](CONTRIBUTING.md) · [Port analysis](docs/analysis.md) ·
+[Testing](docs/testing.md) · [Changelog](CHANGELOG.md)
 
-Windows x64 and Linux x86_64 diagnostic builds reach the language selector,
-intro, main menu and opening scenes. Both games pass fresh movement/save/load
-checks on both systems, including byte-for-byte restoration of serialized state.
-The gray main-menu rectangles are now fixed in both Windows diagnostic hosts;
-new child-window stacking and sibling-clipping checks pass, and fresh
-movement/save/load round trips still succeed for both games.
-Save/load names now repaint through the control procedure, and GetWindowTextA
-retrieves their text. Both Windows diagnostic save tests pass again with no
-missing imports or unknown transfers. The latest GDI suite passes 240 checks
-on Windows and Linux, including paint priority and timer deadline order.
-Cult II's player and inventory now render immediately after startup Load in
-the corrected Windows, Linux and browser builds. Cult II's browser also writes
-a new save from the loaded scene; the exported bytes match P4 exactly. Fresh
-Windows and Linux movement/save/load round trips pass for both games with the
-timer corrections. All Windows, Linux, browser and Android packages include them.
+Static recompilations of **Cult** and **Cult II: Federal Crime**, built with
+[recomp-kit](https://github.com/veritr1x/recomp-kit). Each game's x86 executable
+and four supporting libraries are translated to native C ahead of time.
+Runtime x86 interpretation is disabled. Windows and Linux desktop and WebGPU
+browser builds have bounded local verification; full playthroughs remain
+unverified. See the analysis notes for platform-specific evidence.
 
-SDL desktop packages build for Windows and Linux. Both games completed bounded
-20-second startups with Vulkan presentation, nonzero device PCM and clean exits.
-Windows Cult II required DirectSound for its audio device. WSL runs use X11,
-100 ms PulseAudio latency and an 8,192-frame audio backlog; both reported zero
-late or starved audio pulls. Default WSL backends previously exposed intermittent
-startup/cleanup hangs, so these results apply to the tested settings. All 49 original
-MIDI scores produce nonzero audio through the offline MCI mixer. Physical input,
-audible output and later desktop gameplay remain unverified.
-The latest five-second Windows player checks render, produce nonzero device PCM
-and exit cleanly for both games. Cult's refreshed Linux player also completes
-a twenty-second audio check with zero late or starved pulls under those settings.
+**You need your own copies of the games.** Original executables, DLLs/OCXs,
+artwork, music, generated translations, binaries and saves are not included.
+The original games are by Lee Blum; see the [official Cult II site](https://www.studio-blum.com/Cult2/)
+and [NOTICE](NOTICE). This is an independent compatibility project.
 
-Private local player folders include the supplied data and Play.cmd or Play.sh.
-Windows launchers select DirectSound unless overridden; Linux launchers apply
-the tested settings under WSL while preserving explicit overrides.
-The deadline requested was 6 October 2026; an all-platform playable release by
-that date cannot be promised from the current state.
+## Repository layout
 
-## Play the current local builds
+| Path | Contents |
+| --- | --- |
+| `kit/` | Published recomp-kit, pinned as a git submodule |
+| `games/cult/`, `games/cult2/` | Exact-image `game.toml`, curated globals and smoke scripts |
+| `patches/recomp-kit-vb5.patch` | Remaining shared VB5/OLE/GDI source extensions |
+| `tools/` | Game input preparation and thin kit build/test entry points |
+| `tests/` | Asset-free configuration, importer and probe contracts |
+| `docs/` | Analysis, validation and historical bring-up notes |
 
-From this repository on Windows, run either generated launcher:
+Game inputs, listings and outputs stay in each profile's ignored `original/`,
+`analysis/` and `build/`. The two related games share a repo and kit pin; their
+identity, inputs, output directories and profiles remain separate.
 
-```powershell
-.\build\player\windows\CultRecomp\Play.cmd
-.\build\player\windows\Cult2Recomp\Play.cmd
-```
+## Prepare the checkout
 
-From Ubuntu/WSL, run `./build/player/linux/CultRecomp/Play.sh` or
-`./build/player/linux/Cult2Recomp/Play.sh`.
-Select English, choose Play, and use arrows and Enter in the menus.
-Arrows move in the game, Space advances conversations, and Escape opens
-the in-game menu. Saves stay in each player's `profile/` folder.
-
-The browser players are served locally at `http://localhost:8086/` during
-development. To restart the server from PowerShell:
-
-```powershell
-.venv\Scripts\python.exe kit\tools\web_launcher.py --game-dir "$PWD\games\cult" --game-dir "$PWD\games\cult2" --out "$PWD\build\player\web" --serve 8086
-```
-
-The browser requires WebGPU and the server's isolation headers. Click inside
-the game, then use the physical keyboard arrows to move. Mouse buttons do not
-move the character. Cult II's held-key movement is confirmed by the user and
-by a fresh browser save changing coordinates from (407,160) to (477,170).
-The user also confirms Cult's held-key movement down its starting path.
-The current browser checks also cover opening scenes, menu input and save/load
-in both games. Full playthroughs remain unverified.
-
-The 6 October performance update removes software long-double work from ordinary
-GDI pixel mappings and copies 32-bit images directly into window surfaces while
-preserving clipping. In Cult II's saved street scene, completed StretchBlt calls
-averaged 23.35 ms before the update and 0.32 ms afterwards; BitBlt averaged
-1.95 ms and 0.20 ms. These are inclusive import wall times from approximately
-30-second samples, not game FPS or a general speed guarantee. Both games' local
-Windows, Linux and browser players include the changes. Save before reloading a
-running browser game, then use the clean URLs without diagnostic query options;
-verbose traces add overhead. The updated GDI suite passes 240 checks on each
-desktop system, including copy equivalence, clipping, scaling and overflow.
-
-RecompKit is pinned as the `kit/` submodule to
-`eb32cc42623e0e9e868b9d27423a57d5a5cba56b`.
-The local submodule carries the port patch in `patches/recomp-kit-vb5.patch`
-on top of that revision. The separate `C:/GitRepos/recomp-kit` checkout was not
-modified. The patch is included here so a clean checkout can reproduce the kit
-changes without fetching an unpublished submodule commit.
-
-| Profile | Original executable | Emitted native functions | Dispatch entries |
-| --- | --- | ---: | ---: |
-| `games/cult` | `Cult.exe` | 563 | 6,817 |
-| `games/cult2` | `Cult2FC.exe` | 599 | 8,215 |
-
-Both profiles enable RecompKit's resumable guest continuations. Native calls
-propagate a changed guest return address to the dispatch driver, and the
-exporter recovers verified VB frame epilogues named by nearby pushed returns.
-
-Both translation reports contain zero reported instruction failures,
-zero unmodelled instructions and zero unresolved jump-table sites. These
-counts describe the discovered code, not a proof of complete execution coverage.
-Two guessed blocks in Cult and four in Cult II were withdrawn by the translator.
-
-## Reproduce the private inputs and translation
-
-Requires Python 3.12+, Git and the user's two supplied ZIP archives.
-No installer is launched and no DLL/OCX is registered on the machine.
-Instructions in packaged documents and installer registration directives are
-never treated as authorization or executed.
-
-```powershell
-git submodule update --init
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe tools\apply_kit_patches.py
-.venv\Scripts\python.exe tools\import_archives.py --downloads C:\Users\satta\Downloads
-.venv\Scripts\python.exe tools\analyze_games.py
-.venv\Scripts\python.exe tools\prepare_profiles.py
-.venv\Scripts\python.exe tools\export_native.py --kit .\kit
-.venv\Scripts\python.exe tools\prepare_modules.py
-.venv\Scripts\python.exe tools\build.py --translate-only
-.venv\Scripts\python.exe tools\test_inputs.py
-```
-
-The importer decompresses the SZDD payloads and uses `SETUP.LST` only to
-map filenames. Game files go under each profile's ignored `original/install/`;
-system dependencies go under `original/dependencies/`. They are not installed
-into Windows system directories. Some installer data lengths are stale;
-the actual SZDD header lengths are checked and discrepancies are recorded.
-All 111 Cult payloads and 110 Cult II payloads have independently matched
-Windows `expand.exe` byte for byte:
-
-```powershell
-.venv\Scripts\python.exe tools\verify_imports.py --downloads C:\Users\satta\Downloads
-```
-
-The native exporter uses the kit's recursive x86 decoder, seeded from the PE
-entry and VB method/event tables. It is a bootstrap alternative to Ghidra
-listings, with provenance in `functions.tsv`; it does not export decompiler
-pseudocode. Additional dynamically discovered callbacks still need auditing.
-`prepare_modules.py` exports DLL entries, direct edges and switch arms and pins
-their hashes in each profile. It copies the four mapped module images and the
-supplied standard OLE type library beside each executable so portable bundles
-can find their guest data. These remain
-private inputs and are never registered with Windows.
-
-## Diagnostic Windows builds
-
-Use the kit's standard `windows` preset with LLVM and the Windows SDK, or
-the verified portable LLVM-MinGW compiler used in this workspace:
-
-```powershell
-.venv\Scripts\python.exe tools\bootstrap_llvm.py
-.venv\Scripts\python.exe tools\configure_mingw.py --toolchain .\build\toolchains\llvm-mingw-20260922-ucrt-x86_64
-$env:Path = "$PWD\.venv\Scripts;$PWD\build\toolchains\llvm-mingw-20260922-ucrt-x86_64\bin;$env:Path"
-.venv\Scripts\python.exe tools\build.py --game all --preset cult-windows-llvm --target headless
-```
-
-The portable toolchain is downloaded from its
-[upstream release](https://github.com/mstorsjo/llvm-mingw/releases/tag/20260922)
-and verified against a pinned SHA-256 before extraction. It remains under ignored
-`build/toolchains/`; it does not change global tool installations. This diagnostic
-preset disables FFmpeg. Native builds use `kit/tools/build.py` exclusively.
-
-Generated C and binaries remain private under `games/<id>/build/`.
-An emitted library or headless executable does not establish playability.
-See [status and remaining work](docs/status.md) for verification and blockers.
-
-The smoke host also checks input through the native window-message path:
-
-```powershell
-.venv\Scripts\python.exe tools\build.py --game all --preset cult-windows-llvm --target smoke
-.venv\Scripts\python.exe tools\probe_input.py --game all --verbose
-```
-
-Both games render their language screens, including artwork and the Play label,
-and the scripted clicks advance into the intro. Temporary OLE storage is now
-implemented. System ListBox and Edit controls now initialize. The last completed
-input probes now activate PictureClip's native class factory and load pictures
-through OLE memory streams. The uncovered VB, Automation and cleanup callbacks
-now execute. DLL-name comparison and legacy file opens are implemented, and the
-standard OLE type library is included as guest-readable data. Both short probes
-finish with no called missing imports, unknown transfers, VB errors or access
-violations. Longer probes exercise New Game, dialogue, movement and Save/Load.
-GetDIBits now honors the caller's pixel depth and row count, fixing a buffer
-overrun that corrupted Cult II's interface objects. Background erasure removes
-retained menu pixels. Paints clip to accumulated update rectangles, preserving
-the HUD when dialogs close. Hidden helper controls no longer draw into visible
-parent surfaces. Save/load probes use a writable private profile even with
-plugins disabled, and reject stale files or an unchanged test position.
-Both probes submit three WAV effects with nonzero audio samples. Bounded
-movement and save/load paths pass; full gameplay and audible device output
-remain unverified.
-
-## Linux builds
-
-Both Linux x86_64 movement/save/load probes pass under Ubuntu in WSL.
-Both SDL packages also build; desktop startup and cleanup remain under validation.
-Use a separate Linux virtual environment; a Windows virtual environment cannot
-run the Linux build tools. Install clang, lld, Python venv, pkg-config and SDL's
-development dependencies as listed in `kit/.github/workflows/checks.yml`.
-After importing and translating the inputs above:
+Use Python 3.12 and Git. On Windows, replace `.venv/bin/python` with
+`.venv/Scripts/python.exe`.
 
 ```sh
-python3 -m venv build/linux-venv
-build/linux-venv/bin/python -m pip install -r kit/requirements-dev.txt
-export PATH="$PWD/build/linux-venv/bin:$PATH"
-for game in cult cult2; do
-  build/linux-venv/bin/cmake --preset linux -S kit -B "games/$game/build/cmake/linux" \
-    -DRECOMP_GAME_DIR="$PWD/games/$game" -DPOP_BUILD_ROOT="$PWD/games/$game/build" \
-    -DRECOMP_VIDEO=OFF
-  build/linux-venv/bin/python tools/build.py --game "$game" --preset linux --target smoke
-  build/linux-venv/bin/python tools/probe_input.py --game "$game" --scenario save \
-    --max-seconds 210 --host-keyboard
-  build/linux-venv/bin/python tools/build.py --game "$game" --preset linux --target app
-done
+git clone --recurse-submodules https://github.com/veritr1x/cult-recomp.git
+cd cult-recomp
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r kit/requirements.lock
+.venv/bin/python tools/apply_kit_patches.py
 ```
 
-Video is disabled in these builds. Diagnostic output goes under each game's
-ignored `build/`; Linux save probes replace the same evidence paths used by
-Windows probes. A successful scripted test does not establish complete gameplay.
+The kit pin is `a18ccafa1e8c98002b2d3f7347b64fa655ebb018`, the merged,
+reviewed runtime/renderer/translator update. The patch is published here so no
+unpublished submodule commit is needed. Its helper validates the exact base,
+accepts an already applied patch and preserves conflicting local edits.
 
-Private local player folders can be assembled from the builds and supplied
-inputs with tools/package_player.py --game <id> --platform Windows (or Linux).
-They go under ignored build/player/ and include Play.cmd or Play.sh plus a
-separate writable profile directory. Keep the complete player folder together.
+## Prepare your game copies
 
-## Other targets
-
-After the shared runtime gaps are resolved, `tools/build.py --game <id>`
-forwards `--target app`, `android`, `ios` or `web` to RecompKit.
-macOS and iOS require Apple tooling on a Mac; Android requires its SDK/NDK;
-web requires Emscripten and the kit's WebGPU/browser requirements.
-Other CPU architectures need their own native builds and gameplay verification.
-No macOS or iOS binaries have been produced here yet. Both Android ARM64 debug
-APKs build and are packaged privately under `build/player/android/`.
-
-Both browser builds linked with Emscripten 6.0.11 on Linux x86_64.
-The local emsdk checkout is pinned to
-`96c657fc60920d2a6a82318aa50e0abf82749604`, whose SDK release revision is
-`f6264d4a4dd9ba24a9f0a5702835a44d1463de13`. It stays under ignored
-`build/toolchains/emsdk/`. To repeat a browser build after installing and
-activating that SDK version, use Bash:
+Place your own `Cult_Win_EN.zip` and `Cult-II-Federal-Crime_Win_EN.zip` in a
+local directory, then run:
 
 ```sh
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-source build/toolchains/emsdk/emsdk_env.sh
-export PATH="$PWD/build/linux-venv/bin:$PATH"
-build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult" --target web --jobs 3
-build/linux-venv/bin/python kit/tools/build.py --game-dir "$PWD/games/cult2" --target web --jobs 3
+.venv/bin/python tools/import_archives.py --downloads /path/to/your/archives
+.venv/bin/python tools/export_native.py --kit ./kit
+.venv/bin/python tools/prepare_modules.py
+.venv/bin/python tools/build.py --game all --translate-only
+.venv/bin/python tools/test_inputs.py
 ```
 
-`tools/package_browser.py` assembles both private players under
-`build/player/web/`, including local ZIP copies for importing the supplied data.
-It strips only WebAssembly debug metadata and checks that every executable
-section remains unchanged. Both games import their supplied data, reach their
-language screens through WebGPU and initialize the packaged MIDI bank. A runtime
-mouse-state fix lets ordinary Play clicks start both games. Keyboard input reaches
-the opening scenes and advances their conversations. Both initial menus and
-Cult II's in-game menu now render correctly. Its browser save-name field is
-legible after the text repaint fix. GetWindowTextA is implemented in all rebuilt
-packages. Cult II writes a fresh browser save and loads it from the in-game menu.
-Both exported saves load from the startup menu in the Windows diagnostic host.
-The latest trace identifies a direct return to an older guest callback that
-the runtime mistakes for an exception-handler disposition. A source fix passes
-365 SEH checks on both Windows and Linux. Both browser builds and all four
-Windows/Linux player packages now include the callback correction. Cult II's
-browser startup Load previously read P4.fcg and then exited with Visual Basic
-error 5. A second fix queues expired timers by deadline, so the earlier sprite
-setup runs before the later update. The browser now reaches P4's saved street
-scene with its character and inventory and keeps running without that error.
-It also reloads the new A save through the in-game Load menu.
-A Windows startup Load with real time also passes after this fix. Earlier
-Windows and Linux diagnostics pass the movement and byte-identical save/load
-round trip.
-Full browser gameplay remains unverified. The guest arena extends
-to 0x74200000, so its browser memory
-requirements need actual device testing. The kit's player requires a secure,
-cross-origin isolated page and a WebGPU-capable browser.
+The importer expands installer payloads without executing an installer or
+registering DLLs/OCXs. Preparation validates exact executable/module hashes.
+Native export uses the kit decoder and verified VB metadata; it is this port's
+alternative to Ghidra listings. Do not regenerate the reviewed `game.toml`
+profiles with `prepare_profiles.py` for an ordinary build.
 
-tools/bootstrap_android.py stages checksum-pinned Windows-hosted NDK r30,
-Android API 36 revision 2 and Build Tools 37.0.0 under ignored build/toolchains/.
-It requires the existing installed Android API 35 package and verifies that the
-repository's associated license text matches its accepted agreement apart from
-whitespace. It refuses changed terms or unexpected package checksums. Android
-configuration and APK assembly succeeded for both games. `tools/package_android.py`
-checks the ARM64 library and required runtime assets, then copies the APKs and
-notices into `build/player/android/`. Gradle uses the native build's NDK and version
-for symbol stripping; the packages are about 654 MB and 658 MB. Optional
-`--with-emulator` stages stable emulator 37.2.12 in the private SDK folder.
-Both games install and load their libraries on an isolated emulator using ARM64
-translation. The original software GPU lacked dynamic rendering. Host GPU testing
-exposed a missing Android Vulkan surface extension, now enabled in the runtime,
-but the emulator failed or lost its device connection after launch. A legacy
-Vulkan render-pass fallback now creates the software device and swapchain;
-both ARM64 and native x86_64 emulator builds still fault while uploading launcher pixels.
-Both Windows and Linux packages launch with the fallback, render frames,
-capture audio and exit cleanly. Physical ARM64
-device execution, touch input and audible output remain unverified.
-Android and Apple ports are deferred; the immediate target is Windows, Linux
-and browser, as agreed with the user.
+## Build and check
 
-## Metadata references
+Install the native prerequisites listed in [CONTRIBUTING.md](CONTRIBUTING.md).
+Build one profile, or select `--game all`:
 
-The VB project/object/event layout was checked against the primary
-[python-vb parser source](https://github.com/williballenthin/python-vb/blob/master/vb/__init__.py)
-and the [Semi VB Decompiler structure definitions](https://github.com/VBGAMER45/Semi-VB-Decompiler/blob/master/Semi%20VB%20Decompiler/modGlobals.bas).
-The zero/nonzero native-code flag is described by the
-[VB Decompiler author](https://www.vb-decompiler.org/pcode_decompiling.htm).
-The scripts use those format facts; upstream code is not vendored.
+```sh
+.venv/bin/python tools/build.py --game cult --target app
+.venv/bin/python tools/build.py --game cult2 --target app
+.venv/bin/python tools/test.py
+.venv/bin/python -m pytest -q tests
+.venv/bin/python tools/check_repo.py
+```
+
+All remaining kit build options pass through, including `--stub`, `--preset`,
+`--regenerate` and `--jobs`. A stub build needs no original inputs:
+`tools/build.py --game all --stub`. The patch must be applied first.
+
+For bounded save/load checks, build each smoke host and run
+`tools/probe_input.py --game all --scenario save --max-seconds 120`.
+The probe records fresh writes, equal restored serialized state and changed
+player positions. It uses isolated diagnostic profiles. See
+[testing](docs/testing.md) before repeating existing local probes.
+
+Private desktop folders assembled by `tools/package_player.py` include their
+own launchers and writable profiles. They are local outputs, never repository
+or release payloads. Historical browser/mobile packaging helpers and their
+verification limits are described in [docs/status.md](docs/status.md).

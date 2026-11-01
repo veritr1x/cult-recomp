@@ -8,7 +8,6 @@ import argparse
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 from import_archives import GAMES, ROOT
@@ -31,18 +30,17 @@ def main():
     for game_id in GAMES if args.game == "all" else [args.game]:
         game = ROOT / "games" / game_id
         if args.translate_only:
-            output = game / "build/recomp/gen"
-            command = [sys.executable, str(kit / "tools/recomp/translate.py"),
-                       "--game", str(game), "--out", str(output),
-                       "--report", str(game / "analysis/translation-report.json")]
-            subprocess.run(command, cwd=ROOT, env=env, check=True)
-            config = tomllib.loads((game / "game.toml").read_text())
-            for module in config.get("modules", {}).get("aux", {}):
-                subprocess.run([sys.executable, str(kit / "tools/recomp/translate.py"),
-                                "--game", str(game), "--module", module,
-                                "--out", str(output / ("aux-" + module)),
-                                "--report", str(game / "analysis" / (module + "-translation-report.json"))],
-                               cwd=ROOT, env=env, check=True)
+            # Publish the main image and every auxiliary module together, so a
+            # rejected translation cannot replace the last working output.
+            sys.path.insert(0, str(kit / "tools"))
+            import build as kit_build
+            config = kit_build.game_config.load(game)
+            build_root = game / "build"
+            with kit_build.buildlock.BuildLock(game, "Cult translation"):
+                kit_build.publish_generated(
+                    build_root, lambda stage: kit_build.run_translator(
+                        stage, game, build_root,
+                        aux_modules=[module["key"] for module in config["aux_modules"]]))
             continue
         else:
             print(f"{game_id}: experimental build; gameplay and other platforms are unverified.", flush=True)

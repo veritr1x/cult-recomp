@@ -5,3 +5,7 @@ games/*/analysis/
 games/*/build/
 build/
 *.zip
+
+.pytest_cache/
+.tools/
+.DS_Store

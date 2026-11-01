@@ -1,7 +1,2 @@
-pefile==2024.8.26
-capstone==5.0.9
-tomli==2.2.1
-cmake==4.1.2
-ninja==1.13.0
-pytest==8.4.2
-unicorn==2.1.4
+# Install with --require-hashes --only-binary=:all:
+-r kit/requirements.lock
