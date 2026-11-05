@@ -8,7 +8,7 @@ from import_archives import ROOT
 def main():
     kit = ROOT / "kit"
     patch = ROOT / "patches/recomp-kit-vb5.patch"
-    base = "a18ccafa1e8c98002b2d3f7347b64fa655ebb018"
+    base = "1cbd81ca8e6e1ef2cf33f1c27a06f69a00e64b82"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=kit, text=True).strip()
     if head != base:
         raise ValueError(f"Preserving kit at {head}; this patch expects {base}")

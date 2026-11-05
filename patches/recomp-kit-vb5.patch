@@ -1,8 +1,8 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index cb53d91..6fe981f 100644
+index a4f72aa..077ec26 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -223,6 +223,183 @@
+@@ -267,6 +267,183 @@
    interpreter and the generated MSL/GLSL/WGSL, and bind the stage that
    `texm3x2tex` samples: the sampler mask counted only `tex`/`texldl`, so on
    Metal it sampled black. Fixes #20.
@@ -241,10 +241,10 @@ index be88420..f9b79c6 100644
        --nm=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-nm
        --ranlib=${RECOMP_FFMPEG_TOOLCHAIN_BIN}/llvm-ranlib
 diff --git a/docs/testing.md b/docs/testing.md
-index 28ab147..4849166 100644
+index 5f3aa88..4c6e786 100644
 --- a/docs/testing.md
 +++ b/docs/testing.md
-@@ -137,6 +137,14 @@ Direct3D 8 combiner cases also run in the Metal and Vulkan CI jobs.
+@@ -174,6 +174,14 @@ Direct3D 8 combiner cases also run in the Metal and Vulkan CI jobs.
  Run checks appropriate to your change. Every suite's output belongs under ignored
  `build/`; requested tests must report failure rather than silently skip prerequisites.
  
@@ -259,7 +259,7 @@ index 28ab147..4849166 100644
  | Command | What it checks | Needs game files? |
  | --- | --- | --- |
  | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
-@@ -200,6 +208,19 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
+@@ -237,6 +245,19 @@ under Unicorn. Unicorn is a development tool, not part of the playable app.
  
  ## Manual gameplay checks
  
@@ -280,10 +280,10 @@ index 28ab147..4849166 100644
  - Compare Classic/Enhanced and Wide on/off in a window wider than an 800×600 canvas.
  - Cycle resolution through 640×480, 800×600 and 3840×2160, then resume play.
 diff --git a/dx/dx.cpp b/dx/dx.cpp
-index 761494e..7c11e54 100644
+index af70b3d..f25e259 100644
 --- a/dx/dx.cpp
 +++ b/dx/dx.cpp
-@@ -628,6 +628,7 @@ void dx_reset() {
+@@ -629,6 +629,7 @@ void dx_reset() {
      qmixer_reset();
      fmod_reset();
      soundlib_reset();
@@ -1131,10 +1131,10 @@ index 9246458..e0dd58f 100644
  }
  void waveout_frame_pump(X86 *c) {
 diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
-index 120cb71..6c9304a 100644
+index ac1ab74..1ff1abf 100644
 --- a/host/CMakeLists.txt
 +++ b/host/CMakeLists.txt
-@@ -266,6 +266,12 @@ if(TARGET recomp_gen)
+@@ -275,6 +275,12 @@ if(TARGET recomp_gen)
      file(REMOVE_RECURSE ${web_resources})
      file(MAKE_DIRECTORY ${web_resources})
      file(COPY ${POP_ROOT}/tools/recomp/baseline/classic-modes.json DESTINATION ${web_resources})
@@ -1147,7 +1147,7 @@ index 120cb71..6c9304a 100644
      if(EXISTS ${POP_BUILD_ROOT}/recomp/symbols.json)
        file(COPY ${POP_BUILD_ROOT}/recomp/symbols.json DESTINATION ${web_resources})
      endif()
-@@ -331,6 +337,7 @@ pop_host(host_tests UI_LAYER
+@@ -350,6 +356,7 @@ pop_host(host_tests UI_LAYER
            ${POP_ROOT}/dx/d3dcompiler.cpp ${POP_ROOT}/dx/d3dx10.cpp
            ${POP_ROOT}/dx/d3d9_shader.cpp ${POP_ROOT}/dx/d3d9_shadergen.cpp
              ${POP_ROOT}/dx/d3d8_program.cpp ${POP_ROOT}/dx/d3d8_fixed.cpp
@@ -1692,7 +1692,7 @@ index 091660f..979aef2 100644
          if (i < 8)
              g.buttons[i] = 0;
 diff --git a/host/input_gate.cpp b/host/input_gate.cpp
-index 2dd011b..4c9657a 100644
+index 4a65892..efa431c 100644
 --- a/host/input_gate.cpp
 +++ b/host/input_gate.cpp
 @@ -52,8 +52,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
@@ -1705,27 +1705,6 @@ index 2dd011b..4c9657a 100644
          return;
      }
      uint32_t hwnd = host_main_window();
-@@ -72,14 +71,14 @@ void post_key(HostKeyMapping m, bool down, bool sys, bool context, uint32_t char
-     bool was_down = g_guest_key[m.vk];
-     g_guest_key[m.vk] = down;
-     uint32_t lparam = host_key_lparam(m, down, context, down ? was_down : true);
--    post(down ? (sys ? WM_SYSKEYDOWN_ : WM_KEYDOWN_) : (sys ? WM_SYSKEYUP_ : WM_KEYUP_), m.vk,
--         lparam);
-     // Printable characters, and the four control characters Win32 also
-     // delivers as WM_CHAR.
--    if (down && !sys && character &&
--        ((character >= 0x20 && character < 0x7f) || character == 0x0d || character == 0x1b ||
--         character == 0x09 || character == 0x08))
--        post(WM_CHAR_, character, lparam);
-+    const bool has_character = down && !sys && character &&
-+                               ((character >= 0x20 && character < 0x7f) || character == 0x0d ||
-+                                character == 0x1b || character == 0x09 || character == 0x08);
-+    host_post_key_message(down ? (sys ? WM_SYSKEYDOWN_ : WM_KEYDOWN_)
-+                               : (sys ? WM_SYSKEYUP_ : WM_KEYUP_),
-+                          m.vk, lparam, has_character ? character : 0);
- }
- 
- // The modifier bit a scan code contributes: either side counts, which is what
 @@ -562,16 +561,17 @@ bool host_gate_key(uint16_t mac, bool down) {
  uint32_t host_input_batch_limit(const HostInputStep *steps, uint32_t count) {
      if (!steps || count == 0)
@@ -1799,10 +1778,10 @@ index bd1192e..ed0dc93 100644
      if (view) {
          const uint32_t observed = view();
 diff --git a/host/sdl/main.cpp b/host/sdl/main.cpp
-index 35e96cb..3031b24 100644
+index 9e5df47..437721f 100644
 --- a/host/sdl/main.cpp
 +++ b/host/sdl/main.cpp
-@@ -137,8 +137,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
+@@ -138,8 +138,7 @@ void post(uint32_t msg, uint32_t wparam, uint32_t lparam) {
          return;
      }
      if (msg >= 0x200 && msg <= 0x209) {
@@ -1812,7 +1791,7 @@ index 35e96cb..3031b24 100644
          return;
      }
      uint32_t hwnd = host_main_window();
-@@ -347,9 +346,13 @@ void deliver_pending_input() {
+@@ -348,9 +347,13 @@ void deliver_pending_input() {
      // is in input_gate.cpp, where it is tested without a window.
      std::vector<HostInputStep> steps;
      steps.reserve(batch.size());
@@ -1829,7 +1808,7 @@ index 35e96cb..3031b24 100644
      const uint32_t limit = host_input_batch_limit(steps.data(), uint32_t(steps.size()));
      // Applied outside the lock, in arrival order. Order is the whole point: a
      // focus loss sits in this queue among the presses it must follow, so
-@@ -1324,6 +1327,18 @@ controls::Screen controls_screen() {
+@@ -1325,6 +1328,18 @@ controls::Screen controls_screen() {
  
  // The housekeeping every turn does once the events are in.
  void after_events() {
@@ -1908,7 +1887,7 @@ index f35bdb1..ef9f778 100644
              break; // consumed
          host_input_key(m.mac, step.down != 0);
 diff --git a/host/tests/host_tests.cpp b/host/tests/host_tests.cpp
-index 32049db..e99c748 100644
+index 7b6cf01..0c5c889 100644
 --- a/host/tests/host_tests.cpp
 +++ b/host/tests/host_tests.cpp
 @@ -897,6 +897,7 @@ static void test_script_parsing() {
@@ -1946,17 +1925,7 @@ index 32049db..e99c748 100644
  }
  
  static void test_script_input_hold_frames() {
-@@ -7129,6 +7143,9 @@ static void test_input_gate() {
-     uint32_t wp = 0;
-     CHECK(gate_next_message(&ctx, &wp) == 0x0100); // 4. WM_KEYDOWN
-     CHECK(wp == m.vk);
-+    // SDL already supplied the character with this key. A normal Win32
-+    // message loop must not synthesize another, lower-case copy of it.
-+    CHECK(gate_call_import(&ctx, "USER32.dll", "TranslateMessage", {gate_scratch(0x200)}) == 1);
-     CHECK(gate_next_message(&ctx, &wp) == 0x0102); //    and its WM_CHAR
-     CHECK(wp == 'G');
-     CHECK(gate_next_message(&ctx, nullptr) == 0);
-@@ -10140,7 +10157,115 @@ static void test_d3d9_gpu_renderer() {
+@@ -10167,6 +10181,104 @@ static void test_d3d9_gpu_renderer() {
      host_d9_texture_drop(DEPTH);
  }
  
@@ -2059,6 +2028,12 @@ index 32049db..e99c748 100644
 +}
 +
  int main(int argc, char **argv) {
+     if (argc == 2 && !strcmp(argv[1], "--keyboard-only")) {
+         mem_init();
+@@ -10176,6 +10288,16 @@ int main(int argc, char **argv) {
+         mem_shutdown();
+         return g_failures ? 1 : 0;
+     }
 +    if (argc == 2 && !strcmp(argv[1], "--render-pass-gpu")) {
 +        g_gpu = gpu::create_default_device();
 +        if (!g_gpu) {
@@ -2072,7 +2047,7 @@ index 32049db..e99c748 100644
      if (argc == 2 && !strcmp(argv[1], "--dumpat-only")) {
          test_dumpat_present_and_seal();
          printf("dumpat integration: %d checks, %d failures\n", g_checks, g_failures);
-@@ -10236,6 +10361,27 @@ int main(int argc, char **argv) {
+@@ -10271,6 +10393,27 @@ int main(int argc, char **argv) {
          }
      }
      mem_init();
@@ -8682,7 +8657,7 @@ index 7ab10c7..e851f42 100644
      return 0;
  }
 diff --git a/runtime/user32.cpp b/runtime/user32.cpp
-index 3ae2d62..3c65848 100644
+index 9077d7d..1388fa8 100644
 --- a/runtime/user32.cpp
 +++ b/runtime/user32.cpp
 @@ -6,6 +6,7 @@
@@ -9099,23 +9074,24 @@ index 3ae2d62..3c65848 100644
              return;
          }
          if (!drives_host) {
-@@ -992,6 +1177,15 @@ void u_TranslateMessage(X86 *c) {
+@@ -992,6 +1177,16 @@ void u_TranslateMessage(X86 *c) {
          return;
      }
      uint32_t msg = rd32(p + 4), vk = rd32(p + 8), lparam = rd32(p + 12);
 +    const auto previous = retrieved_messages().find(p);
 +    if (previous != retrieved_messages().end()) {
 +        const Msg &m = previous->second;
-+        if (m.text_pretranslated && m.hwnd == rd32(p) && m.message == msg && m.wparam == vk &&
-+            m.lparam == lparam && m.time == rd32(p + 16)) {
++        if (m.character_posted && m.hwnd == rd32(p) && m.message == msg && m.wparam == vk &&
++            m.lparam == lparam && m.time == rd32(p + 16) && m.ptx == rd32(p + 20) &&
++            m.pty == rd32(p + 24)) {
 +            set_eax(c, 1);
 +            return;
 +        }
 +    }
      if (msg == 0x0100 || msg == 0x0104) { // WM_KEYDOWN / WM_SYSKEYDOWN
-         uint32_t ch = 0;
-         if (vk >= 0x30 && vk <= 0x5a)
-@@ -1024,6 +1218,12 @@ void dispatch_message(X86 *c) {
+         // The host can supply layout-aware text with a physical key. Preserve
+         // that character (including case) instead of appending a second one.
+@@ -1035,6 +1230,12 @@ void dispatch_message(X86 *c) {
      }
      uint32_t hwnd = rd32(p + 0), msg = rd32(p + 4);
      uint32_t wp = rd32(p + 8), lp = rd32(p + 12);
@@ -9128,7 +9104,7 @@ index 3ae2d62..3c65848 100644
      if (msg == 0x113 && lp)
          set_eax(c, guest_call(c, lp, hwnd, msg, wp, rd32(p + 16)));
      else
-@@ -1069,6 +1269,16 @@ void u_PostThreadMessage(X86 *c) {
+@@ -1080,6 +1281,16 @@ void u_PostThreadMessage(X86 *c) {
  void u_PeekMessageA(X86 *c) {
      peek_message(c);
  }
@@ -9145,7 +9121,7 @@ index 3ae2d62..3c65848 100644
  void u_DispatchMessageA(X86 *c) {
      dispatch_message(c);
  }
-@@ -1091,9 +1301,21 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1102,9 +1313,21 @@ void def_window_proc(X86 *c, bool wide) {
      case 0x000e: // WM_GETTEXTLENGTH
          set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
          return;
@@ -9169,7 +9145,7 @@ index 3ae2d62..3c65848 100644
          set_eax(c, 0);
          return;
      case 0x0021: // WM_MOUSEACTIVATE: children ask their parent first.
-@@ -1115,8 +1337,17 @@ void def_window_proc(X86 *c, bool wide) {
+@@ -1126,8 +1349,17 @@ void def_window_proc(X86 *c, bool wide) {
          set_eax(c, 0);
          return;
      }
@@ -9188,7 +9164,7 @@ index 3ae2d62..3c65848 100644
          set_eax(c, 1);
          return;
      case 0x0010: // WM_CLOSE -> DestroyWindow
-@@ -1150,20 +1381,30 @@ void u_ReleaseDC(X86 *c) {
+@@ -1161,20 +1393,30 @@ void u_ReleaseDC(X86 *c) {
  
  void u_BeginPaint(X86 *c) {
      uint32_t hwnd = arg(c, 0), ps = arg(c, 1);
@@ -9227,7 +9203,7 @@ index 3ae2d62..3c65848 100644
      }
      set_eax(c, hdc);
  }
-@@ -1326,8 +1567,10 @@ static uint32_t g_next_icon = 0x0002b000u;
+@@ -1337,8 +1579,10 @@ static uint32_t g_next_icon = 0x0002b000u;
  // the window, and the update rectangle is the whole client while it is set.
  void u_ValidateRect(X86 *c) {
      Window *w = find_window(arg(c, 0));
@@ -9239,7 +9215,7 @@ index 3ae2d62..3c65848 100644
      set_eax(c, w != nullptr);
  }
  void u_GetUpdateRect(X86 *c) {
-@@ -1335,15 +1578,43 @@ void u_GetUpdateRect(X86 *c) {
+@@ -1346,15 +1590,43 @@ void u_GetUpdateRect(X86 *c) {
      uint32_t rect = arg(c, 1);
      bool pending = w && w->update_pending;
      if (rect && gm_valid(rect, 16)) {
@@ -9289,7 +9265,7 @@ index 3ae2d62..3c65848 100644
  void u_LoadCursorFromFileW(X86 *c) {
      set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
  }
-@@ -1368,20 +1639,39 @@ void u_DestroyIcon(X86 *c) {
+@@ -1379,20 +1651,39 @@ void u_DestroyIcon(X86 *c) {
      set_eax(c, arg(c, 0) ? 1 : 0);
  }
  void u_LoadIconA(X86 *c) {
@@ -9330,7 +9306,7 @@ index 3ae2d62..3c65848 100644
      if (p) {
          wr32(p, (uint32_t)g_cursor_x);
          wr32(p + 4, (uint32_t)g_cursor_y);
-@@ -1394,8 +1684,21 @@ void u_GetMessagePos(X86 *c) {
+@@ -1405,8 +1696,21 @@ void u_GetMessagePos(X86 *c) {
  void u_GetMessageTime(X86 *c) {
      set_eax(c, last_message().time);
  }
@@ -9352,7 +9328,7 @@ index 3ae2d62..3c65848 100644
      uint32_t state = 0;
      if (vk < 256) {
          state = (g_key_state[vk] ? 0x8000u : 0) | g_async_pressed[vk];
-@@ -1405,7 +1708,12 @@ void u_GetAsyncKeyState(X86 *c) {
+@@ -1416,7 +1720,12 @@ void u_GetAsyncKeyState(X86 *c) {
  }
  void u_GetKeyState(X86 *c) {
      uint32_t vk = arg(c, 0);
@@ -9366,7 +9342,7 @@ index 3ae2d62..3c65848 100644
  }
  void u_ShowCursor(X86 *c) {
      g_cursor_show += arg(c, 0) ? 1 : -1;
-@@ -1503,6 +1811,18 @@ void u_MessageBoxA(X86 *c) {
+@@ -1514,6 +1823,18 @@ void u_MessageBoxA(X86 *c) {
           gm_str(arg(c, 1), 1024).c_str(), answer);
      set_eax(c, answer);
  }
@@ -9385,7 +9361,7 @@ index 3ae2d62..3c65848 100644
  
  void u_MessageBoxW(X86 *c) {
      std::string text;
-@@ -1800,6 +2120,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1811,6 +2132,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "ShowWindow", 2, u_ShowWindow},
      {"USER32.dll", "UpdateWindow", 1, u_UpdateWindow},
      {"USER32.dll", "SetWindowPos", 7, u_SetWindowPos},
@@ -9393,7 +9369,7 @@ index 3ae2d62..3c65848 100644
      {"USER32.dll", "GetWindowRect", 2, u_GetWindowRect},
      {"USER32.dll", "GetClientRect", 2, u_GetClientRect},
      {"USER32.dll", "SystemParametersInfoA", 4, u_SystemParametersInfoA},
-@@ -1812,6 +2133,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1823,6 +2145,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "SetWindowLongA", 3, u_SetWindowLongA},
      {"USER32.dll", "GetWindowLongA", 2, u_GetWindowLongA},
      {"USER32.dll", "SetWindowTextA", 2, u_SetWindowTextA},
@@ -9401,7 +9377,7 @@ index 3ae2d62..3c65848 100644
      {"USER32.dll", "SetDlgItemTextA", 3, u_SetDlgItemTextA},
      {"USER32.dll", "CreateDialogParamA", 5, u_CreateDialogParamA},
      {"USER32.dll", "PeekMessageA", 5, u_PeekMessageA},
-@@ -1821,15 +2143,18 @@ const ImportShim g_user32_shims[] = {
+@@ -1832,15 +2155,18 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "TranslateMessage", 1, u_TranslateMessage},
      {"USER32.dll", "DispatchMessageA", 1, u_DispatchMessageA},
      {"USER32.dll", "PostMessageA", 4, u_PostMessageA},
@@ -9420,7 +9396,7 @@ index 3ae2d62..3c65848 100644
      {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
      {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileW},
      {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
-@@ -1846,6 +2171,7 @@ const ImportShim g_user32_shims[] = {
+@@ -1857,6 +2183,7 @@ const ImportShim g_user32_shims[] = {
      {"USER32.dll", "GetKeyboardType", 1, u_GetKeyboardType},
      {"USER32.dll", "GetKeyboardLayout", 1, u_GetKeyboardLayout},
      {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
@@ -9736,7 +9712,7 @@ index 0000000..22e2204
 +}
 +} // namespace user32
 diff --git a/runtime/user32_internal.h b/runtime/user32_internal.h
-index 4409399..f69e6fe 100644
+index 82e2aa4..7af71d8 100644
 --- a/runtime/user32_internal.h
 +++ b/runtime/user32_internal.h
 @@ -24,6 +24,11 @@ struct WndClass {
@@ -9779,18 +9755,15 @@ index 4409399..f69e6fe 100644
      // SetLayeredWindowAttributes: LWA_COLORKEY (1) makes every pixel of that
      // colour transparent, LWA_ALPHA (2) applies one opacity to the whole
      // window. Both are honoured where the window surfaces are composited.
-@@ -57,7 +75,9 @@ struct Window {
- 
- struct Msg {
+@@ -59,6 +77,7 @@ struct Msg {
      uint32_t hwnd, message, wparam, lparam, time, ptx, pty;
--    uint32_t thread = 0; // explicit target for windowless messages
-+    uint32_t thread = 0;             // explicit target for windowless messages
-+    bool text_pretranslated = false; // host already queued the matching character
-+    bool generated_timer = false; // SetTimer notifications follow pending paint, unlike PostMessage
+     uint32_t thread = 0;           // explicit target for windowless messages
+     bool character_posted = false; // host already supplied this key's text
++    bool generated_timer = false;  // SetTimer follows pending paint, unlike PostMessage
  };
  
  std::map<std::string, WndClass> &classes();
-@@ -94,8 +114,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
+@@ -95,8 +114,12 @@ bool destroy_window(X86 *c, uint32_t hwnd);
  void client_origin(uint32_t hwnd, int32_t *x, int32_t *y);
  void display_rect(uint32_t out);
  void alias_ansi(X86 *c, const char *name);
@@ -10507,7 +10480,7 @@ index 4b3b30d..35a675b 100644
  }
  } // namespace user32
 diff --git a/runtime/user32_vcl.cpp b/runtime/user32_vcl.cpp
-index 1c56d62..e7c4e25 100644
+index 100856b..f9465fd 100644
 --- a/runtime/user32_vcl.cpp
 +++ b/runtime/user32_vcl.cpp
 @@ -4,6 +4,8 @@
@@ -10851,28 +10824,6 @@ index 1c56d62..e7c4e25 100644
  // Menus attached to an owned window retire with it; detached menus stay caller-owned.
  void user32::forget_window_services(uint32_t hwnd) {
      Window *w = find_window(hwnd);
-@@ -1502,14 +1650,19 @@ void user32::forget_window_services(uint32_t hwnd) {
- // is the invisible application window, which does nothing with a keystroke.
- // Falls back to the active window and then to the main one, so a guest that
- // never called SetFocus is no worse off than before.
--void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam) {
-+void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam, uint32_t character) {
-     uint32_t hwnd = user32::focus;
-     if (!hwnd || !user32::find_window(hwnd))
-         hwnd = user32::active;
-     if (!hwnd || !user32::find_window(hwnd))
-         hwnd = host_main_window();
--    if (hwnd)
-+    if (hwnd) {
-         host_post_message(hwnd, msg, wparam, lparam);
-+        if (msg == 0x0100 && character) {
-+            user32::queue().back().text_pretranslated = true;
-+            host_post_message(hwnd, 0x0102, character, lparam);
-+        }
-+    }
- }
- 
- void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y) {
 diff --git a/runtime/user32_wide.cpp b/runtime/user32_wide.cpp
 index ff9b21d..58a6461 100644
 --- a/runtime/user32_wide.cpp
@@ -11150,7 +11101,7 @@ index ff9b21d..58a6461 100644
      W("GetKeyNameTextW", 3, key_name),
      W("GetKeyboardLayoutNameW", 1, layout_name),
 diff --git a/runtime/win32.h b/runtime/win32.h
-index c20146e..02501d5 100644
+index fb0b8ad..4a05c66 100644
 --- a/runtime/win32.h
 +++ b/runtime/win32.h
 @@ -8,6 +8,12 @@
@@ -11174,7 +11125,7 @@ index c20146e..02501d5 100644
  const std::string &win32_game_dir();
  std::string win32_executable_guest_path();
  // Guest spelling shared by shell folder APIs; creation uses the write overlay.
-@@ -356,10 +363,16 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
+@@ -356,6 +363,10 @@ void host_post_message(uint32_t hwnd, uint32_t msg, uint32_t wparam, uint32_t lp
  void host_post_mouse_message(uint32_t msg, uint32_t mk, int32_t x, int32_t y);
  // The same routed event, starting in a specific window's client pixels.
  void host_post_client_mouse_message(uint32_t hwnd, uint32_t msg, uint32_t mk, int32_t x, int32_t y);
@@ -11185,14 +11136,7 @@ index c20146e..02501d5 100644
  // Post a keyboard message to the window that has the focus, which is where
  // Windows sends one. Not the same as host_main_window: in a VCL application
  // that is the invisible application window.
--void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam);
-+// An optional host character is queued with KEYDOWN and marked so a guest
-+// TranslateMessage on the retrieved MSG does not generate a second character.
-+void host_post_key_message(uint32_t msg, uint32_t wparam, uint32_t lparam, uint32_t character = 0);
- uint32_t host_main_window(); // first created top-level HWND, or 0
- // Visible top-level form to close, following visible owners past modal dialogs.
- uint32_t host_close_target();
-@@ -369,6 +382,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
+@@ -371,6 +382,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
  // Host input is in client pixels; GetCursorPos/MSG.pt are screen pixels.
  void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y);
  void host_set_key_state(int vk, bool down); // feeds GetAsyncKeyState
@@ -12246,7 +12190,7 @@ index 43a0dc4..7eb9f9d 100644
      fprintf(stderr, "recomp: no block entry for indirect jump to 0x%08x from 0x%08x\\n",
              target, c->eip);
 diff --git a/tools/test.py b/tools/test.py
-index 2592a7d..8e7c64a 100644
+index 55c2e91..c6b41ef 100644
 --- a/tools/test.py
 +++ b/tools/test.py
 @@ -10,6 +10,7 @@ import json
@@ -12257,7 +12201,7 @@ index 2592a7d..8e7c64a 100644
  import subprocess
  import sys
  import tempfile
-@@ -61,12 +62,17 @@ def configure(preset, game_dir, build_root):
+@@ -62,12 +63,17 @@ def configure(preset, game_dir, build_root):
      return build_dir
  
  
@@ -12278,7 +12222,7 @@ index 2592a7d..8e7c64a 100644
  
  
  def mods_targets(game_dir):
-@@ -168,9 +174,13 @@ def main():
+@@ -169,9 +175,13 @@ def main():
      group.add_argument("--compile-only", action="store_true", help="Build the native test binaries only")
      parser.add_argument("--preset", default=build_py.default_preset())
      parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
@@ -12292,7 +12236,7 @@ index 2592a7d..8e7c64a 100644
      if not args.game_dir.is_absolute() or not (args.game_dir / "game.toml").is_file():
          parser.error("--game-dir must be an absolute directory holding game.toml: %s" % args.game_dir)
      cfg = build_py.game_config.load(args.game_dir)
-@@ -193,7 +203,7 @@ def main():
+@@ -194,7 +204,7 @@ def main():
          elif args.integration:
              integration(env, args.game_dir, build_root)
          elif args.native or args.compile_only:

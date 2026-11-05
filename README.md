@@ -1,7 +1,7 @@
 # Cult Recomp
 
 [Build & contribute](CONTRIBUTING.md) · [Port analysis](docs/analysis.md) ·
-[Testing](docs/testing.md) · [Changelog](CHANGELOG.md)
+[Testing](docs/testing.md) · [Browser streaming](docs/web.md) · [Changelog](CHANGELOG.md)
 
 Static recompilations of **Cult** and **Cult II: Federal Crime**, built with
 [recomp-kit](https://github.com/veritr1x/recomp-kit). Each game's x86 executable
@@ -19,7 +19,7 @@ and [NOTICE](NOTICE). This is an independent compatibility project.
 
 | Path | Contents |
 | --- | --- |
-| `kit/` | Published recomp-kit, pinned as a git submodule |
+| `kit/` | Shared recomp-kit, pinned as a git submodule |
 | `games/cult/`, `games/cult2/` | Exact-image `game.toml`, curated globals and smoke scripts |
 | `patches/recomp-kit-vb5.patch` | Remaining shared VB5/OLE/GDI source extensions |
 | `tools/` | Game input preparation and thin kit build/test entry points |
@@ -43,10 +43,11 @@ python3 -m venv .venv
 .venv/bin/python tools/apply_kit_patches.py
 ```
 
-The kit pin is `a18ccafa1e8c98002b2d3f7347b64fa655ebb018`, the merged,
-reviewed runtime/renderer/translator update. The patch is published here so no
-unpublished submodule commit is needed. Its helper validates the exact base,
-accepts an already applied patch and preserves conflicting local edits.
+The kit pin is `1cbd81ca8e6e1ef2cf33f1c27a06f69a00e64b82`, including the latest
+shared mainline and optional browser streaming. The remaining VB5/OLE/GDI
+extensions are carried in this repository's source patch. Its helper validates
+the exact base, accepts an already applied patch and preserves conflicting
+local edits. The kit and game updates are local until their commits are pushed.
 
 ## Prepare your game copies
 

@@ -38,3 +38,30 @@ hosts against stub translations through the kit build API; all 44 game-independe
 Windows native suites pass with the patch applied, including the 237 drawing
 checks. These verify source reproducibility and compatibility contracts, not
 additional real-game or device coverage.
+
+## 2026-11-05 browser streaming and shared kit refresh
+
+On Windows/Chromium 145 with hardware WebGPU, fresh streamed profiles reached
+both Cult and Cult II gameplay with the four supporting modules verified by
+the loader. Cult exposed 101 files and Cult II 100. After moving in each game,
+loading the earlier slot and saving into a second slot produced byte-identical
+54-byte Cult and 124-byte Cult II saves; the intervening moved saves differed.
+Neither streaming run copied game assets into OPFS, and neither produced a
+JavaScript exception, failed asset request or WebGPU validation error.
+
+Cult also imported its prepared installation through the normal Import folder
+control, booted with source `import`, issued zero streamed asset GETs and kept
+the existing saves. The final rebuilt Cult player was also reimported: the hub retained Ready
+after reload and Play booted source `import` with zero asset GETs. Cult II
+folder import was not separately rerun. These are
+bounded local checks, not full playthroughs or proof of browser-restart save
+persistence. Audible output and other browsers remain unverified.
+
+The real Emscripten 6.0.11 builds pass for both profiles. All 18 portable
+project tests and four focused patched-kit native suites pass. An archive of
+the final kit base accepts the source patch and its reverse check, and matches
+the active patched native/tool sources. Applying the helper again preserves
+the already applied patch. Private logs, saves and screenshots stay ignored.
+
+See [web.md](web.md) for reproducible browser commands on kit `1cbd81c`.
+Earlier platform results are historical and were not all rerun.

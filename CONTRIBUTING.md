@@ -2,7 +2,7 @@
 
 This repo holds the two Cult game profiles and their preparation/validation
 tools. Shared runtime and translator changes belong in recomp-kit. Remaining
-VB5/OLE/GDI changes are carried as a source patch against the published kit pin.
+VB5/OLE/GDI changes are carried as a source patch against the pinned shared kit.
 Keep that patch reproducible and describe its validation when changing it.
 
 ## Prerequisites
